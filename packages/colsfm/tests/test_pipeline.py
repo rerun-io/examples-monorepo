@@ -786,5 +786,5 @@ def test_the_run_layer_carries_the_run_record_it_is_given(galileo_run: PipelineS
     from colsfm.rerun_layer import DEFAULT_SOURCE, write_run_layer
 
     layer: Path = tmp_path / "colsfm.rrd"
-    write_run_layer(galileo_run.options.output_dir, layer, segment="seg", record=start_run(None).finish(DEFAULT_SOURCE, "seg"))
+    write_run_layer(galileo_run.options.output_dir, layer, segment="seg", record=start_run(None, source=Path(__file__)).finish(DEFAULT_SOURCE, "seg"))
     assert "/__properties/run_colsfm" in {str(chunk.entity_path) for chunk in rrc.RrdReader(layer).stream()}

@@ -60,6 +60,10 @@ LAYERS: tuple[str, ...] = (BASE_LAYER, GT_LAYER, SENSOR_METADATA_LAYER)
 """Common layers; register and view use each dataset's own layer declaration."""
 
 
+ENVIRONMENT: tuple[str, ...] = ("DATAFORGE_OUTPUT_ROOT", "DATAFORGE_RAW_ROOT")
+"""The environment variables these paths read."""
+
+
 def output_root() -> Path:
     """Root of the converted rrd tree; override with ``DATAFORGE_OUTPUT_ROOT``."""
     return Path(os.environ.get("DATAFORGE_OUTPUT_ROOT", "data/dataforge/rrd"))

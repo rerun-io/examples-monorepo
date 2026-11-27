@@ -40,7 +40,8 @@ def test_each_layer_keeps_its_own_record_on_the_catalog(tmp_path: Path, monkeypa
     """A segment's layers merge their property columns, so each record is its own group: both read back whole."""
     monkeypatch.setattr(sys, "argv", ["tools/apps/stage.py", "--segment", "seg", "--note", "two words"])
     # A clean checkout and a host without nvidia-smi record empty strings, which the catalog does not hand back.
-    run: RunStart = replace(start_run(_Config(segment="seg")), started=datetime.now(UTC) - timedelta(seconds=2), git_dirty_sha256="", gpu="")
+    monkeypatch.setenv("STAGE_OUTPUT_ROOT", "/data/out")
+    run: RunStart = replace(start_run(_Config(segment="seg"), source=Path(__file__), environment=("STAGE_OUTPUT_ROOT", "STAGE_UNSET")), started=datetime.now(UTC) - timedelta(seconds=2), git_dirty_sha256="", gpu="")
     records: dict[str, RunRecord] = {layer: run.finish(layer, "seg") for layer in ("base", "masks")}
     paths: list[Path] = []
     for layer, record in records.items():
@@ -60,6 +61,7 @@ def test_each_layer_keeps_its_own_record_on_the_catalog(tmp_path: Path, monkeypa
     record: RunRecord = records["masks"]
     assert record.command == "python tools/apps/stage.py --segment seg --note 'two words'"
     assert record.config == "_Config(segment='seg', stride=10)"
+    assert record.environment == "-u STAGE_UNSET STAGE_OUTPUT_ROOT=/data/out", "env words: an unset input stays unset in a replay"
     assert record.wall_s >= 2.0 and record.started_at == run.started.isoformat()
     assert len(record.git_commit) == 40 and record.process_peak_rss_mb > 0.0
 
@@ -69,11 +71,11 @@ def test_the_record_names_the_code_by_commit_and_a_hash_of_what_is_not_committed
     stage: Path = repo / "packages" / "stage"
 
     def capture() -> RunStart:
-        return start_run(None, cwd=stage)
+        return start_run(None, source=stage / "code.py")
 
     clean: RunStart = capture()
     assert clean.git_commit == _git(repo, "rev-parse", "HEAD") and clean.git_dirty_sha256 == ""
-    assert clean.cwd == "packages/stage" and len(clean.pixi_lock_sha256) == 64
+    assert len(clean.pixi_lock_sha256) == 64
     (stage / "code.py").write_text("x = 2\n")
     edited: str = capture().git_dirty_sha256
     (stage / "new.py").write_text("y = 1\n")
@@ -85,8 +87,46 @@ def test_the_record_names_the_code_by_commit_and_a_hash_of_what_is_not_committed
 def test_the_identity_is_the_code_the_run_started_with_not_the_checkout_at_the_end(tmp_path: Path) -> None:
     """A checkout edited or moved on during a long run must not be named as the code that produced the layer."""
     repo: Path = _repo(tmp_path)
-    run: RunStart = start_run(None, cwd=repo / "packages" / "stage")
+    run: RunStart = start_run(None, source=repo / "packages" / "stage" / "code.py")
     (repo / "packages" / "stage" / "code.py").write_text("x = 3\n")
     _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "later")
     record: RunRecord = run.finish("layer", "seg")
     assert (record.git_commit, record.git_dirty_sha256) == (run.git_commit, "") and record.git_commit != _git(repo, "rev-parse", "HEAD")
+
+
+def test_the_code_is_the_stage_sources_not_the_working_directorys(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stage run from inside another checkout names the code it ran, and records where it ran apart from it."""
+    repo: Path = _repo(tmp_path)
+    other: Path = tmp_path / "other"
+    other.mkdir()
+    _git(other, "init", "-q")
+    monkeypatch.chdir(other)
+    run: RunStart = start_run(None, source=repo / "packages" / "stage" / "code.py")
+    assert run.git_commit == _git(repo, "rev-parse", "HEAD") and len(run.pixi_lock_sha256) == 64
+    assert run.cwd == str(other.resolve())
+    monkeypatch.chdir(repo / "packages" / "stage")
+    assert start_run(None, source=repo / "packages" / "stage" / "code.py").cwd == "packages/stage"
+
+
+def test_an_untracked_link_is_hashed_by_its_target_not_followed(tmp_path: Path) -> None:
+    """A link to a dataset directory, or a dangling one, must not stop the run; its target text is what changed."""
+    repo: Path = _repo(tmp_path)
+    source: Path = repo / "packages" / "stage" / "code.py"
+    (tmp_path / "data").mkdir()
+    (repo / "data").symlink_to(tmp_path / "data")
+    (repo / "gone").symlink_to(tmp_path / "missing")
+    first: str = start_run(None, source=source).git_dirty_sha256
+    (repo / "gone").unlink()
+    (repo / "gone").symlink_to(tmp_path / "elsewhere")
+    assert first != "" and start_run(None, source=source).git_dirty_sha256 != first
+
+
+def test_a_file_and_a_link_with_the_same_bytes_hash_apart(tmp_path: Path) -> None:
+    """The entry type is part of the dirty hash: a file holding ``labels-v2.txt`` is not a link to it."""
+    repo: Path = _repo(tmp_path)
+    source: Path = repo / "packages" / "stage" / "code.py"
+    (repo / "labels.txt").write_text("labels-v2.txt")
+    as_file: str = start_run(None, source=source).git_dirty_sha256
+    (repo / "labels.txt").unlink()
+    (repo / "labels.txt").symlink_to("labels-v2.txt")
+    assert start_run(None, source=source).git_dirty_sha256 != as_file

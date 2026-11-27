@@ -89,6 +89,18 @@ def test_every_layer_carries_the_run_record_of_the_conversion_that_wrote_it(outp
         assert record["started_at"] == dataset.timer.started_at and record["config"] == repr(dataset.config)
 
 
+def test_a_reused_dataset_records_each_conversions_own_identity(output_root: Path, tmp_path: Path) -> None:
+    """Outside the convert command the record is taken per layer, never kept: a changed config shows in the next run."""
+    dataset = ToyDataset(ToyConfig(root=tmp_path / "raw"))
+    base: Path = output_root / paths.BASE_LAYER / f"{IDENTITY.recording_id}.rrd"
+    dataset.convert(IDENTITY, None, force=False)
+    first: object = recording_properties(read_back(base), f"run_{paths.BASE_LAYER}")["config"]
+    dataset.config.root = tmp_path / "raw-moved"
+    dataset.convert(IDENTITY, None, force=True)
+    second: object = recording_properties(read_back(base), f"run_{paths.BASE_LAYER}")["config"]
+    assert first != second and second == repr(dataset.config)
+
+
 def test_a_published_layer_is_pending_again_only_under_force(output_root: Path, tmp_path: Path) -> None:
     dataset = ToyDataset(ToyConfig(root=tmp_path / "raw"))
     dataset.convert(IDENTITY, None, force=False)
@@ -114,3 +126,15 @@ def test_pending_layers_without_a_writer_need_together(output_root: Path, tmp_pa
 def test_output_beneath_the_raw_root_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(dataset_defaults, "toy", ToyConfig())
     assert_raw_root_guarded("toy", None, tmp_path, monkeypatch)
+
+
+def test_a_conversion_records_every_environment_input_it_reads(output_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The roots and the encoder's ffmpeg and session count change what a conversion does; a replay needs them."""
+    monkeypatch.setenv("DATAFORGE_FFMPEG", "/opt/ffmpeg-nvenc/bin/ffmpeg")
+    monkeypatch.delenv("DATAFORGE_NVENC_SLOTS", raising=False)
+    monkeypatch.delenv("DATAFORGE_RAW_ROOT", raising=False)
+    ToyDataset(ToyConfig(root=tmp_path / "raw")).convert(IDENTITY, None, force=False)
+    record = recording_properties(read_back(output_root / paths.BASE_LAYER / f"{IDENTITY.recording_id}.rrd"), f"run_{paths.BASE_LAYER}")
+    words: list[str] = str(record["environment"]).split()
+    assert f"DATAFORGE_OUTPUT_ROOT={output_root}" in words and "DATAFORGE_FFMPEG=/opt/ffmpeg-nvenc/bin/ffmpeg" in words
+    assert {"DATAFORGE_RAW_ROOT", "DATAFORGE_NVENC_SLOTS"} <= {words[i + 1] for i, word in enumerate(words) if word == "-u"}

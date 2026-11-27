@@ -37,6 +37,13 @@ import av
 from dataforge import paths
 from dataforge.timing import SequenceTimer
 
+FFMPEG_ENV: str = "DATAFORGE_FFMPEG"
+"""Names the ffmpeg binary to encode with, before ``PATH``."""
+NVENC_SLOTS_ENV: str = "DATAFORGE_NVENC_SLOTS"
+"""Caps the encoder sessions open at once (the GPU driver's limit)."""
+ENVIRONMENT: tuple[str, ...] = (FFMPEG_ENV, NVENC_SLOTS_ENV)
+"""The environment variables the encoder reads."""
+
 AV1_CQ: int = 36
 """Port-wide AV1 NVENC quality (binding brief). Selected on RTX 5090 with SHOW3D: CQ36 is
 the smallest tested output above 40 dB median.
@@ -213,7 +220,7 @@ class FrameSource:
 
 def resolve_ffmpeg() -> Path:
     """Locate the ffmpeg to encode with: ``DATAFORGE_FFMPEG`` first, then ``PATH``."""
-    override: str | None = os.environ.get("DATAFORGE_FFMPEG")
+    override: str | None = os.environ.get(FFMPEG_ENV)
     if override:
         return Path(override)
     found: str | None = shutil.which("ffmpeg")
@@ -247,7 +254,7 @@ NVENC_SLOT_DIR: Path = Path("/tmp/dataforge-nvenc")
 
 def nvenc_slot_count() -> int:
     """Read the shared encoder capacity, rejecting invalid settings."""
-    value: str = os.environ.get("DATAFORGE_NVENC_SLOTS", "6")
+    value: str = os.environ.get(NVENC_SLOTS_ENV, "6")
     try:
         slots: int = int(value)
     except ValueError:
