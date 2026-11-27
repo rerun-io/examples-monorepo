@@ -79,6 +79,23 @@ def test_the_gba_keyframe_poses_go_into_the_layer_on_video_time(tmp_path: Path, 
     assert GBA_RIG_ENTITY not in read_rows(tmp_path / "plain.rrd")
 
 
+def test_a_one_pose_run_still_reaches_the_layer(tmp_path: Path, read_rows: RowsReader, run: SegmentRun) -> None:
+    """A short probe that ends just after initialization has one pose; its CSV kept it, so the layer keeps it and the clock offset."""
+    last: Trajectory = Trajectory(t_ns=run.estimate.t_ns[1:].copy(), position_m=run.estimate.position_m[1:].copy(), quaternion_wxyz=run.estimate.quaternion_wxyz[1:].copy())
+    one: SegmentRun = replace(run, estimate=last, framesets=1)
+    path: Path = tmp_path / "one.rrd"
+    with atomic_recording(path, application_id="dataforge", recording_id="session", send_properties=False) as rec:
+        catalog_layer.log_layer(rec, one, clock_offset_ns=7_014_902_432, profile="fast", backend="cpu", strict=False)
+    rows: Rows = read_rows(path)
+    for root in ("/world/runs/slam_rs", "/world/runs/slam_rs_vio"):
+        assert [row.t_ns for row in rows[f"{root}/rig"]] == [2_000_000_000]
+    offsets: list[object] = [
+        batch.column("export_to_video_time_offset_ns").to_pylist() for chunk in rrc.RrdReader(path).stream().filter(content="/world/runs/slam_rs").to_chunks()
+        if "export_to_video_time_offset_ns" in (batch := chunk.to_record_batch()).schema.names
+    ]
+    assert offsets == [[[7_014_902_432]]]
+
+
 def test_layer_leaves_the_base_rig_and_its_sensors_to_the_dataset(tmp_path: Path, run: SegmentRun) -> None:
     """The ground-truth layer owns ``/world/rig_00``: the result writes only under its two runs, no camera or IMU static."""
     path: Path = tmp_path / "result.rrd"

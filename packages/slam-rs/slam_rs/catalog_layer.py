@@ -195,8 +195,8 @@ def log_layer(
     final: Trajectory = run.estimate if run.final is None else run.final
     if not np.array_equal(final.t_ns, run.estimate.t_ns):
         raise ValueError("the final trajectory must have the raw VIO's timestamps")
-    if len(run.estimate) < 2:
-        print(f"{len(run.estimate)} poses: no path to draw")
+    if len(run.estimate) == 0:
+        print("no poses: nothing to write")
         return
     positions: Float64[ndarray, "n 3"] = final.position_m
     rotations: Float64[ndarray, "n 4"] = final.xyzw()[:, 3:7]
