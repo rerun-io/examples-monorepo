@@ -25,7 +25,7 @@ from slam_rs.trajectory import AteResult, Trajectory, ate, coverage, empty_traje
 from slam_rs.vio_log import vio_blueprint
 
 OUTPUT_NAME: str = "slam_rs_vio.csv"
-"""The probe's trajectory file: the raw causal VIO, under the name the scoring pair gives it (``slam_rs.csv`` is the final run)."""
+"""The probe's trajectory file: the raw causal VIO, under the name the scoring pair gives it (the Rust ``slam-rs-cli`` writes the final run as ``slam_rs.csv``)."""
 
 
 @dataclass(slots=True)

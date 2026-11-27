@@ -3,7 +3,8 @@
 The run and its layer are the catalog layer's (:func:`slam_rs.catalog_layer.track_layer`): one driver, one writer of
 every entity. What this tool adds is where the layer goes (``RerunTyroConfig``: a viewer, a file, both), the knobs of an
 experiment and the ATE against the ground truth. The trajectories are in the layer (``/world/runs/slam_rs``,
-``/world/runs/slam_rs_vio``); nothing is written beside it.
+``/world/runs/slam_rs_vio``); nothing is written beside it, so a headless run keeps its trajectories only with
+``--rr-config.save``.
 """
 
 import dataclasses
@@ -108,7 +109,7 @@ class Config:
 
 
 def main(config: Config) -> None:
-    """Replay one segment, log its layer, write the trajectories and report the error.
+    """Replay one segment, log its layer and report the error.
 
     Args:
         config: Parsed CLI options.

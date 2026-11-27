@@ -44,8 +44,9 @@ class Config:
     """``full``: the layer also holds what the run saw frameset by frameset (keypoints, window, landmarks, map, counters),
     from the same single run; ``poses``: both runs' paths alone."""
     mask_entity: str | None = None
-    """Each fed camera's mask entity under its ``pinhole`` (e.g. ``people_mask``), read from a layer of the segment:
-    keypoints on nonzero mask pixels are dropped (``slam_rs.frame_masks``). None tracks every pixel."""
+    """Segmentation masks, read from a layer of the segment: the name of each camera's mask entity under its ``pinhole``
+    (e.g. ``people_mask`` reads ``<camera>/pinhole/people_mask``). The frontend neither detects nor keeps tracks where a
+    camera's latest mask at or before its frame is nonzero (``slam_rs.frame_masks``). None tracks every pixel."""
 
 
 def main(config: Config) -> None:

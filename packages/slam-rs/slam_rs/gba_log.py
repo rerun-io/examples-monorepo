@@ -1,4 +1,4 @@
-"""The global BA's Rerun layer and trajectory (PR d2): what :meth:`slam_rs._core.Vio.finish_map` returns, drawn beside the raw VIO.
+"""The global BA's Rerun layer (PR d2): what :meth:`slam_rs._core.Vio.finish_map` returns, drawn beside the raw VIO.
 
 The raw VIO stays where it is (``/world/runs/slam_rs/{rig,trajectory,path}``); the GBA-corrected keyframes go to their own
 entities under the same run, so its alignment transform places both in the dataset's world. The LM attempts go to
@@ -13,7 +13,6 @@ from numpy import ndarray
 from slam_rs import _core
 from slam_rs.columns import ColumnLog
 from slam_rs.map_loops import RUN_ENTITY
-from slam_rs.trajectory import Trajectory
 
 GBA_KEYFRAMES_ENTITY: str = f"{RUN_ENTITY}/gba/keyframes"
 """The map keyframes after the global BA, one point each."""
@@ -29,20 +28,6 @@ GBA_KEYFRAME_RADIUS_M: float = 0.012
 """Radius of a GBA-corrected keyframe, metres."""
 GBA_PATH_RADIUS_M: float = 0.004
 """Stroke of the GBA keyframes' path, metres."""
-
-
-def keyframe_trajectory(result: _core.MapResult, *, after_gba: bool) -> Trajectory:
-    """The map keyframes as a trajectory, on the clock ``track`` was given.
-
-    Args:
-        result: What :meth:`slam_rs._core.Vio.finish_map` returned.
-        after_gba: The poses after the global BA, or the map's before it (after loops and PGO: the +LC keyframes).
-
-    Returns:
-        One pose per map keyframe, oldest first, quaternions w-first.
-    """
-    poses: Float64[ndarray, "k 7"] = result.keyframe_poses if after_gba else result.keyframe_poses_before_gba
-    return Trajectory.from_xyzw(result.keyframe_t_ns, poses)
 
 
 def log_map_result(result: _core.MapResult, columns: ColumnLog, t_ns: int) -> None:

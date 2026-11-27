@@ -13,6 +13,7 @@ import rerun.chunk as rrc
 from dataforge import schema
 from fixture_types import Rows, RowsReader
 from rerun.catalog import DatasetEntry
+from simplecv.catalog_layers import atomic_recording
 from simplecv.rerun_walk_path import TRAIL, TRAJECTORY
 
 from slam_rs import catalog_layer
@@ -199,6 +200,22 @@ def test_explained_boundary_drop_is_written(
     assert len(drop_batches) == 1
     assert drop_batches[0].column("t_ns").to_pylist() == [[stamp]]
     assert drop_batches[0].column("reasons").to_pylist() == [[reason]]
+
+
+@pytest.mark.parametrize("masks", [(), ("/world/rig_00/cam_00/pinhole/people_mask", "/world/rig_00/cam_01/pinhole/people_mask")])
+def test_the_layer_records_the_masks_its_run_tracked_with(tmp_path: Path, run: SegmentRun, masks: tuple[str, ...]) -> None:
+    """A masked run replaces an unmasked one under the same layer name, so the run's metadata says which it was."""
+    output: Path = tmp_path / "masks.rrd"
+    with atomic_recording(output, application_id="dataforge", recording_id="session", send_properties=False) as rec:
+        catalog_layer.log_layer(rec, run, clock_offset_ns=0, profile="fast", backend="cpu", mask_entities=masks)
+    batches: list[pa.RecordBatch] = [
+        batch for chunk in rrc.RrdReader(output).stream().filter(content="/world/runs/slam_rs").to_chunks()
+        if "masked" in (batch := chunk.to_record_batch()).schema.names
+    ]
+    assert len(batches) == 1
+    assert batches[0].column("masked").to_pylist() == [[bool(masks)]]
+    listed: list[object] = batches[0].column("mask_entities").to_pylist() if "mask_entities" in batches[0].schema.names else [None]
+    assert listed == ([list(masks)] if masks else [None])
 
 
 def test_explained_interior_gap_still_refuses_the_layer(tmp_path: Path, run: SegmentRun) -> None:
