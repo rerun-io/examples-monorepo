@@ -1,6 +1,7 @@
 //! Opt-in headless frame timing. Includes UI, compute, composite, and GPU completion;
-//! excludes screenshot readback. The production viewer keeps one hook for it: a process-wide count of
-//! encoded splat frames (`gsplat_viewer::compute_encoded_frames`).
+//! excludes screenshot readback. The production viewer keeps two hooks for it: process-wide counts of
+//! encoded splat frames (`gsplat_viewer::compute_encoded_frames`) and of frames a capacity or capability
+//! fallback drew instead (`gsplat_viewer::fallback_drawn_frames`).
 //! With `--frames-in-flight` the probe queues frames like a swapchain instead of waiting for each one,
 //! so `encoded_frames` shows how many UI frames encoded a new splat image.
 //! Splat frames per second: `encoded_frames / measured_wall_seconds` (both cover the measured frames).
@@ -69,6 +70,9 @@ struct Report<'a> {
     /// that encode a new splat image (the others show the previous one). A frame counts when it is
     /// encoded, also one that overflows its intersection capacity and keeps the previous image.
     encoded_frames: u64,
+    /// Entity frames a capacity or capability fallback drew during the measured frames instead of the
+    /// compute renderer; nonzero means the timings measure the fallback.
+    fallback_frames: u64,
     /// Wall time from the end of the last warmup frame to the end of the last measured frame; unlike
     /// the sum of `frames[].ms` it includes the time between frames.
     measured_wall_seconds: f64,
@@ -77,7 +81,7 @@ struct Report<'a> {
     gpu_bytes_views: u64,
     /// 3D views that published an eye in the last frame (the timing camera is the first one).
     views: usize,
-    /// Seconds from the start of `gsplat probe` to the end of the first UI frame that encoded a splat frame.
+    /// Seconds from the start of `gsplat probe` to the end of the first UI frame that drew splats (encoded or fallback).
     first_splat_frame_seconds: f64,
     /// Peak resident set size of the process (Linux `VmHWM`), at the end of the run.
     peak_rss_bytes: Option<u64>,
@@ -109,6 +113,7 @@ pub struct FrameProbe {
     frames_in_flight: usize,
     submitted: std::collections::VecDeque<wgpu::SubmissionIndex>,
     encoded_at_start: u64,
+    fallback_at_start: u64,
     measured_from: Instant,
     splats_seen: bool,
     process_start: Instant,
@@ -150,6 +155,7 @@ impl FrameProbe {
             frames_in_flight,
             submitted: std::collections::VecDeque::new(),
             encoded_at_start: 0,
+            fallback_at_start: 0,
             measured_from: Instant::now(),
             splats_seen: false,
             process_start,
@@ -224,9 +230,10 @@ impl FrameProbe {
         let ms = self.started.elapsed().as_secs_f64() * 1000.0;
         // Read after egui's paint callbacks, which encode this frame's splats.
         let encoded_frames = gsplat_viewer::compute_encoded_frames();
+        let fallback_frames = gsplat_viewer::fallback_drawn_frames();
         // The warm-up clock restarts at the first splat frame: a large scene loads for seconds with cheap
         // UI-only frames, and a desktop GPU needs that long under load to settle its clock.
-        if !self.splats_seen && encoded_frames > 0 {
+        if !self.splats_seen && encoded_frames + fallback_frames > 0 {
             self.splats_seen = true;
             self.first_splat_frame_seconds = self.process_start.elapsed().as_secs_f64();
             self.warmup_ms = 0.0;
@@ -242,6 +249,7 @@ impl FrameProbe {
             self.warmup += 1;
             self.warmup_ms += ms;
             self.encoded_at_start = encoded_frames;
+            self.fallback_at_start = fallback_frames;
             self.measured_from = Instant::now();
             return Ok(false);
         }
@@ -277,7 +285,7 @@ impl FrameProbe {
         );
         anyhow::ensure!(
             self.splats_seen,
-            "no splat frame was encoded: the measured frames drew only the UI"
+            "no splat frame was drawn: the measured frames drew only the UI"
         );
         // With frames in flight a frame waits for an older submission, so its ms is the steady-state frame
         // interval, not one frame's latency.
@@ -301,6 +309,7 @@ impl FrameProbe {
             msaa_samples,
             frames_in_flight: self.frames_in_flight,
             encoded_frames: encoded_frames - self.encoded_at_start,
+            fallback_frames: fallback_frames - self.fallback_at_start,
             measured_wall_seconds: self.measured_from.elapsed().as_secs_f64(),
             gpu_bytes_scene: gpu_bytes[0],
             gpu_bytes_views: gpu_bytes[1],
