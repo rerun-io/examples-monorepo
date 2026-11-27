@@ -21,6 +21,7 @@ from slam_rs.apis import catalog_layer as catalog_layer_api
 from slam_rs.catalog_feed import CatalogSegment
 from slam_rs.catalog_layer import write_layer
 from slam_rs.follow_frame import follow_entity
+from slam_rs.gba_log import GBA_RIG_ENTITY
 from slam_rs.tracking import DroppedFrameset, DropReason, SegmentRun
 from slam_rs.trajectory import Trajectory, empty_trajectory
 
@@ -61,6 +62,21 @@ def test_the_final_run_is_the_re_anchored_trajectory_and_the_raw_run_the_vio(tmp
     assert rows["/world/rig_00"] == rows["/world/runs/slam_rs/rig"]
     with pytest.raises(ValueError, match="timestamps"):
         write_layer(tmp_path / "bad.rrd", "session", replace(run, final=replace(final, t_ns=final.t_ns + 1)), clock_offset_ns=0, profile="fast", backend="cpu")
+
+
+def test_the_gba_keyframe_poses_go_into_the_layer_on_video_time(tmp_path: Path, read_rows: RowsReader, run: SegmentRun) -> None:
+    """What the replay's ``_gba_keyframes.csv`` held (t_ns, position, quaternion) is a Transform3D under the run's ``gba``."""
+    keyframes: Trajectory = Trajectory(
+        t_ns=run.estimate.t_ns[1:].copy(), position_m=np.array([[1.0, 2.0, 2.5]]), quaternion_wxyz=np.array([[0.0, 1.0, 0.0, 0.0]]),
+    )
+    path: Path = tmp_path / "gba.rrd"
+    write_layer(path, "session", replace(run, gba_keyframes=keyframes), clock_offset_ns=7_014_902_432, profile="fast", backend="cpu")
+    rows: Rows = read_rows(path)
+    assert [row.t_ns for row in rows[GBA_RIG_ENTITY]] == [2_000_000_000]
+    np.testing.assert_allclose(rows[GBA_RIG_ENTITY][0].values["Transform3D:translation"], [[1, 2, 2.5]])
+    np.testing.assert_allclose(rows[GBA_RIG_ENTITY][0].values["Transform3D:quaternion"], [[1, 0, 0, 0]])
+    write_layer(tmp_path / "plain.rrd", "session", run, clock_offset_ns=0, profile="fast", backend="cpu")
+    assert GBA_RIG_ENTITY not in read_rows(tmp_path / "plain.rrd")
 
 
 def test_layer_leaves_the_base_rig_and_its_sensors_to_the_dataset(tmp_path: Path, run: SegmentRun) -> None:

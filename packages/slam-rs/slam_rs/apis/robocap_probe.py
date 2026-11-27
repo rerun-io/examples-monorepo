@@ -21,11 +21,8 @@ from slam_rs.catalog_layer import LayerDetail, LayerRun, track_layer
 from slam_rs.config import SlamConfig, load_slam_config
 from slam_rs.reference import Benchmarks, RobocapSession, load_benchmarks
 from slam_rs.tracking import SegmentRun, check_calibration_matches_recording, robocap_estimator_files
-from slam_rs.trajectory import AteResult, Trajectory, ate, coverage, empty_trajectory, read_trajectory, write_trajectory
+from slam_rs.trajectory import AteResult, Trajectory, ate, coverage, empty_trajectory, read_trajectory
 from slam_rs.vio_log import vio_blueprint
-
-OUTPUT_NAME: str = "slam_rs_vio.csv"
-"""The probe's trajectory file: the raw causal VIO, under the name the scoring pair gives it (the Rust ``slam-rs-cli`` writes the final run as ``slam_rs.csv``)."""
 
 
 @dataclass(slots=True)
@@ -49,8 +46,6 @@ class Config:
     """RoboCap session id; defaults to s15."""
     seconds: float = 0.0
     """Seconds from the first frameset; zero replays the full session."""
-    output_csv: Path | None = None
-    """Where the raw VIO trajectory is written; defaults to ``data/robocap-<session>/slam_rs_vio.csv`` (:data:`OUTPUT_NAME`)."""
     detail: LayerDetail = "full"
     """What the layer holds (:data:`slam_rs.catalog_layer.LayerDetail`): ``poses`` measures the estimator with the paths alone."""
     window_s: float = 30.0
@@ -58,7 +53,7 @@ class Config:
 
 
 def main(config: Config) -> None:
-    """Replay one RoboCap session, log it, write the trajectory and report the agreement.
+    """Replay one RoboCap session into its layer (both runs' poses in the recording) and report the agreement.
 
     Args:
         config: Parsed CLI options.
@@ -68,7 +63,6 @@ def main(config: Config) -> None:
     session: RobocapSession = benchmarks.robocap.session(config.session)
     if not benchmarks.robocap.is_listed(config.session):
         print(f"{config.session} is not in benchmarks.toml: replaying it from the catalog with no regression reference")
-    output_csv: Path = config.output_csv if config.output_csv is not None else Path("data") / f"robocap-{session.session_id}" / OUTPUT_NAME
     calibration: _core.Calibration
     flow_config: _core.VioConfig
     config_text: str
@@ -123,17 +117,13 @@ def main(config: Config) -> None:
         print(f"Vio.track median {run.median_tracker_ms:.2f} ms")
         if layer.stage is not None:
             print(layer.stage.summary())
-        # What the recording says its own clock is, not what this tool assumes:
-        # zero here, `capture_start_time_ns` on MSD, and one rule for both tools.
-        video_time_offset_ns: int = feed.video_time_offset_ns
 
     # The feed's own in-process catalog server is what the `with` holds, and
-    # nothing below reads a frameset: the export and the ATE happen with it shut.
+    # nothing below reads a frameset: the ATE happens with it shut.
     if run.uncovered():
         raise SystemExit(f"{run.uncovered()} framesets never got the inertial samples that cover them")
     estimate: Trajectory = run.estimate
-    write_trajectory(output_csv, estimate, video_time_offset_ns=video_time_offset_ns)
-    print(f"{len(estimate)} tracked poses (raw VIO) -> {output_csv} (absolute device clock)")
+    print(f"{len(estimate)} tracked poses (raw VIO, /world/runs/slam_rs_vio in the recording)")
     if len(estimate) == 0:
         print("no ATE: the estimator reported no tracked pose")
         return

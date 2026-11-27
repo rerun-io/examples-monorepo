@@ -24,6 +24,7 @@ from slam_rs.catalog_feed import RIG_ENTITY, TIMELINE, CameraCalib, SegmentFeed
 from slam_rs.columns import ColumnLog
 from slam_rs.config import config_text_sha256
 from slam_rs.follow_frame import follow_entity, follow_yaw, yaw_quaternion_xyzw
+from slam_rs.gba_log import GBA_RIG_ENTITY
 from slam_rs.tracking import Lockstep, SegmentRun, drive
 from slam_rs.trajectory import Trajectory, shift_clock
 from slam_rs.vio_log import COLOR_DOWNSCALE, VioLogger, VioStage, dataset_videos, log_rig
@@ -154,9 +155,10 @@ def log_layer(
 ) -> None:
     """Write both runs' poses on base video time, and the run's metadata, into the layer's recording.
 
-    This is the one writer of the two runs' rig, follow frame, trail, whole path and endpoints, for the catalog layer
-    and the replay alike; what a run adds frameset by frameset (keypoints, window, landmarks, map, counters) is
-    :class:`slam_rs.vio_log.VioLogger`'s, in the same recording.
+    This is the one writer of the two runs' rig, follow frame, trail, whole path and endpoints, and of the rig at each
+    GBA-corrected keyframe (:data:`slam_rs.gba_log.GBA_RIG_ENTITY`), for the catalog layer and the replay alike; what a
+    run adds frameset by frameset (keypoints, window, landmarks, map, counters) is :class:`slam_rs.vio_log.VioLogger`'s,
+    in the same recording.
 
     ``clock_offset_ns`` is the feed's export offset plus camera-to-IMU offset. Explicit initialization and terminal IMU
     drops are recorded. Unexplained losses, interior gaps and non-finite runs cannot replace an existing result with
@@ -213,6 +215,11 @@ def log_layer(
         rec.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
     _log_run(rec, POSE_SOURCE, times, positions, rotations, gradient)
     _log_run(rec, VIO_SOURCE, times, raw_positions, raw_rotations, gradient, lenses)
+    if run.gba_keyframes is not None and len(run.gba_keyframes):
+        keyframe_times: Int64[ndarray, " k"] = shift_clock(run.gba_keyframes, -clock_offset_ns).t_ns
+        rec.send_columns(GBA_RIG_ENTITY, indexes=[rr.TimeColumn(TIMELINE, duration=keyframe_times.astype("timedelta64[ns]"))],
+                         columns=rr.Transform3D.columns(translation=run.gba_keyframes.position_m, quaternion=run.gba_keyframes.xyzw()[:, 3:7]))
+        rec.log(GBA_RIG_ENTITY, rr.TransformAxes3D(RIG_AXIS_LENGTH_M), static=True)
     if animate_base_rig:
         rec.send_columns(RIG_ENTITY, indexes=[rr.TimeColumn(TIMELINE, duration=times.astype("timedelta64[ns]"))],
                          columns=rr.Transform3D.columns(translation=positions, quaternion=rotations))
