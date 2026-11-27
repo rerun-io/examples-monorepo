@@ -19,6 +19,7 @@ the synthetic view are upright); lens 1 enters through its rotation relative to 
 scene at infinity, as in a stitched panorama).
 """
 
+import os
 import time
 from collections.abc import Iterator
 from contextlib import nullcontext
@@ -225,7 +226,13 @@ def write_masks(config: LensMasksConfig, dataset: DatasetEntry, segment_id: str,
     if Path(segment_id).name != segment_id:
         raise ValueError(f"segment id {segment_id!r} must not contain path separators")
     output: Path = config.output_dir.resolve() / f"{segment_id}.rrd"
+    # The atomic write replaces whatever file is at ``output``; a link to an input counts as the input.
+    inputs: list[Path] = [path for path in (config.rrd, config.cube_rrd) if path is not None and path.exists()]
+    if output.exists() and any(os.path.samefile(output, path) for path in inputs):
+        raise ValueError(f"{output} is an input recording: the mask layer would replace it; pass another --output-dir")
     sources, cam0_R_rig = read_lens_sources(dataset, segment_id, config.cameras, config.mask_downscale)
+    if config.people_tracks and any(s.mask_scale != (config.mask_downscale, config.mask_downscale) for s in sources):
+        raise ValueError(f"mask_downscale {config.mask_downscale} does not divide the lenses {[s.image_hw for s in sources]}")
     print(", ".join(f"lens {s.image_hw} -> mask {s.mask_hw}" for s in sources))
     device: torch.device = torch.device(config.masker.device)
     entities: list[str] = [f"{camera}/pinhole/video" for camera in config.cameras]
@@ -314,8 +321,6 @@ def write_masks(config: LensMasksConfig, dataset: DatasetEntry, segment_id: str,
 
     targets: list[str] = [f"{camera}/pinhole/{MASK_NAME}" for camera in config.cameras]
     people: FacePeople | None = FacePeople(config.people, masker) if config.people.enabled else None
-    if config.people_tracks and any(s.mask_scale != (config.mask_downscale, config.mask_downscale) for s in sources):
-        raise ValueError(f"mask_downscale {config.mask_downscale} does not divide the lenses {[s.image_hw for s in sources]}")
     if debug is not None:
         debug.log("synthetic/mask", rr.AnnotationContext([(0, "keep", (0, 0, 0, 0)), (MASKED_CLASS_ID, "operator", (255, 0, 0, 160))]), static=True)
         debug.log("people", rr.AnnotationContext([(0, "keep", (0, 0, 0, 0)), (MASKED_CLASS_ID, "bystander", (255, 200, 0, 160))]), static=True)
