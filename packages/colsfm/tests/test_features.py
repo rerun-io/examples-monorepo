@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import importlib.util
+import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -180,6 +183,34 @@ def test_only_selected_keyframes_reach_the_extractor(
     with pycolmap.Database.open(database_path) as database:
         assert database.num_images() == 6
         assert database.num_frames() == 1
+
+
+def test_cuda_extraction_survives_onnxruntime_imported_after_colsfm(galileo_input: FramesMeta, galileo_input_dir: Path, tmp_path: Path) -> None:
+    """The env also installs PyPI onnxruntime-gpu; importing it before COLMAP's first CUDA session used to segfault there.
+
+    A fresh process, because which ONNX Runtime build loaded its provider bridge first is process state: in one pytest
+    run, collecting `test_flexglue_trt.py` imported onnxruntime, and the first extraction after it crashed.
+    """
+    if importlib.util.find_spec("onnxruntime") is None:
+        pytest.skip("needs the PyPI onnxruntime package next to pycolmap's ONNX Runtime")
+    if resolve_device("auto") != "cuda":
+        pytest.skip("needs COLMAP's CUDA provider: a CUDA build of pycolmap, a CUDA device and cuDNN")
+    keyframe = galileo_input.keyframes[0]
+    database_path: Path = tmp_path / "one.db"
+    create_database(database_path, galileo_input.filtered([keyframe.keyframe_id]))
+    script: str = (
+        "import sys; from pathlib import Path; import colsfm.features as features; import onnxruntime; "
+        "features.extract_features(Path(sys.argv[1]), Path(sys.argv[2]), [sys.argv[3]], "
+        f"features.FeatureOptions(device='cuda', max_image_size={FAST_IMAGE_SIZE}, max_num_features=256))"
+    )
+    child = subprocess.run(
+        [sys.executable, "-c", script, str(database_path), str(galileo_input_dir), keyframe.image_name],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=600,
+    )
+    assert child.returncode == 0, f"exit {child.returncode}: {child.stderr[-2000:]}"
 
 
 def test_extract_features_reports_a_missing_database(galileo_input_dir: Path, tmp_path: Path) -> None:
