@@ -9,7 +9,7 @@ import rerun as rr
 from rerun.catalog import CatalogClient, DatasetEntry
 
 from dataforge import paths, schema, writing
-from dataforge.datasets.robocap import RobocapConfig, RobocapDataset
+from dataforge.datasets.robocap import CAMERA_TO_IMU_OFFSET_NS, LEGACY_TIME_SHIFT_SOURCE, FactoryCalibration, RobocapConfig, RobocapDataset
 from dataforge.robocap_kalibr import CAMERA_DISPLAY_ORDER
 
 
@@ -21,10 +21,10 @@ class Config:
     """Persistent metadata-layer directory, visible at the same path to the catalog server."""
     catalog_url: str = "rerun+http://127.0.0.1:51235"
     """Existing catalog; its base and result layers remain registered."""
-    root: Path = Path("/mnt/nas/datasets/robocap")
+    root: Path = Path("/mnt/nas/ssd-8tb/datasets/robocap")
     """Corpus root containing factory calibration directories."""
     segments: tuple[str, ...] = ()
-    """Registered legacy session IDs; empty selects every RoboCap session with factory calibration."""
+    """Registered legacy session IDs; empty selects every RoboCap session with factory calibration and no factory time shift."""
 
 
 def main(config: Config) -> None:
@@ -36,21 +36,30 @@ def main(config: Config) -> None:
         print("No RoboCap sessions registered")
         return
     statics: pa.Table = (
-        entry.filter_segments(selected).filter_contents([schema.cam_path(0, index) for index in range(len(CAMERA_DISPLAY_ORDER))] + ["/__properties/**"])
+        entry.filter_segments(selected)
+        .filter_contents([schema.cam_path(0, index) for index in range(len(CAMERA_DISPLAY_ORDER))] + [schema.imu_path(0, 0), "/__properties/**"])
         .reader(index=None).to_arrow_table()
     )
     dataset: RobocapDataset = RobocapDataset(RobocapConfig(root=config.root))
-    devices: dict[str, str] = {}
+    shift_column: str = f"{schema.imu_path(0, 0)}:applied_time_shift_ns"
+    factories: dict[str, FactoryCalibration] = {}
     for segment in selected:
         parts: list[str] = segment.split("__")
         if len(parts) != 3 or parts[0] != "robocap":
             raise ValueError(f"not a legacy RoboCap session ID: {segment}")
-        if not (config.root / f"0factory-calibration-{parts[1]}").is_dir():
+        # A recording that already states a shift other than the legacy one was converted with its cap's factory shift;
+        # legacy metadata would contradict its IMU samples.
+        stated: list[object] = (
+            statics.filter(pc.field("rerun_segment_id") == segment)[shift_column].drop_null().to_pylist() if shift_column in statics.column_names else []
+        )
+        try:
+            if stated not in ([], [[-CAMERA_TO_IMU_OFFSET_NS]]):
+                raise ValueError(f"{segment}: states applied_time_shift_ns {stated}, not the legacy {-CAMERA_TO_IMU_OFFSET_NS}")
+            factories[segment] = dataset.factory_calibration(parts[1])
+        except (ValueError, FileNotFoundError) as error:
             if config.segments:
-                raise FileNotFoundError(f"{segment}: no factory calibration for device {parts[1]}")
-            print(f"skip {segment}: no factory calibration for device {parts[1]}")
-            continue
-        devices[segment] = parts[1]
+                raise
+            print(f"skip {segment}: {error}")
 
     def log(segment: str, recording: rr.RecordingStream) -> None:
         segment_statics: pa.Table = statics.filter(pc.field("rerun_segment_id") == segment)
@@ -68,7 +77,7 @@ def main(config: Config) -> None:
                 cameras[names[0][0]] = column.removesuffix(":name")
         if not cameras:
             raise ValueError(f"{segment}: no named cameras in the catalog")
-        dataset.log_sensor_metadata(recording, devices[segment], cameras)
+        dataset.log_sensor_metadata(recording, factories[segment], cameras, applied_shift_ns=CAMERA_TO_IMU_OFFSET_NS, time_shift_source=LEGACY_TIME_SHIFT_SOURCE)
 
-    outputs: list[str] = writing.write_segment_layer(entry, paths.SENSOR_METADATA_LAYER, config.output_dir, list(devices), log)
+    outputs: list[str] = writing.write_segment_layer(entry, paths.SENSOR_METADATA_LAYER, config.output_dir, list(factories), log)
     print(f"Registered sensor metadata for {len(outputs)} legacy RoboCap sessions")

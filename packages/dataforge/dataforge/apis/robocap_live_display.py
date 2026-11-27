@@ -18,7 +18,7 @@ class Config:
     """Destination recording path; must not already exist."""
     source_device: str = "f408193e6447b3b0"
     """Device identifier whose factory calibration supplies the display geometry."""
-    root: Path = Path("/mnt/nas/datasets/robocap")
+    root: Path = Path("/mnt/nas/ssd-8tb/datasets/robocap")
     """RoboCap dataset root containing factory calibration and mesh assets."""
 
 
@@ -27,7 +27,7 @@ def main(config: Config) -> None:
     if config.output.exists():
         raise FileExistsError(config.output)
     dataset: RobocapDataset = RobocapDataset(RobocapConfig(root=config.root))
-    cameras: dict[str, Fisheye62Parameters] = dataset.calibration(config.source_device)
+    cameras: dict[str, Fisheye62Parameters] = dataset.factory_calibration(config.source_device).fisheye62()
     missing_cameras: list[str] = [name for name in CAMERA_DISPLAY_ORDER if name not in cameras]
     if missing_cameras:
         raise ValueError(f"Calibration for {config.source_device} is missing cameras: {', '.join(missing_cameras)}")
