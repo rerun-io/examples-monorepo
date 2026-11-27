@@ -12,7 +12,8 @@ import av
 import rerun as rr
 from jaxtyping import UInt8
 from numpy import ndarray
-from simplecv.rerun_log_utils import log_video, read_video_stream_from_rrd
+from simplecv.rerun_log_utils import log_video
+from simplecv.testing import read_video_stream_from_rrd
 
 from posekit.apis.video_hands import as_mp4
 

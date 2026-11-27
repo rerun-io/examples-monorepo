@@ -11,7 +11,7 @@ import rerun as rr
 import rerun.chunk as rrc
 from jaxtyping import Float32, Float64, Int, Int64
 from numpy import ndarray
-from pyarrow import ChunkedArray, RecordBatch
+from pyarrow import RecordBatch
 
 from simplecv.camera_parameters import Fisheye62Parameters, PinholeParameters
 from simplecv.rerun_custom_types import (
@@ -20,7 +20,6 @@ from simplecv.rerun_custom_types import (
 from simplecv.rerun_custom_types import (
     confidence_scores_to_rgb as confidence_scores_to_rgb,
 )
-from simplecv.rrd_query_utils import RRDQuerySession, first_valid_value
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -311,64 +310,6 @@ def mp4_frame_timestamps_ns(video_path: Path) -> Int64[ndarray, "num_frames"]:
     if not times:
         raise RuntimeError(f"Mp4Reader found no frames in {video_path}")
     return np.sort(np.concatenate(times))
-
-
-def read_video_stream_from_rrd(
-    rrd_path: str, video_entity: str, timeline: str
-) -> tuple[rr.VideoCodec, ChunkedArray, ChunkedArray]:
-    """Read a ``rr.VideoStream`` entity back from an ``.rrd`` recording.
-
-    Args:
-        rrd_path: Path to the recording on disk.
-        video_entity: Entity path where ``rr.VideoStream`` was logged.
-        timeline: Timeline used as the sample index when the stream was logged.
-
-    Returns:
-        ``(codec, times, samples)``. ``codec`` is the static codec component.
-        ``times`` is the per-sample timeline column (nanoseconds). ``samples``
-        is the per-sample encoded byte column (Annex B for H.264/H.265,
-        OBU/IVF-style for AV1/VP9).
-    """
-    normalized_entity: str = video_entity.lstrip("/")
-    query_session = RRDQuerySession(Path(rrd_path))
-
-    codec_table = query_session.read_arrow(
-        contents=normalized_entity,
-        selectors=[f"{normalized_entity}:VideoStream:codec"],
-        index=None,
-    )
-    if codec_table.num_rows == 0:
-        codec_table = query_session.read_arrow(
-            contents=normalized_entity,
-            selectors=[f"{normalized_entity}:VideoStream:codec"],
-            index=timeline,
-        )
-        codec_column = codec_table.column(1) if codec_table.num_columns > 1 else codec_table.column(0)
-    else:
-        codec_column = codec_table.column(0)
-
-    if codec_table.num_rows == 0:
-        raise ValueError(f"There's no video stream codec specified at {video_entity} for timeline {timeline}.")
-
-    codec_value_raw = first_valid_value(
-        codec_column,
-        component_name=f"{normalized_entity}:VideoStream:codec",
-    )
-    codec_value: int = int(np.asarray(codec_value_raw).reshape(-1)[0])
-    codec: rr.VideoCodec = rr.VideoCodec(codec_value)
-
-    timestamps_and_samples = query_session.read_arrow(
-        contents=normalized_entity,
-        selectors=[f"{normalized_entity}:VideoStream:sample"],
-        index=timeline,
-    )
-    if timestamps_and_samples.num_rows == 0:
-        raise ValueError(f"No video samples found at {video_entity} for timeline {timeline}.")
-
-    times: ChunkedArray = timestamps_and_samples.column(0)
-    samples: ChunkedArray = timestamps_and_samples.column(1)
-
-    return codec, times, samples
 
 
 def mesh_bounding_geometry(vertices: Float64[ndarray, "n 3"]) -> tuple[Float64[ndarray, "3"], float]:

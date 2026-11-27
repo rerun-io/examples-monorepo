@@ -22,8 +22,8 @@ from simplecv.catalog_video_codec import wrap_mp4
 from simplecv.rerun_log_utils import (
     log_video,
     mp4_frame_timestamps_ns,
-    read_video_stream_from_rrd,
 )
+from simplecv.testing import read_video_stream_from_rrd
 
 _FRAME_COUNT: int = 12
 _WIDTH: int = 64
