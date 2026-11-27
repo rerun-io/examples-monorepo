@@ -152,6 +152,10 @@ class CatalogInputConfig:
     """Keypoint mask per camera: the name of a `SegmentationImage` child of each camera's `pinhole` entity (e.g.
     `people_mask` reads `<camera>/pinhole/people_mask`), on the video's stamps, nonzero = no keypoint there. Every
     selected camera must carry it at every keyframe stamp. None = no mask."""
+    calibration_entity: str | None = None
+    """Read each camera's calibration from `<calibration_entity>/<camera name>` (a calibration layer such as
+    `/world/runs/colsfm_calibrate/rig`, written by `colsfm.calibration_layer.write_calibration_layer`) instead of the segment's camera node.
+    None = the camera node's own calibration."""
 
     def __post_init__(self) -> None:
         """Check that the input names a segment and that local layers have a base.
@@ -173,6 +177,8 @@ class CatalogInputConfig:
         fields: dict[str, object] = {f.name: getattr(self, f.name) for f in dataclasses.fields(self) if f.name != "output_root"}
         if self.mask_entity is None:
             del fields["mask_entity"]  # An unset mask is not part of the spec, so unmasked snapshot names stay stable.
+        if self.calibration_entity is None:
+            del fields["calibration_entity"]  # Likewise for the recorded calibration.
         if self.rrd is None:
             del fields["rrd"], fields["layers"]  # Likewise for catalog inputs.
         else:
@@ -309,13 +315,17 @@ def _static_values(table: pa.Table, column: str) -> list[float] | list[str] | No
     return list(np.asarray(first_valid_value(values, component_name=column)).reshape(-1).tolist())
 
 
-def read_catalog_cameras(dataset: DatasetEntry, segment: str, names: Sequence[str]) -> tuple[CatalogCameraModel, ...]:
+def read_catalog_cameras(
+    dataset: DatasetEntry, segment: str, names: Sequence[str], calibration_entity: str | None = None
+) -> tuple[CatalogCameraModel, ...]:
     """Read every video camera's static calibration, keeping the named ones.
 
     Args:
         dataset: Catalog dataset.
         segment: Segment id.
         names: Camera names to keep, in any order; empty keeps all.
+        calibration_entity: Read each kept camera's calibration from `<calibration_entity>/<camera name>` instead of its
+            camera node; None reads the camera node.
 
     Returns:
         The cameras in rig / camera index order.
@@ -326,21 +336,28 @@ def read_catalog_cameras(dataset: DatasetEntry, segment: str, names: Sequence[st
     """
     layout_cameras: tuple[CatalogCamera, ...] = parse_rig_layout(catalog_components(dataset.schema())).cameras
     entities: list[str] = [camera.transform_entity for camera in layout_cameras]
-    models: dict[str, CatalogCameraCalibration] = read_camera_models(dataset, segment, entities)
     # The camera's static `name` sits on the camera node itself, outside what the calibration reader reads.
     names_table: pa.Table = dataset.filter_segments(segment).filter_contents(entities).reader(index=None).to_arrow_table()
-    cameras: list[CatalogCameraModel] = []
+    named: dict[str, str] = {}
     for camera in layout_cameras:
-        entity: str = camera.transform_entity
-        name_values = _static_values(names_table, f"{entity}:name")
-        if names and (str(name_values[0]) if name_values else camera.camera) not in names:
-            continue  # an unrequested camera (e.g. a Mei lens beside the cube faces) is never projected
-        model: CatalogCameraCalibration = models[entity]
-        projection, distortion = projection_of(entity, model.distortion)
+        name_values = _static_values(names_table, f"{camera.transform_entity}:name")
+        name: str = str(name_values[0]) if name_values else camera.camera
+        if not names or name in names:  # an unrequested camera (e.g. a Mei lens beside the cube faces) is never projected
+            named[camera.transform_entity] = name
+    if names:
+        missing: list[str] = [name for name in names if name not in named.values()]
+        if missing:
+            raise KeyError(f"{segment}: cameras {missing} not on the segment (have {sorted(named.values())})")
+    read_from: dict[str, str] = {entity: entity if calibration_entity is None else f"{calibration_entity}/{name}" for entity, name in named.items()}
+    models: dict[str, CatalogCameraCalibration] = read_camera_models(dataset, segment, list(read_from.values()))
+    cameras: list[CatalogCameraModel] = []
+    for entity, name in named.items():
+        model: CatalogCameraCalibration = models[read_from[entity]]
+        projection, distortion = projection_of(read_from[entity], model.distortion)
         cameras.append(
             CatalogCameraModel(
                 entity=entity,
-                name=str(name_values[0]) if name_values else camera.camera,
+                name=name,
                 # The node's Transform3D is cam_T_rig (logged child-from-parent); simplecv reads it as cam_T_world.
                 rig_T_cam=np.asarray(model.pinhole.extrinsics.world_T_cam, dtype=np.float64),
                 k_matrix=np.asarray(model.pinhole.intrinsics.k_matrix, dtype=np.float64),
@@ -350,12 +367,6 @@ def read_catalog_cameras(dataset: DatasetEntry, segment: str, names: Sequence[st
                 distortion=distortion,
             )
         )
-    if names:
-        by_name: dict[str, CatalogCameraModel] = {camera.name: camera for camera in cameras}
-        missing: list[str] = [name for name in names if name not in by_name]
-        if missing:
-            raise KeyError(f"{segment}: cameras {missing} not on the segment (have {sorted(by_name)})")
-        cameras = [camera for camera in cameras if camera.name in set(names)]
     return tuple(cameras)
 
 
@@ -592,7 +603,7 @@ def prepare_catalog_input(config: CatalogInputConfig, *, view_rig: bool = False)
     """
     started: float = time.perf_counter()
     dataset: DatasetEntry = CatalogClient(config.catalog_url).get_dataset(name=config.dataset)
-    cameras: tuple[CatalogCameraModel, ...] = read_catalog_cameras(dataset, config.segment, config.cameras)
+    cameras: tuple[CatalogCameraModel, ...] = read_catalog_cameras(dataset, config.segment, config.cameras, config.calibration_entity)
     if config.mask_entity is not None:
         mask_entities: set[str] = {
             component.entity_path
