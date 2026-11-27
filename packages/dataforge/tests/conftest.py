@@ -170,7 +170,7 @@ def read_back(rrd: Path) -> rrc.ChunkStore:
 
 
 def recording_properties(store: rrc.ChunkStore, group: str) -> dict[str, object]:
-    """One property group's values (``property:<group>:*``), unwrapped from their one-row lists.
+    """One property group's values (``property:<group>:*``): a one-value cell unwrapped, a list-valued one kept whole.
 
     Properties live on the static ``/__properties`` entity, off every index, so
     they need their own content-filtered read.
@@ -178,7 +178,7 @@ def recording_properties(store: rrc.ChunkStore, group: str) -> dict[str, object]
     table: pa.Table = store.reader(index=None, contents="/__properties/**").to_arrow_table()
     row: dict[str, list[object] | None] = table.to_pylist()[0]
     prefix: str = f"property:{group}:"
-    return {name.removeprefix(prefix): values[0] for name, values in row.items() if name.startswith(prefix) and values}
+    return {name.removeprefix(prefix): values[0] if len(values) == 1 else values for name, values in row.items() if name.startswith(prefix) and values}
 
 
 def static_values(store: rrc.ChunkStore, path: str) -> dict[str, object]:

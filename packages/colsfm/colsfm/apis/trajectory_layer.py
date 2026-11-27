@@ -20,7 +20,7 @@ from numpy import ndarray
 from rerun.catalog import CatalogClient
 from scipy.spatial.transform import Rotation
 
-from colsfm.catalog import DEFAULT_CATALOG_URL, DEFAULT_TIMELINE
+from colsfm.catalog import DEFAULT_CATALOG_URL, DEFAULT_TIMELINE, DEFAULT_TRAJECTORY_ENTITY
 from colsfm.frames_meta import read_frames_meta
 from colsfm.rerun_layer import log_rig_trajectory, open_layer, read_rrd_trajectory, rig_poses
 
@@ -36,7 +36,7 @@ class Config:
     """A cuSFM `frames_meta.json` whose `camera_to_world` poses are the trajectory."""
     rrd: Path | None = None
     """Or an `.rrd` holding the trajectory as a temporal `Transform3D` of `entity` on `timeline`."""
-    entity: str = "/world/runs/slam_rs/rig"
+    entity: str = DEFAULT_TRAJECTORY_ENTITY
     """The entity to read from `rrd`."""
     slam_csv: Path | None = None
     """Or a slam-rs trajectory CSV (`t_ns, p_x, p_y, p_z, q_w, q_x, q_y, q_z`, absolute device clock, its `video_time`

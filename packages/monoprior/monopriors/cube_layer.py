@@ -20,6 +20,7 @@ from numpy import ndarray
 from rerun.catalog import DatasetEntry
 from simplecv.camera_parameters import PinholeParameters
 from simplecv.catalog_calibration import read_camera_calibration
+from simplecv.catalog_layers import segment_properties
 from simplecv.catalog_video_reader import ChunkedVideoDecoder, open_decoders, select_decode_device
 from simplecv.rrd_query_utils import first_valid_value
 
@@ -27,8 +28,6 @@ from monopriors.cube_faces import CubeFace
 
 CAMERA_NODE_PATTERN: re.Pattern[str] = re.compile(r"^/world/rig_\d+/cam_\d+$")
 """Camera nodes as simplecv's catalog discovery names them."""
-FACES_COLUMN: str = "property:cube:faces"
-"""Segment-table column of the face names dataforge's cube writer records, in camera order."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,12 +68,9 @@ def read_cube_faces(layer: LayerSegment) -> tuple[CubeFace, ...]:
             if str(column.component) == "name" and CAMERA_NODE_PATTERN.match(f"/{str(column.entity_path).lstrip('/')}")
         }
     )
-    segments: pa.Table = pa.Table.from_batches(layer.dataset.segment_table().collect())
-    rows: list[dict[str, object]] = [row for row in segments.to_pylist() if row["rerun_segment_id"] == layer.segment_id]
-    listed: object = rows[0].get(FACES_COLUMN) if rows else None
-    if not isinstance(listed, list) or not listed:
-        raise ValueError(f"segment {layer.segment_id}: no {FACES_COLUMN} (a cube layer written before dataforge recorded its faces)")
-    faces: tuple[str, ...] = tuple(str(name) for name in np.asarray(listed, dtype=str).reshape(-1))
+    faces: tuple[str, ...] = tuple(str(name) for name in segment_properties(layer.dataset, layer.segment_id, "cube").get("faces", []))
+    if not faces:
+        raise ValueError(f"segment {layer.segment_id}: no property:cube:faces (a cube layer written before dataforge recorded its faces)")
     table: pa.Table = layer.dataset.filter_segments(layer.segment_id).filter_contents(entities).reader(index=None).to_arrow_table()
     names: dict[str, str] = {}
     for entity in entities:

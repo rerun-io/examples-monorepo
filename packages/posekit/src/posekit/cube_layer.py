@@ -10,16 +10,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-import pyarrow as pa
 import rerun as rr
 from rerun.catalog import DatasetEntry
+from simplecv.catalog_layers import segment_properties
 
 DEFAULT_STRIDE: int = 10
 """Frameset stride without a cube layer: dataforge's default ``cube_stride`` (10 at 30 fps = 3 Hz)."""
-STRIDE_COLUMN: str = "property:cube:stride"
-"""Segment-table column of the cube layer's stride."""
-FRAMESETS_COLUMN: str = "property:cube:framesets"
-"""Segment-table column of the number of framesets in the cube layer."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,16 +32,15 @@ def segment_cube_sampling(dataset: DatasetEntry, segment: str) -> CubeSampling |
     """The cube sampling of ``segment`` from its ``cube`` property (``None`` without a cube layer).
 
     Raises:
-        ValueError: If ``dataset`` has no segment ``segment``.
+        ValueError: If ``dataset`` has no segment ``segment``, or its stride or frameset count is not an integer.
     """
-    table: pa.Table = pa.Table.from_batches(dataset.segment_table().collect())
-    rows: list[dict[str, object]] = [row for row in table.to_pylist() if row["rerun_segment_id"] == segment]
-    if not rows:
-        raise ValueError(f"no segment {segment!r} in dataset {dataset.name!r}")
-    stride, framesets = rows[0].get(STRIDE_COLUMN), rows[0].get(FRAMESETS_COLUMN)
-    if not isinstance(stride, list) or not isinstance(framesets, list) or not stride or not framesets:
+    cube: dict[str, list[object]] = segment_properties(dataset, segment, "cube")
+    if "stride" not in cube or "framesets" not in cube:
         return None
-    return CubeSampling(int(stride[0]), int(framesets[0]))
+    stride, framesets = cube["stride"][0], cube["framesets"][0]
+    if not isinstance(stride, int) or not isinstance(framesets, int):
+        raise ValueError(f"segment {segment!r}: the cube property's stride {stride!r} and framesets {framesets!r} are not integers")
+    return CubeSampling(stride, framesets)
 
 
 def read_cube_sampling(rrd: Path, segment: str) -> CubeSampling | None:
