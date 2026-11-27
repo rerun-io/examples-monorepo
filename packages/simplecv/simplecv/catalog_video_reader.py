@@ -439,6 +439,11 @@ class _FrameBatch(Protocol):
 class _ChunkDecoder(Protocol):
     """``torchcodec``'s ``VideoDecoder``: a CPU lane that only reads packets has no torchcodec."""
 
+    @property
+    def cpu_fallback(self) -> object:
+        """Truthy once NVDEC has declined the stream and the CPU decodes it."""
+        ...
+
     def get_frames_at(self, indices: list[int]) -> _FrameBatch: ...
 
 
@@ -464,6 +469,7 @@ class ChunkedVideoDecoder:
         self.device: torch.device = device
         self.max_open: int = max_open
         self._open: OrderedDict[int, _ChunkDecoder] = OrderedDict()
+        self._fallback_said: bool = False
 
     @property
     def index(self) -> StreamIndex:
@@ -503,7 +509,12 @@ class ChunkedVideoDecoder:
         parts: list[Tensor] = []
         for chunk in np.unique(chunk_of).tolist():
             local: list[int] = (unique[chunk_of == chunk] - int(self.reader.starts[chunk, self.stream])).tolist()
-            parts.append(self._decoder(int(chunk)).get_frames_at(local).data)
+            decoder: _ChunkDecoder = self._decoder(int(chunk))
+            parts.append(decoder.get_frames_at(local).data)
+            # torchcodec decodes on the CPU by itself when NVDEC cannot (no libnvcuvid, an unsupported stream): never silently.
+            if decoder.cpu_fallback and not self._fallback_said:
+                self._fallback_said = True
+                print(f"simplecv: {self.index.entity} decodes on the CPU although {self.device} was asked for: {decoder.cpu_fallback}", flush=True)
         if not parts:
             return torch.empty((0, 3, 0, 0), dtype=torch.uint8, device=self.device)
         # colsfm's usual request, sorted within one chunk, needs no copy.

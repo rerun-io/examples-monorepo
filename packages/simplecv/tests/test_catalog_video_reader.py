@@ -2,6 +2,7 @@
 
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pyarrow as pa
@@ -346,3 +347,25 @@ def test_concurrent_misses_of_one_chunk_share_one_fetch(
         chunks: list[VideoChunk] = list(pool.map(lambda _: reader.packets(2), range(4)))
     assert calls == [2]
     assert all(chunk is chunks[0] for chunk in chunks)
+
+
+def test_a_cuda_decoder_that_falls_back_to_the_cpu_says_so_once(
+    server: rr.server.Server, index: tuple[StreamIndex, ...], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import torchcodec.decoders
+
+    class _FallingBack:
+        cpu_fallback = "NVDEC cannot decode this stream"
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def get_frames_at(self, indices: list[int]) -> SimpleNamespace:
+            return SimpleNamespace(data=torch.zeros((len(indices), 3, 2, 2), dtype=torch.uint8))
+
+    monkeypatch.setattr(torchcodec.decoders, "VideoDecoder", _FallingBack)
+    reader = CatalogVideoReader(server.client().get_dataset("test"), "segment", index, "video_time", chunk_s=0.5)
+    decoder = ChunkedVideoDecoder(reader, 0, torch.device("cuda"))
+    decoder.get_frames_at([0, 1])
+    decoder.get_frames_at([40])
+    assert capsys.readouterr().out.count("decodes on the CPU") == 1
