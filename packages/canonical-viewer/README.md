@@ -59,6 +59,19 @@ each patched crates.io crate (`PATCHED_CRATES`: wgpu with the WebGPU subgroups p
 there. The checkout sits outside `rust/` because, inside it, cargo passes re_renderer's sources as relative paths and
 re_renderer's embedded shader lookup breaks.
 
+## Rerun patches
+
+Applied in order by `tools/prepare_rerun.py` (`RERUN_PATCHES`) to the Rerun tag's checkout:
+
+| Patch | What | Drop when |
+|---|---|---|
+| `re_viewer-0.44.0-extension-hooks.patch` | the device and `App::new` hooks (native, headless, web) and the declared-fallback hook | upstream has extension hooks (Pablo wants no upstream PRs, issues or proposal drafts) |
+| `rerun-0.44.0-av1-arm64.patch` | native AV1 decoding on Linux arm64 (rerun-io/rerun#7755): `re_rav1d` 0.1.4 from a pinned git revision, whose arm64 assembly tables are hidden (the workspace's `[patch.crates-io]` gives depth-video-viewer the same `re_rav1d`) | a Rerun release fixes #7755 and `re_rav1d` 0.1.4 is on crates.io |
+
+The AV1 patch comes byte-identical from ai-demos `.github/rerun-source-build/` (main `acaa65f`), which builds the same fix
+into its `rerun-sdk` wheels. The stalled-proxy-reader patch from the same place is not in this set while a test decides it
+(Pablo, 2026-11-27).
+
 ## Tests
 
 - Rust unit tests (`canonical-viewer-rust-check`): the device-needs merge (features and limits only), unique extension

@@ -185,6 +185,9 @@ significant_drop_tightening = "allow" # An update of parking_lot made this trigg
 # The web backend maps Features::SUBGROUP to WebGPU "subgroups" (patches/wgpu-30.0.0-webgpu-subgroups.patch; native
 # backends are unchanged). tools/prepare_rerun.py prepares the tree from the verified crates.io archive.
 wgpu = { path = "../target/patch/wgpu-30.0.0" }
+# The AV1 patch's re_rav1d 0.1.4 (patches/rerun-0.44.0-av1-arm64.patch; not on crates.io yet), also for depth-video-viewer's
+# direct re_rav1d dependency, so one copy of rav1d's assembly links.
+re_rav1d = { git = "https://github.com/pablo-rerun/re_rav1d.git", rev = "dd03865f74aee68b90269ef3b4e33fbb494ffca3" }
 ecolor = { git = "https://github.com/emilk/egui.git", rev = "90431d979ab1faae2de6d9f736e9d33ca0d31956" }
 eframe = { git = "https://github.com/emilk/egui.git", rev = "90431d979ab1faae2de6d9f736e9d33ca0d31956" }
 egui = { git = "https://github.com/emilk/egui.git", rev = "90431d979ab1faae2de6d9f736e9d33ca0d31956" }

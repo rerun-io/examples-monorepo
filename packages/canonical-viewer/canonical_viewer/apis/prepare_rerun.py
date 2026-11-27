@@ -26,7 +26,12 @@ RERUN_URL: str = "https://github.com/rerun-io/rerun"
 RERUN_TAG: str = "0.44.0"
 RERUN_COMMIT: str = "f346ba2728b9f55afdfd5afdb2b976fecb98dcdd"
 """The tag's commit, checked after a fetch."""
-RERUN_PATCHES: tuple[str, ...] = ("patches/re_viewer-0.44.0-extension-hooks.patch",)
+RERUN_PATCHES: tuple[str, ...] = (
+    "patches/re_viewer-0.44.0-extension-hooks.patch",
+    # From ai-demos .github/rerun-source-build/ (main acaa65f), which builds the same fix into its rerun-sdk wheels:
+    # native AV1 decoding on Linux arm64 (rerun-io/rerun#7755; re_rav1d 0.1.4 from a pinned git revision).
+    "patches/rerun-0.44.0-av1-arm64.patch",
+)
 """Patches relative to the package directory, applied in order with ``git apply -p1`` at the checkout's root."""
 FINGERPRINT_FILE: str = ".prepared-sha256"
 
