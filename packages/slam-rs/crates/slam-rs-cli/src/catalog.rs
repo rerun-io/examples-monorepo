@@ -579,6 +579,8 @@ fn calibration(
                 distortion_model: model,
                 distortion_coefficients: coeffs.values().to_vec(),
                 distortion_valid_radius: radius,
+                // Not read from the catalog yet: the camera falls back to a global shutter.
+                rolling_shutter_readout_s: None,
             },
             i64::from(downscale),
         )?);
@@ -602,6 +604,8 @@ fn calibration(
         gyro_bias_random_walk: scalar("gyro_bias_random_walk")?,
         accel_bias_random_walk: scalar("accel_bias_random_walk")?,
         applied_time_shift_ns: shift.value(0),
+        // Not read from the catalog yet: the IMU uses the default gravity.
+        gravity_ms2: None,
     })?;
     Ok(Calibration::from_catalog_parts(&parts, &imu)?)
 }
