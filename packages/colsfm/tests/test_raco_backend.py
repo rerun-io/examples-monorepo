@@ -225,7 +225,7 @@ def test_the_engine_is_picked_from_the_size_a_group_runs_at() -> None:
 
 def test_either_engine_can_be_forced_whatever_the_size() -> None:
     """`fixed` and `dynamic` override the size rule, which is how the two are timed."""
-    from colsfm.features_raco import RacoEngine, network_size_for, select_raco_engine
+    from colsfm.features_raco import MAXIMUM_BATCH_SIZE, RacoEngine, network_size_for, select_raco_engine
 
     forced_dynamic: RacoEngine = select_raco_engine(network_size_for(1200, 1920), "dynamic")
     assert forced_dynamic.kind == "dynamic"
@@ -236,7 +236,8 @@ def test_either_engine_can_be_forced_whatever_the_size() -> None:
     forced_fixed: RacoEngine = select_raco_engine(network_size_for(370, 1226), "fixed")
     assert forced_fixed.kind == "fixed"
     assert (forced_fixed.network_height, forced_fixed.network_width) == (1200, 1920)
-    assert forced_fixed.maximum_batch_size == 16
+    # The fixed profile's own max (8), not the graph's export ceiling of 16, whose context ran Galileo out of memory.
+    assert forced_fixed.maximum_batch_size == MAXIMUM_BATCH_SIZE
 
 
 # ── Engine-backed: needs the RaCo graphs and a CUDA device ───────────────────
