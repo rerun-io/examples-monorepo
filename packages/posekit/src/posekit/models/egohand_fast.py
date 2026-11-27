@@ -102,8 +102,7 @@ class EgoHandFastConfig:
         For a process that forks its GPU workers (a ZeroGPU Space): call it once before the fork, and ``setup`` in each
         worker only moves the model to CUDA and loads the TensorRT engines. It starts neither CUDA nor Warp.
         """
-        from posekit.models.egohand import soma_lod_tables
-        from posekit.models.egohand_soma import load_model_on_cpu, warp_init_deferred
+        from posekit.models.egohand_soma import load_model_on_cpu, soma_lod_tables, warp_init_deferred
 
         weights: Path = egohand_weights_path(self.weights, self.hf_egohand_repo_id, self.hf_egohand_revision)
         soma: Path = soma_assets_path(self.soma_assets, self.hf_soma_repo_id, self.hf_soma_revision)

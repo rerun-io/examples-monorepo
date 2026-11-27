@@ -5,6 +5,7 @@ The released MHR parameters remain dynamic: all five identity coefficients,
 each hand. Only the neutral pose corrective and topology tables are cached.
 """
 
+import functools
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
@@ -17,11 +18,13 @@ from egohand.models.soma_hand_wrapper import SomaHandWrapper
 from jaxtyping import Float32, Int64
 from soma.geometry.batched_skinning import BatchedSkinning
 from soma.geometry.transforms import SE3_inverse
+from soma.hand import SOMAHandLayer
 from soma.hand.identity_model import MHRHandIdentityModel
 from torch import Tensor
 
 from posekit.models.egohand_mhr import MHR_JOINT_PARAMETERS, MHR_JOINTS, MhrHandRestSkinning
 from posekit.ops.compile import compile_unless_dev
+from posekit.predictions import HandSide, MeshDetail
 
 
 class _CudaMHRHand(MHRHandIdentityModel):
@@ -172,3 +175,21 @@ def load_model_on_cpu(weights: Path, soma: Path) -> EgoHand:
         model, _ = load_egohand_model(weights, soma, backbone=torch.nn.Identity())
     prepare_identity(model.soma_hand)
     return model.eval()
+
+
+@functools.cache
+def soma_lod_tables(soma: Path, detail: MeshDetail) -> dict[HandSide, tuple[Int64[Tensor, "f 3"], Int64[Tensor, "v"] | torch.nn.Module]]:
+    """Per side, SOMA level of detail ``detail`` on the CPU: its triangles, and its vertices of the mid mesh as a subset
+    (``low``: vertex indices) or as SOMA's transfer (``xlo``: a module); SOMA gives each level exactly one of the two.
+
+    Built from the SOMA directory on first use (~1-2 s for both sides) and kept, so a process that forks GPU workers builds it once for all of them.
+    """
+    tables: dict[HandSide, tuple[Int64[Tensor, "f 3"], Int64[Tensor, "v"] | torch.nn.Module]] = {}
+    for side in ("left", "right"):
+        layer = SOMAHandLayer(
+            data_root=str(soma), hand_type=side, device="cpu", identity_model_type="soma", mode="torch", lod=detail, load_correctives_model=False
+        )
+        mid_to_lod = layer.identity_lod_mid_ids if layer.identity_lod_transfer is None else layer.identity_lod_transfer
+        assert mid_to_lod is not None  # SOMA sets one of the two for every level below mid
+        tables[side] = (layer.faces.to(torch.int64), mid_to_lod)
+    return tables
