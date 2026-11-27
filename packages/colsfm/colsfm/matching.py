@@ -526,6 +526,10 @@ def verification_options(options: MatchingOptions) -> pycolmap.TwoViewGeometryOp
     geometry_options.min_num_inliers = options.min_num_inliers
     geometry_options.ransac.max_error = options.max_error_px
     geometry_options.ransac.confidence = options.confidence
+    # COLMAP's default (-1) draws from a thread-local PRNG seeded once per thread, so a pair near a configuration
+    # boundary (CALIBRATED vs PLANAR_OR_PANORAMIC) resolves by which worker verified it and what that worker drew
+    # before. A fixed seed reseeds every estimate: a pair's result depends only on its matches.
+    geometry_options.ransac.random_seed = 0
     return geometry_options
 
 
