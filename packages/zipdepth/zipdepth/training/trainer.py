@@ -7,12 +7,11 @@ from contextlib import nullcontext, suppress
 from typing import Literal, TypeAlias
 
 import torch
+from monopriors.models.zipdepth_checkpoint import RANGE_MARGIN_COVERAGE_MAX_KEY, RANGE_MARGIN_M_KEY
+from monopriors.third_party.zipdepth.model_utils import strip_state_dict_prefixes
 from torch import nn
 from torch.profiler import ProfilerActivity, profile, schedule, tensorboard_trace_handler
 from tqdm import tqdm
-
-from monopriors.models.zipdepth_checkpoint import RANGE_MARGIN_COVERAGE_MAX_KEY, RANGE_MARGIN_M_KEY
-from monopriors.third_party.zipdepth.model_utils import strip_state_dict_prefixes
 
 from zipdepth.loss import MetricDepthLoss, ZipDepthLoss
 from zipdepth.training.visualization import depth_to_spectral
