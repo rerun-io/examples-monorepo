@@ -97,8 +97,8 @@ def test_depth_video_draws_the_png_codes_alone_and_beside_splats(canonical_viewe
                     path: Path = tmp_path / f"{'video' if as_video else 'png'}-{name}-{frame}.png"
                     deadline: float = time.monotonic() + 60.0
                     pixels = capture(viewer, view, path)
-                    while as_video and not np.array_equal(pixels, shown[False, name, frame]) and time.monotonic() < deadline:
-                        pixels = capture(viewer, view, path)
+                    while as_video and not np.array_equal(pixels, shown[False, name, frame]) and (remaining := deadline - time.monotonic()) > 0:
+                        pixels = capture(viewer, view, path, timeout_s=remaining)
                     shown[as_video, name, frame] = pixels
             logs = viewer.get_logs()
         messages += [entry.message for entry in logs]
