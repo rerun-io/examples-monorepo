@@ -33,8 +33,7 @@ from torch import Tensor
 
 from rerun_prompt_da.apis.arkitscenes_shared import world_t_cam_from_pose
 
-NATIVE_FPS: float = 60.0
-"""Frame rate of the stored wide-camera AV1 stream."""
+
 class PromptDARow(TypedDict):
     """One raw Rerun dataloader sample; keys match ``promptda_dataset``'s fields.
 
@@ -95,7 +94,7 @@ def promptda_dataset(dataset: DatasetEntry, segment_id: str, target_fps: float, 
         A natural-order iterable dataset over the segment's inference grid, and its
         video decoder (whose raw AV1 samples are relayable as a Rerun VideoStream).
     """
-    video_decoder: SegmentNvdecDecoder = SegmentNvdecDecoder(dataset, VIDEO_WIDE, TIMELINE, device, int(NATIVE_FPS))
+    video_decoder: SegmentNvdecDecoder = SegmentNvdecDecoder(dataset, VIDEO_WIDE, TIMELINE, device)
     fields: dict[str, Field] = {
         "video": Field(f"/{VIDEO_WIDE}:VideoStream:sample", decode=video_decoder),
         "depth": Field(f"/{DEPTH}:EncodedDepthImage:blob", decode=ImageDecoder()),

@@ -1,5 +1,6 @@
 """Protocol logic of the hands evaluation on a synthetic segment with fake models (no catalog, no GPU)."""
 
+from collections.abc import Sequence
 from dataclasses import replace
 
 import numpy as np
@@ -8,7 +9,7 @@ import torch
 
 pytest.importorskip("warp", reason="the eval imports EgoHand; it needs the posekit-hands Pixi environment")
 
-from simplecv.catalog_video import CatalogVideo
+from simplecv.catalog_video_reader import ChunkedVideoDecoder
 
 from posekit.apis.hands_eval import EndToEndCell, HandsEvalConfig, error_quantiles, evaluate_segment, failed_bands, joint_box, within_accuracy_band
 from posekit.cameras import CalibratedCamera
@@ -16,6 +17,13 @@ from posekit.eval.hand_gt import GtDataset, HandGtSegment
 from posekit.models.base import HandDetector, TopDownHandPose3d
 from posekit.predictions import BoxDetections, HandDetections, HandPoses3d, Keypoints3d
 from posekit.skeletons import HAND_21
+
+
+class NoVideo(ChunkedVideoDecoder):
+    """The protocol tests pass frames in; nothing decodes."""
+
+    def __init__(self) -> None:
+        pass
 
 
 def _segment() -> HandGtSegment:
@@ -29,7 +37,34 @@ def _segment() -> HandGtSegment:
     valid = np.ones((1, 2, 21), bool)
     valid[:, :, 1] = False
     camera = CalibratedCamera(np.array([[500.0, 0, 200], [0, 500, 200], [0, 0, 1]]), np.zeros(0), 400, 400, lens="PINHOLE")
-    return HandGtSegment("seg", camera, CatalogVideo(np.zeros(1, np.int64), [], [True], "av1"), np.zeros(1, np.int64), np.zeros(1, np.int64), xyz, uv, valid)
+    return HandGtSegment("seg", camera, NoVideo(), np.zeros(1, np.int64), np.zeros(1, np.int64), xyz, uv, valid)
+
+
+def test_decode_samples_closes_the_segment_decoder_after_decoding() -> None:
+    from posekit.apis.hands_eval import decode_samples
+
+    class CountedVideo(NoVideo):
+        def __init__(self, fail: bool) -> None:
+            self.fail: bool = fail
+            self.closed: int = 0
+
+        def get_frames_at(self, indices: Sequence[int]) -> torch.Tensor:
+            if self.fail:
+                raise RuntimeError("decode failed")
+            return torch.zeros((len(indices), 3, 4, 6), dtype=torch.uint8)
+
+        def close(self) -> None:
+            self.closed += 1
+
+    for fail in (False, True):
+        video = CountedVideo(fail)
+        segment: HandGtSegment = replace(_segment(), video=video)
+        if fail:
+            with pytest.raises(RuntimeError, match="decode failed"):
+                decode_samples(segment)
+        else:
+            assert decode_samples(segment).shape == (1, 4, 6, 3)
+        assert video.closed == 1
 
 
 class TruthPose(TopDownHandPose3d):

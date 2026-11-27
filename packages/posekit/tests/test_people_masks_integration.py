@@ -18,15 +18,15 @@ def test_people_masker_finds_the_operator_in_a_lens_frame() -> None:
     if BASE_RRD is None or not Path(BASE_RRD).exists():
         pytest.skip(f"asset missing: Insta360 base .rrd (set POSEKIT_PEOPLE_MASKS_RRD; got {BASE_RRD})")
     import rerun as rr
-    from simplecv.catalog_video import read_catalog_videos
+    from simplecv.catalog_video_reader import open_decoders
 
     from posekit.apis.people_masks import MaskOptions, PeopleMasker, decode_selected
 
     entity: str = "/world/rig_00/cam_00/pinhole/video"
     with rr.server.Server(datasets={"base": [str(BASE_RRD)]}) as server:
         dataset = server.client().get_dataset("base")
-        video = read_catalog_videos(dataset, dataset.segment_ids()[0], [entity], "video_time")[0]
-    decoded = decode_selected(video, [0], "cuda")
+        decoded = decode_selected(open_decoders(dataset, dataset.segment_ids()[0], [entity], "video_time", torch.device("cuda"))[0], [0])
+    assert decoded[1].device.type == "cuda"
     masker = PeopleMasker(MaskOptions(dilate_px=4, tiles=2, batch_size=4), "cuda")
 
     detections = masker.detect(decoded[1])
@@ -46,7 +46,7 @@ def test_sam3_tensorrt_engines_match_the_torch_backend() -> None:
     if BASE_RRD is None or not Path(BASE_RRD).exists():
         pytest.skip(f"asset missing: Insta360 base .rrd (set POSEKIT_PEOPLE_MASKS_RRD; got {BASE_RRD})")
     import rerun as rr
-    from simplecv.catalog_video import read_catalog_videos
+    from simplecv.catalog_video_reader import open_decoders
 
     from posekit.apis.people_masks import decode_selected
     from posekit.models.base import SegmentationPrompts
@@ -55,8 +55,8 @@ def test_sam3_tensorrt_engines_match_the_torch_backend() -> None:
     entities: list[str] = ["/world/rig_00/cam_00/pinhole/video", "/world/rig_00/cam_01/pinhole/video"]
     with rr.server.Server(datasets={"base": [str(BASE_RRD)]}) as server:
         dataset = server.client().get_dataset("base")
-        videos = read_catalog_videos(dataset, dataset.segment_ids()[0], entities, "video_time")
-    frames = torch.cat([decode_selected(video, [0], "cuda")[1] for video in videos])
+        lenses = open_decoders(dataset, dataset.segment_ids()[0], entities, "video_time", torch.device("cuda"))
+        frames = torch.cat([decode_selected(lens, [0])[1] for lens in lenses])
     prompts = SegmentationPrompts(frame_indices=torch.zeros(0, dtype=torch.int64), text="person")
     unions: dict[str, list] = {}
     for backend in ("torch", "tensorrt"):

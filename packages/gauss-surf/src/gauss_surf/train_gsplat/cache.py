@@ -25,7 +25,6 @@ from gauss_surf.contracts import (
     PROMPTDA_DEPTH_BLOB_COLUMN,
     ULTRAWIDE_CHOSEN_SHARPNESS_COLUMN,
     WIDE_CHOSEN_SHARPNESS_COLUMN,
-    WIDE_FPS,
     CameraTag,
 )
 from gauss_surf.render_io import RenderCamera, blob_bytes, decode_rgb_image
@@ -314,7 +313,7 @@ def load_gpu_cache(
     wide_depth_nhw: torch.Tensor = torch.empty((len(wide_rows), *wide_hw), dtype=torch.uint16, device=device)
     wide_normal_nhw3: torch.Tensor = torch.empty((len(wide_rows), *wide_normal_hw3), dtype=torch.uint8, device=device)
     wide_rgb_nhw3: torch.Tensor = torch.empty((len(wide_rows), *wide_hw, 3), dtype=torch.uint8, device=device)
-    decoded_wide = reader.decode_frames(VIDEO_WIDE, wide_timestamps, fps=WIDE_FPS, device=device)
+    decoded_wide = reader.decode_frames(VIDEO_WIDE, wide_timestamps, device=device)
     for index, (row, frame_chw) in enumerate(zip(wide_rows, decoded_wide, strict=True)):
         decoded_rgb_hw3: torch.Tensor = rearrange(frame_chw, "c h w -> h w c")
         depth_hw: np.ndarray = _decode_png_uint16(blob_bytes(row[PROMPTDA_DEPTH_BLOB_COLUMN], PROMPTDA_DEPTH_BLOB_COLUMN))

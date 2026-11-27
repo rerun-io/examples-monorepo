@@ -28,8 +28,9 @@ import torch
 import torch.nn.functional as F
 from jaxtyping import Bool, UInt8
 from numpy import ndarray
-from simplecv.catalog_video import CatalogVideo, read_catalog_videos
+from rerun.catalog import DatasetEntry
 from simplecv.catalog_video_decode import PrefetchedChunks
+from simplecv.catalog_video_reader import CatalogVideoReader, StreamIndex, read_video_index
 from simplecv.rerun_log_utils import RerunTyroConfig
 from torch import Tensor
 
@@ -304,9 +305,17 @@ def main(config: PeopleTracksConfig) -> None:
             raise ValueError(f"pass --rr-config.recording-id {segment_id} so the mask layer joins the input recording")
         available: list[str] = [c.entity_path for c in dataset.schema().component_columns() if c.component == "VideoStream:sample"]
         entities: list[str] = select_entities(available, config.entities, ())
-        videos: tuple[CatalogVideo, ...] = read_catalog_videos(dataset, segment_id, entities, config.timeline)
         cube: CubeSampling | None = cube_sampling(dataset, segment_id, config.cube_rrd)
-    n_packets: int = min(len(v.samples) for v in videos)
+        # The server serves the chunks while they decode.
+        track_segment(config, dataset, segment_id, entities, cube, process_start)
+
+
+def track_segment(
+    config: PeopleTracksConfig, dataset: DatasetEntry, segment_id: str, entities: list[str], cube: CubeSampling | None, process_start: float
+) -> None:
+    """Track the people of one segment's streams and log their masks."""
+    streams: tuple[StreamIndex, ...] = read_video_index(dataset, segment_id, entities, config.timeline)
+    n_packets: int = min(len(stream.times) for stream in streams)
     end: int = n_packets if config.end is None else min(config.end, n_packets)
     outputs: range = sampled_framesets("--output-every", config.output_every, cube, config.start, end)
     step: int = outputs.step if config.track.stride is None else config.track.stride
@@ -319,7 +328,8 @@ def main(config: PeopleTracksConfig) -> None:
     load_start: float = time.perf_counter()
     chunks: list[list[int]] = [tracked[begin : begin + config.decode_chunk] for begin in range(0, len(tracked), config.decode_chunk)]
     # decoding starts here, overlapping the model load
-    decoded: Iterator[UInt8[Tensor, "s n h w 3"]] = (torch.stack(batches) for batches in PrefetchedChunks(videos, chunks, config.start, end, config.device))
+    reader: CatalogVideoReader = CatalogVideoReader(dataset, segment_id, streams, config.timeline)
+    decoded: Iterator[UInt8[Tensor, "s n h w 3"]] = (torch.stack(batches) for batches in PrefetchedChunks(reader, chunks, config.device))
     tracker = PeopleTracker(config.track, config.mask, config.device)
     targets: list[str] = [mask_entity(e) for e in entities]
     factor: int = config.mask_downscale
@@ -355,7 +365,7 @@ def main(config: PeopleTracksConfig) -> None:
                 cells: Bool[Tensor, "s hm wm"] = dilated.reshape(n_slots, height // factor, factor, width // factor, factor).any(dim=4).any(dim=2)
                 masks: UInt8[ndarray, "s hm wm"] = (cells.to(torch.uint8) * PERSON_CLASS_ID).cpu().numpy()
                 for slot, entity in enumerate(entities):
-                    set_frame_time(config.timeline, videos[slot].times[index])
+                    set_frame_time(config.timeline, streams[slot].times[index])
                     rr.log(targets[slot], rr.SegmentationImage(masks[slot]))
                     n_masks += 1
                     if config.overlay_dir is not None and index in config.overlay_frames:

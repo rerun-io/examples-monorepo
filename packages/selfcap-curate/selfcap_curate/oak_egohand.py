@@ -25,7 +25,7 @@ from posekit.models.egohand import (
 from posekit.models.egohand_fast import EgoHandConfigs, FastEgoHandPredictor, fast_egohand_configs
 from posekit.predictions import SOMA_HAND21, BoxDetections, HandDetections, HandSide
 from scipy.spatial.transform import Rotation
-from simplecv.catalog_video import CatalogVideo
+from simplecv.catalog_video_reader import ChunkedVideoDecoder
 from torch import Tensor
 
 from selfcap_curate.factory import intrinsic_matrix
@@ -124,7 +124,7 @@ def egohand_models(configs: EgoHandConfigs) -> tuple[EgoHandDetector, EgoHandPre
 @torch.inference_mode()
 def detect_oak_egohand(
     episode: SessionEpisode,
-    video: CatalogVideo,
+    video: ChunkedVideoDecoder,
     intrinsic: Intrinsic,
     rotation: Float64[ndarray, "3 3"] | None,
     models: EgoHandConfigs,
@@ -136,7 +136,7 @@ def detect_oak_egohand(
     qp: float | None = oak_quest_offset_ms(episode.sync)
     if qp is None:
         raise ValueError("EgoHand sampling requires the Quest/OAK clock")
-    times: Float64[ndarray, "f"] = episode.sync.oak_rgb_model.video_time_s(video.t_ns.astype(np.float64) * 1e-9)
+    times: Float64[ndarray, "f"] = episode.sync.oak_rgb_model.video_time_s(video.index.t_ns.astype(np.float64) * 1e-9)
     head: CatalogHands = episode.hands
     if camera is None and rotation is not None:
         poses: Float64[ndarray, "p 4 4"] = np.tile(np.eye(4), (len(head.head_times_s), 1, 1))
@@ -170,7 +170,7 @@ def detect_oak_egohand(
     print(f"EGOHAND_SAMPLE {episode.sync.key}: {len(selection.indices)}/{selection.eligible_count} eligible frames", flush=True)
     if not len(selection.indices):
         return OakDetections(np.empty(0), np.empty((0, 133, 2)), np.empty((0, 133)))
-    frames: UInt8[Tensor, "n h w 3"] = decode_frames(video, selection.indices, 1e9 / float(np.median(np.diff(video.t_ns))))
+    frames: UInt8[Tensor, "n h w 3"] = decode_frames(video, selection.indices)
     started: float = time.perf_counter()
     detector: EgoHandDetector | None = None
     predictor: EgoHandPredictor | FastEgoHandPredictor | None = None
@@ -191,7 +191,7 @@ def detect_oak_egohand(
 
 @torch.inference_mode()
 def detect_oak_views(
-    episode: SessionEpisode, videos: dict[str, CatalogVideo], lenses: dict[str, OakLens], models: EgoHandConfigs, *, retain_models: bool = False,
+    episode: SessionEpisode, videos: dict[str, ChunkedVideoDecoder], lenses: dict[str, OakLens], models: EgoHandConfigs, *, retain_models: bool = False,
 ) -> dict[str, OakDetections]:
     """EgoHand on the same 64 instants in every OAK camera, sampled on OAK left; videos are read on ``video_time``.
 
@@ -201,7 +201,7 @@ def detect_oak_views(
     qp: float | None = oak_quest_offset_ms(episode.sync)
     if qp is None:
         raise ValueError("EgoHand sampling requires the Quest/OAK clock")
-    left_times: Float64[ndarray, "f"] = videos["left"].t_ns.astype(np.float64) * 1e-9
+    left_times: Float64[ndarray, "f"] = videos["left"].index.t_ns.astype(np.float64) * 1e-9
     tracked: Bool[ndarray, "f 2"] = np.stack(
         [hand_neighbors(episode.quest[side], left_times - qp / 1000.0 + HAND_LATENCY_MS / 1000.0)[2] for side in HAND_BASE], axis=1
     )
@@ -216,9 +216,9 @@ def detect_oak_views(
         detector, predictor = egohand_models(models)
         result: dict[str, OakDetections] = {}
         for camera, video in videos.items():
-            times: Float64[ndarray, "f"] = video.t_ns.astype(np.float64) * 1e-9
+            times: Float64[ndarray, "f"] = video.index.t_ns.astype(np.float64) * 1e-9
             indices: Int64[ndarray, "n"] = np.clip(np.searchsorted(times, left_times[selection.indices]), 0, len(times) - 1)
-            frames: UInt8[Tensor, "n h w 3"] = decode_frames(video, indices, 1e9 / float(np.median(np.diff(video.t_ns))))
+            frames: UInt8[Tensor, "n h w 3"] = decode_frames(video, indices)
             lens = CalibratedCamera(lenses[camera].intrinsic, np.pad(lenses[camera].distortion, (0, 14 - len(lenses[camera].distortion))), *lenses[camera].size)
             result[camera] = infer_egohand_frames(frames, times[indices], selection.hands, lens, detector, predictor)
             del frames

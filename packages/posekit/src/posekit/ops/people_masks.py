@@ -1,9 +1,8 @@
-"""People-mask post-processing: instance union, tile layout and placement, dilation, decode windows, overlays.
+"""People-mask post-processing: instance union, tile layout and placement, dilation, overlays.
 
 Pure numpy/OpenCV/torch functions with no model or GPU, so the unit lane tests them on synthetic arrays.
 """
 
-from collections.abc import Sequence
 from dataclasses import dataclass
 
 import cv2
@@ -12,7 +11,6 @@ import torch
 import torch.nn.functional as F
 from jaxtyping import Bool, Float32, Int64, UInt8
 from numpy import ndarray
-from simplecv.catalog_video_decode import DecodeRun, decode_runs
 from torch import Tensor
 
 
@@ -105,21 +103,6 @@ def dilate_masks(masks: Bool[Tensor, "n h w"], radius_px: int) -> Bool[Tensor, "
         return masks
     kernel: UInt8[ndarray, "k k"] = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * radius_px + 1, 2 * radius_px + 1))
     return dilate_by_footprint(masks, torch.from_numpy(kernel).bool())
-
-
-def selection_windows(keyframes: Sequence[bool], indices: Sequence[int]) -> list[DecodeRun]:
-    """Group selected packet indices into decode runs (simplecv's ``decode_runs``, one GOP per run) that each start at
-    a keyframe, so the decoder never decodes a packet twice.
-
-    Raises:
-        ValueError: If an index is out of range or no keyframe precedes it.
-    """
-    wanted: Int64[ndarray, "k"] = np.asarray(sorted(set(indices)), dtype=np.int64)
-    if wanted.size and not (wanted[0] >= 0 and wanted[-1] < len(keyframes)):
-        bad: int = int(wanted[0] if wanted[0] < 0 else wanted[-1])
-        raise ValueError(f"frame index {bad} out of range for a stream of {len(keyframes)} packets")
-    key_positions: Int64[ndarray, "g"] = np.flatnonzero(np.asarray(keyframes, dtype=bool)).astype(np.int64)
-    return decode_runs(wanted, key_positions, max_gops=1)
 
 
 def overlay_mask(rgb: UInt8[ndarray, "h w 3"], mask: Bool[ndarray, "h w"], *, alpha: float = 0.5) -> UInt8[ndarray, "h w 3"]:

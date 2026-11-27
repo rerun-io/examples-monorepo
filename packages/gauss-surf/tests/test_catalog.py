@@ -13,6 +13,7 @@ pytest.importorskip("rerun.experimental.dataloader", reason="requires the rerun.
 pytest.importorskip("torchcodec", reason="requires the torchcodec dependency in this environment")
 
 from rerun.catalog import DatasetEntry
+from simplecv.catalog_video_reader import ChunkedVideoDecoder, StreamIndex
 from torch import Tensor
 
 from gauss_surf.catalog import SegmentReader
@@ -110,45 +111,56 @@ def test_segment_reader_rejects_nonzero_orientation_with_stage_context() -> None
         reader.require_zero_orientation("test stage")
 
 
-def test_decode_frames_refuses_timestamp_drift(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The shared NVDEC seam verifies all requested timestamps exactly once."""
+class _Decoder(ChunkedVideoDecoder):
+    """A stream at 10 and 20 ns whose frame ``i`` holds the value ``i``; records the frames asked of it."""
 
-    class _Decoder:
-        """Deterministic stand-in for the GPU decoder."""
+    def __init__(self) -> None:
+        self.asked: list[int] = []
 
-        def __init__(self, *_args: Any) -> None:
-            self.times: np.ndarray = np.asarray([10, 20], dtype=np.int64).astype("timedelta64[ns]")
+    @property
+    def index(self) -> StreamIndex:
+        times: np.ndarray = np.asarray([10, 20], dtype=np.int64).astype("timedelta64[ns]")
+        return StreamIndex(entity="/video/wide", times=times, keyframes=np.ones(2, dtype=bool), codec="h264")
 
-        def decode_at(self, _timestamp: np.timedelta64, _video_id: str) -> UInt8[Tensor, "3 h w"]:
-            """Return one RGB tensor so exactness validation can run."""
-            return torch.zeros((3, 2, 2), dtype=torch.uint8)
+    def get_frame_at(self, index: int) -> UInt8[Tensor, "3 h w"]:
+        self.asked.append(index)
+        return torch.full((3, 1, 1), index, dtype=torch.uint8)
 
-    monkeypatch.setattr("gauss_surf.catalog.SegmentNvdecDecoder", _Decoder)
+
+def _opened(monkeypatch: pytest.MonkeyPatch) -> list[_Decoder]:
+    opened: list[_Decoder] = []
+
+    def open_decoders(*_args: Any) -> tuple[ChunkedVideoDecoder, ...]:
+        opened.append(_Decoder())
+        return (opened[-1],)
+
+    monkeypatch.setattr("gauss_surf.catalog.open_decoders", open_decoders)
+    return opened
+
+
+def test_decode_frames_refuses_timestamp_drift_before_decoding(monkeypatch: pytest.MonkeyPatch) -> None:
+    opened: list[_Decoder] = _opened(monkeypatch)
     reader: SegmentReader = SegmentReader(_Dataset([_row()]), "segment-a")
     drifted_n: np.ndarray = np.asarray([10, 21], dtype=np.int64).astype("timedelta64[ns]")
 
     with pytest.raises(ValueError, match="no exact video-packet match"):
-        list(reader.decode_frames("video/wide", drifted_n, fps=60.0, device=torch.device("cpu")))
+        list(reader.decode_frames("video/wide", drifted_n, device=torch.device("cpu")))
+    assert opened[0].asked == []
 
 
 def test_decode_frames_preserves_requested_timestamp_order(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Exact decoding yields one frame for each requested timestamp in request order."""
-
-    class _Decoder:
-        """Timestamp-valued stand-in for the GPU decoder."""
-
-        def __init__(self, *_args: Any) -> None:
-            self.times: np.ndarray = np.asarray([10, 20], dtype=np.int64).astype("timedelta64[ns]")
-
-        def decode_at(self, timestamp: np.timedelta64, _video_id: str) -> UInt8[Tensor, "3 h w"]:
-            """Encode the requested nanosecond value into the returned frame."""
-            value: int = int(timestamp.astype(np.int64))
-            return torch.full((3, 1, 1), value, dtype=torch.uint8)
-
-    monkeypatch.setattr("gauss_surf.catalog.SegmentNvdecDecoder", _Decoder)
+    _opened(monkeypatch)
     reader: SegmentReader = SegmentReader(_Dataset([_row()]), "segment-a")
     requested_n: np.ndarray = np.asarray([20, 10], dtype=np.int64).astype("timedelta64[ns]")
 
-    frames: list[UInt8[Tensor, "3 h w"]] = list(reader.decode_frames("video/wide", requested_n, fps=60.0, device=torch.device("cpu")))
+    frames: list[UInt8[Tensor, "3 h w"]] = list(reader.decode_frames("video/wide", requested_n, device=torch.device("cpu")))
 
-    assert [int(frame[0, 0, 0]) for frame in frames] == [20, 10]
+    assert [int(frame[0, 0, 0]) for frame in frames] == [1, 0]
+
+
+def test_decode_frames_of_no_timestamps_opens_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    opened: list[_Decoder] = _opened(monkeypatch)
+    reader: SegmentReader = SegmentReader(_Dataset([_row()]), "segment-a")
+
+    assert list(reader.decode_frames("video/wide", np.empty(0, dtype="timedelta64[ns]"), device=torch.device("cpu"))) == []
+    assert opened == []

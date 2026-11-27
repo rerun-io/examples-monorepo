@@ -42,7 +42,7 @@ def rrd_video_frames() -> VideoFrames:
     """``decode(rrd, entity, timeline)``: every frame of the ``rr.VideoStream`` logged at ``entity``, as RGB uint8."""
 
     def decode(rrd: Path, entity: str, timeline: str) -> list[np.ndarray]:
-        from simplecv.rerun_log_utils import read_video_stream_from_rrd
+        from simplecv.testing import read_video_stream_from_rrd
 
         codec, _, samples = read_video_stream_from_rrd(str(rrd), entity, timeline)
         names: dict[rr.VideoCodec, str] = {rr.VideoCodec.H264: "h264", rr.VideoCodec.H265: "hevc", rr.VideoCodec.AV1: "av1"}

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Literal, TypeAlias
 
 import numpy as np
+import torch
 from dataforge.datasets.selfcap_raw import oak_stereo
 from dataforge.oak_mount import FactoryCalibration
 from dataforge.schema import video_path
@@ -15,7 +16,7 @@ from posekit.models.egohand_fast import EgoHandConfigs
 from rerun.catalog import CatalogClient, DatasetEntry
 from serde import serde
 from serde.json import to_json
-from simplecv.catalog_video import read_catalog_videos
+from simplecv.catalog_video_reader import open_decoders
 
 from selfcap_curate import catalog_io
 from selfcap_curate.apis import open_session, session_output
@@ -104,11 +105,10 @@ def detect_oak_episode(
 ) -> dict[str, OakDetections]:
     """Infer the available OAK views on the clock used by each calibration path."""
     if lenses is not None:
-        videos = read_catalog_videos(
-            segment.dataset, segment.id, [video_path(episode.layout.oak_rig, cam) for cam in range(len(OAK_CAMERAS))], "video_time"
-        )
+        entities: list[str] = [video_path(episode.layout.oak_rig, cam) for cam in range(len(OAK_CAMERAS))]
+        videos = open_decoders(segment.dataset, segment.id, entities, "video_time", torch.device("cuda"))
         return detect_oak_views(episode, dict(zip(OAK_CAMERAS, videos, strict=True)), lenses, models)
-    video = read_catalog_videos(segment.dataset, segment.id, [video_path(episode.layout.oak_rig, 0)], "capture_time")[0]
+    video = open_decoders(segment.dataset, segment.id, [video_path(episode.layout.oak_rig, 0)], "capture_time", torch.device("cuda"))[0]
     current = read_ego_cameras(segment.dataset, segment.dataset, segment.id, episode.layout.oak_rig, episode.layout.quest_rig)
     return {"rgb": detect_oak_egohand(
         episode, video, oak_centre(ego), rotation, models, camera=next((camera for camera in current if camera.cam == 0), None),

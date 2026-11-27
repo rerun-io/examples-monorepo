@@ -1,9 +1,8 @@
-"""NVDEC decode of catalog video streams, with the next chunk decoded on one thread per stream.
+"""NVDEC decode of a reader's video streams, chunk by chunk, with the next batch decoded on one thread per stream.
 
 ``decode_runs`` plans which samples each decoder reads, so that no sample is decoded twice at any selection of pictures.
-A torchcodec CUDA decoder decodes on any thread that has a current CUDA context (``video_io.bind_cuda_device``), not
-only on the one that created it; here each stream's decoder is created and used on its own thread, which binds the device
-once. Two NVDEC threads decode about twice the frames per second of one thread on the RTX 5090.
+Each stream's decoder decodes on its own thread (``ChunkedVideoDecoder`` binds the CUDA device on the thread that
+decodes). Two NVDEC threads decode about twice the frames per second of one thread on the RTX 5090.
 """
 
 import time
@@ -18,9 +17,7 @@ from jaxtyping import Int64, UInt8
 from numpy import ndarray
 from torch import Tensor
 
-from simplecv.catalog_video import CatalogVideo
-from simplecv.catalog_video_codec import wrap_mp4
-from simplecv.video_io import bind_cuda_device
+from simplecv.catalog_video_reader import CatalogVideoReader, ChunkedVideoDecoder
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,51 +72,37 @@ def decode_runs(indices: Int64[ndarray, " k"], gop_starts: Int64[ndarray, " g"],
     return runs
 
 
-class StreamDecoder:
-    """Sequential NVDEC decode of one stream, from the keyframe at or before ``start`` up to ``end``."""
-
-    def __init__(self, video: CatalogVideo, start: int, end: int, device: str, fps: int = 30) -> None:
-        """Mux the packets ``[keyframe at or before start, end)`` into an in-memory MP4 and open a decoder."""
-        from torchcodec.decoders import VideoDecoder
-
-        bind_cuda_device(device)
-        self.first: int = max(i for i in range(start + 1) if video.keyframes[i])
-        data: bytes = wrap_mp4(video.samples[self.first : end], video.keyframes[self.first : end], fps, codec=video.codec)
-        self.decoder = VideoDecoder(data, device=device, seek_mode="exact", num_ffmpeg_threads=0)
-
-    def frames(self, indices: list[int]) -> UInt8[Tensor, "n h w 3"]:
-        """RGB frames at ascending stream indices."""
-        batch: UInt8[Tensor, "n 3 h w"] = self.decoder.get_frames_at([i - self.first for i in indices]).data
-        # NVDEC frames are NHWC in memory (NCHW is a view), so this is a view, not a copy
-        return rearrange(batch, "n c h w -> n h w c").contiguous()
-
-
 class PrefetchedChunks:
-    """Iterate the frames of each chunk, one batch per stream; the next chunk decodes while the caller computes.
+    """Iterate the frames of each batch, one tensor per stream of the reader; the next batch decodes while the caller computes.
 
-    ``wait_s`` is the time the caller spent waiting for decoded frames.
+    Each stream decodes through its own :class:`ChunkedVideoDecoder` over the shared reader, which fetches only the chunks
+    that hold wanted samples, one query per chunk for every stream. ``wait_s`` is the time the caller spent waiting for
+    decoded frames.
     """
 
-    def __init__(self, videos: tuple[CatalogVideo, ...], chunks: list[list[int]], start: int, end: int, device: str, fps: int = 30) -> None:
-        """Start the decoders and the first chunk (decoding starts at construction).
+    def __init__(self, reader: CatalogVideoReader, chunks: list[list[int]], device: str) -> None:
+        """Start the decoders and the first batch (decoding starts at construction).
 
-        Each decoder muxes its packets up to the last frame the chunks want, or ``end`` when that is earlier: a caller
-        that passes the end of the clip but samples only its start does not hold the whole clip in memory.
+        Args:
+            reader: One decode thread per stream.
+            chunks: The batches of ascending sample indices, the same for every stream.
+            device: ``cuda`` decodes on NVDEC.
         """
         self.chunks: list[list[int]] = chunks
         self.device: str = device
         self.wait_s: float = 0.0
-        self.threads: list[ThreadPoolExecutor] = [ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"decode-{slot}") for slot in range(len(videos))]
-        last: int = min(end, max((chunk[-1] for chunk in chunks if chunk), default=start) + 1)
-        self.decoders: list[Future[StreamDecoder]] = [
-            thread.submit(StreamDecoder, video, start, last, device, fps) for thread, video in zip(self.threads, videos, strict=True)
-        ]
+        streams: range = range(len(reader.streams))
+        self.threads: list[ThreadPoolExecutor] = [ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"decode-{slot}") for slot in streams]
+        self.decoders: list[ChunkedVideoDecoder] = [ChunkedVideoDecoder(reader, slot, torch.device(device)) for slot in streams]
         self.pending: list[Future[Tensor]] = self._submit(chunks[0]) if chunks else []
 
     def _decode(self, slot: int, chunk: list[int]) -> UInt8[Tensor, "n h w 3"]:
-        frames: UInt8[Tensor, "n h w 3"] = self.decoders[slot].result().frames(chunk)
-        # This thread's stream only: a device-wide synchronize invalidates a CUDA graph another thread captures meanwhile.
-        torch.cuda.current_stream(self.device).synchronize()
+        batch: UInt8[Tensor, "n 3 h w"] = self.decoders[slot].get_frames_at(chunk)
+        # NVDEC frames are NHWC in memory (NCHW is a view), so this is a view, not a copy
+        frames: UInt8[Tensor, "n h w 3"] = rearrange(batch, "n c h w -> n h w c").contiguous()
+        if torch.device(self.device).type == "cuda":
+            # This thread's stream only: a device-wide synchronize invalidates a CUDA graph another thread captures meanwhile.
+            torch.cuda.current_stream(self.device).synchronize()
         return frames
 
     def _submit(self, chunk: list[int]) -> list[Future[Tensor]]:
@@ -138,4 +121,4 @@ class PrefetchedChunks:
                 thread.shutdown(cancel_futures=True)
 
 
-__all__ = ("PrefetchedChunks", "StreamDecoder")
+__all__ = ("PrefetchedChunks",)

@@ -44,7 +44,7 @@ from torch import Tensor
 from torch.utils.data import IterableDataset, get_worker_info
 
 from zipdepth.catalog.builders import CudaSampleBuilder, uint16_to_int32
-from zipdepth.catalog.dataset import CONFIDENCE_COLUMN, NATIVE_VIDEO_FPS, PROMPT_BLOB_COLUMN, PROMPTDA_BLOB_COLUMN
+from zipdepth.catalog.dataset import CONFIDENCE_COLUMN, PROMPT_BLOB_COLUMN, PROMPTDA_BLOB_COLUMN
 from zipdepth.catalog.segments import SegmentRow
 from zipdepth.catalog.stats import BuilderStats, CatalogDatasetStats
 
@@ -398,7 +398,6 @@ class RerunPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
             VIDEO_WIDE,
             TIMELINE,
             device,
-            NATIVE_VIDEO_FPS,
         )
         self._target_decoder: CudaDepthPngDecoder = CudaDepthPngDecoder(
             PROMPTDA_BLOB_COLUMN,

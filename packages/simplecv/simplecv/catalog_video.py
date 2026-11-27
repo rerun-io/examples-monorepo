@@ -1,13 +1,11 @@
 """Fetch encoded camera streams together for persistent segment decoders."""
 
-from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
 import pyarrow as pa
 from jaxtyping import Bool, Int64, Shaped, UInt8
 from numpy import ndarray
-from rerun.catalog import DatasetEntry
 
 from simplecv.catalog_video_codec import CatalogCodecName, catalog_codec_name
 
@@ -74,18 +72,6 @@ def catalog_codec(column: pa.ChunkedArray, where: str) -> CatalogCodecName:
     if len(codecs) == 0:
         raise ValueError(f"{where}: the video stream carries no codec, so its samples cannot be decoded")
     return catalog_codec_name(int(codecs[0].as_py()))
-
-
-def read_catalog_videos(dataset: DatasetEntry, segment_id: str, entities: Sequence[str], timeline: str) -> tuple[CatalogVideo, ...]:
-    """Read all requested cameras in one materialization, preserving their individual sample times.
-
-    Holds compressed data for one segment in RAM. No sorting or decoding is
-    performed; unordered or duplicate timestamps fail before packet muxing.
-    """
-    paths: list[str] = [f"/{entity.strip('/')}" for entity in entities]
-    columns: list[str] = [f"{entity}:VideoStream:{component}" for entity in paths for component in ("sample", "is_keyframe", "codec")]
-    table: pa.Table = dataset.filter_segments(segment_id).filter_contents(paths).reader(index=timeline).select(timeline, *columns).to_arrow_table()
-    return tuple(catalog_video_from_table(table, entity, timeline, f"{segment_id} {entity}") for entity in paths)
 
 
 def catalog_video_from_table(table: pa.Table, entity: str, timeline: str, where: str) -> CatalogVideo:

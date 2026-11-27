@@ -1,25 +1,15 @@
-"""GPU video decoding, and stored-packet relay, for the Rerun catalog dataloader.
+"""The Rerun catalog dataloader's NVDEC column decoder, over the chunked reader (:mod:`simplecv.catalog_video_reader`).
 
-Import this module explicitly: it needs ``rerun-sdk``'s ``dataloader`` extra,
-which only the catalog lanes install, so it must never be re-exported from
-``simplecv/__init__.py``.
+Import this module explicitly: it needs ``rerun-sdk``'s ``dataloader`` extra, which only the catalog lanes install, so
+it must never be re-exported from ``simplecv/__init__.py``.
 
-``relay_video_stream`` shares the segment-wide packet query with the decoder but
-never decodes: a tool that wants the source video in its own recording re-logs
-the catalog's samples instead of re-encoding decoded frames.
+Upstream's video decoder (rerun-io/reality PR #2893) wraps each sample's keyframe window into its own in-memory MP4
+and is slower than dav1d, with no decode-session reuse across calls. ``SegmentNvdecDecoder`` instead decodes from
+GOP-aligned chunks of the segment on one GPU decoder per chunk.
 
-Upstream's video decoder (rerun-io/reality PR #2893) wraps each sample's
-keyframe window into its own in-memory MP4 and is slower than dav1d — no
-decode-session reuse across calls. ``SegmentNvdecDecoder`` instead bulk-fetches
-a segment's packets once, wraps them into a single MP4 (same ``add_mux_stream``
-technique), and serves every sample from one GPU decoder.
-
-TODO(rerun#upstream): delete this module once the dataloader decodes video fast
-enough on its own — this is a stopgap, and it costs real flexibility: holding a
-``DatasetEntry`` makes it unpicklable (so ``num_workers`` must stay 0), and the
-cached CUDA decoder does not survive ``decode_threads > 1``. Upstream's batch
-decoder now reuses one codec context across a GOP, but its PyAV CPU path remains
-slower than this segment-wide torchcodec/NVDEC path.
+TODO(rerun#upstream): delete this module once the dataloader decodes video fast enough on its own. Holding a
+``DatasetEntry`` makes it unpicklable (so ``num_workers`` must stay 0), and the cached CUDA decoder does not survive
+``decode_threads > 1``.
 """
 
 from collections.abc import Callable, Sequence
@@ -28,17 +18,14 @@ from time import perf_counter
 from typing import TypeAlias
 
 import numpy as np
-import rerun as rr
 import torch
-from jaxtyping import Int64, Shaped, UInt8
+from jaxtyping import Shaped, UInt8
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
 from rerun.experimental.dataloader import ColumnDecoder, DecodeRequest, FieldBatch
 from torch import Tensor
-from torchcodec.decoders import VideoDecoder
 
-from simplecv.catalog_video import CatalogVideo, read_catalog_videos
-from simplecv.catalog_video_codec import catalog_codec_name, wrap_mp4
+from simplecv.catalog_video_reader import ChunkedVideoDecoder, open_decoders
 
 TimedeltaNs: TypeAlias = Shaped[ndarray, " n_samples"]
 """Catalog index values in timeline order, preserving the timeline dtype."""
@@ -48,125 +35,12 @@ RECOMMENDED_FETCH_BLOCK_SIZE: int = 1024
 """Recommended samples per query when a decoder ignores the shipped payloads."""
 
 
-def open_segment_decoder(
-    dataset: DatasetEntry, segment_id: str, entity: str, timeline: str, device: torch.device, fps: int
-) -> tuple[TimedeltaNs, list[bytes], list[bool], VideoDecoder]:
-    """Fetch one segment's video packets (one query), wrap them in the stream's codec, and open a GPU decoder.
-
-    Args:
-        dataset: Rerun catalog dataset entry holding the segment.
-        segment_id: Segment whose packets are fetched.
-        entity: Entity path of the ``VideoStream`` column, without a leading slash.
-        timeline: Index timeline the packets are read on. The reader's row order
-            is trusted; the ordering guard below fails loudly if it breaks.
-        device: Device the decoder outputs frames on (``cuda`` uses NVDEC).
-        fps: Nominal frame rate written into the wrapping MP4 track.
-
-    Returns:
-        The sample index values (original dtype, timeline order), the raw video
-        samples with their keyframe flags (relayable as a Rerun VideoStream),
-        and the decoder over the whole segment.
-    """
-    times, samples, keyframes, codec_value = read_segment_packets(dataset, segment_id, entity, timeline)
-    decoder: VideoDecoder = VideoDecoder(
-        wrap_mp4(samples, keyframes, fps, codec=catalog_codec_name(codec_value)),
-        device=device,
-        seek_mode="exact",
-        num_ffmpeg_threads=0,
-    )
-    return times, samples, keyframes, decoder
-
-
-def read_segment_packets(dataset: DatasetEntry, segment_id: str, entity: str, timeline: str) -> tuple[TimedeltaNs, list[bytes], list[bool], int]:
-    """Materialize one segment's whole ``VideoStream`` column in a single reader query.
-
-    Args:
-        dataset: Rerun catalog dataset entry holding the segment.
-        segment_id: Segment whose packets are fetched.
-        entity: Entity path of the ``VideoStream`` column, without a leading slash.
-        timeline: Index timeline the packets are read on.
-
-    Returns:
-        The sample index values (original dtype, timeline order), the raw video
-        samples, their keyframe flags, and the stream's codec FourCC.
-    """
-    video: CatalogVideo = read_catalog_videos(dataset, segment_id, [entity], timeline)[0]
-    samples: list[bytes] = [bytes(sample) for sample in video.samples]
-    codec: rr.VideoCodec = {"av1": rr.VideoCodec.AV1, "h264": rr.VideoCodec.H264, "hevc": rr.VideoCodec.H265}[video.codec]
-    return video.times, samples, video.keyframes, codec.value
-
-
-def relay_video_stream(dataset: DatasetEntry, segment_id: str, entity: str, timeline: str, start_ns: int, end_ns: int) -> int:
-    """Fetch a segment's stored video packets and relay [keyframe-before-start, end] with :func:`relay_video_packets`.
-
-    Callers that already hold the packets (an :func:`open_segment_decoder` caller does) should call
-    :func:`relay_video_packets` directly instead of fetching the whole column a second time.
-
-    Returns:
-        The number of samples logged.
-    """
-    times, samples, keyframes, codec_value = read_segment_packets(dataset, segment_id, entity, timeline)
-    return relay_video_packets(entity, timeline, times, samples, keyframes, rr.VideoCodec(codec_value), start_ns, end_ns)
-
-
-def relay_video_packets(
-    entity: str,
-    timeline: str,
-    times: TimedeltaNs,
-    samples: Sequence[bytes],
-    keyframes: Sequence[bool],
-    codec: rr.VideoCodec,
-    start_ns: int,
-    end_ns: int,
-) -> int:
-    """Log stored video packets for [keyframe-before-start, end] as a Rerun VideoStream at ``entity`` on ``timeline``.
-
-    Relaying the stored samples keeps the source resolution and bitrate that a
-    re-encoded per-frame image throws away, and costs the viewer one decode of
-    the bytes the catalog already holds. The window goes out as one ``send_columns``.
-
-    Args:
-        entity: Entity path the ``VideoStream`` is logged at, without a leading
-            slash. Use the catalog's own video path so the relayed stream lines
-            up with a future layer registration.
-        timeline: Index timeline the packets are re-logged on.
-        times: Sample index values in timeline order, as :func:`read_segment_packets` returns them.
-        samples: Raw video samples.
-        keyframes: Keyframe flag per sample.
-        codec: The stream's codec.
-        start_ns: First nanosecond of the window of interest. The relay opens at
-            the last keyframe at or before it, because a decoder cannot start
-            mid-GOP.
-        end_ns: Last nanosecond of the window, inclusive.
-
-    Returns:
-        The number of samples logged.
-    """
-    times_ns: Int64[ndarray, " n_samples"] = times.astype("timedelta64[ns]").astype(np.int64)
-    keyframe_indices: Int64[ndarray, " n_keyframes"] = np.flatnonzero(np.asarray(keyframes, dtype=bool))
-    if len(keyframe_indices) == 0:
-        raise ValueError(f"{entity} has no keyframe, so no window can be decoded")
-    # A decoder must start on a keyframe, so the window opens at the last one at or before
-    # start_ns — or at the stream's first, when the window opens before every keyframe.
-    anchors: Int64[ndarray, " n_anchors"] = keyframe_indices[times_ns[keyframe_indices] <= start_ns]
-    first: int = int(anchors[-1]) if len(anchors) else int(keyframe_indices[0])
-    last: int = int(np.searchsorted(times_ns, end_ns, side="right"))
-    rr.log(entity, rr.VideoStream(codec=codec), static=True)
-    if last > first:
-        rr.send_columns(
-            entity,
-            indexes=[rr.TimeColumn(timeline, duration=times_ns[first:last].astype("timedelta64[ns]"))],
-            columns=rr.VideoStream.columns(sample=list(samples[first:last]), is_keyframe=list(keyframes[first:last])),
-        )
-    return max(0, last - first)
-
-
 class SegmentNvdecDecoder(ColumnDecoder[Tensor]):
-    """Serve a fetched request block from the cached whole-segment GPU decoder.
+    """Serve a fetched request block from the segment's chunked decoder (:mod:`simplecv.catalog_video_reader`).
 
-    The base-class defaults (no ``prior_keyframe_path``) make the dataloader ship each
-    grid slot as a point read. The shipped bytes are ignored because frames come from
-    the cached segment-wide NVDEC decoder instead.
+    The base-class defaults (no ``prior_keyframe_path``) make the dataloader ship each grid slot as a point read; the
+    shipped bytes are ignored, the frames come from GOP-aligned chunks of the segment instead, so memory is a few
+    chunks whatever the segment's length.
     """
 
     def __init__(
@@ -175,7 +49,6 @@ class SegmentNvdecDecoder(ColumnDecoder[Tensor]):
         entity: str,
         timeline: str,
         device: torch.device,
-        fps: int,
         *,
         max_frames_per_call: int | None = None,
         transform: Callable[[UInt8[Tensor, "n 3 h w"]], Tensor] | None = None,
@@ -184,11 +57,9 @@ class SegmentNvdecDecoder(ColumnDecoder[Tensor]):
 
         Args:
             dataset: Rerun catalog dataset entry the segments come from.
-            entity: Entity path of the ``VideoStream`` column, without a leading slash.
-            timeline: Index timeline the packets are read on (row order per
-                ``open_segment_decoder``'s ordering guard).
-            device: Device decoded frames land on (``cuda`` uses NVDEC).
-            fps: Nominal frame rate of the stored video.
+            entity: Entity path of the ``VideoStream`` column.
+            timeline: A temporal or a sequence timeline.
+            device: ``cuda`` decodes on NVDEC; take it from :func:`simplecv.catalog_video_reader.select_decode_device`.
             max_frames_per_call: Decode a fetched block at most this many frames at a time (None: one call per segment run).
                 A 1,024-frame block of 1080p RGB is 6.4 GB on the device; slices bound that peak.
             transform: Applied on the device to each decoded slice (``n 3 h w`` uint8) before results are kept, e.g. to reduce
@@ -202,51 +73,45 @@ class SegmentNvdecDecoder(ColumnDecoder[Tensor]):
         self._entity = entity
         self._timeline = timeline
         self._device = device
-        self._fps = fps
         self._segment_id: str | None = None
-        self._decoder: VideoDecoder | None = None
+        self.decoder: ChunkedVideoDecoder | None = None
+        """The current segment's decoder; its ``reader`` relays the stored samples (``relay_video``)."""
         self.query_seconds: float = 0.0
-        """Whole-segment packet query, mux, and decoder initialization wall time."""
+        """Index query and reader setup, per segment."""
         self.decode_seconds: float = 0.0
-        """Indexed GPU frame decode wall time."""
+        """Chunk fetches and GPU decode."""
         self.query_count: int = 0
-        """Whole-segment packet materializations performed by this decoder."""
         self.times: TimedeltaNs = np.empty(0, dtype="timedelta64[ns]")
-        """The current segment's sample timestamps (timedelta64[ns], timeline order)."""
-        self.samples: list[bytes] | None = None
-        """The current segment's raw video samples, relayable as a Rerun VideoStream."""
-        self.keyframes: list[bool] | None = None
-        """Keyframe flag per raw sample."""
+        """The current segment's sample index values, in the timeline's dtype."""
 
-    def _ensure_segment(self, segment_id: str) -> None:
-        if segment_id != self._segment_id:
+    def _ensure_segment(self, segment_id: str) -> ChunkedVideoDecoder:
+        if segment_id != self._segment_id or self.decoder is None:
             started: float = perf_counter()
-            self.times, self.samples, self.keyframes, self._decoder = open_segment_decoder(
-                self._dataset, segment_id, self._entity, self._timeline, self._device, self._fps
-            )
+            self.decoder = open_decoders(self._dataset, segment_id, [self._entity], self._timeline, self._device)[0]
+            self.times = self.decoder.index.times
             self.query_seconds += perf_counter() - started
             self.query_count += 1
             self._segment_id = segment_id
+        return self.decoder
 
     def decode_at(self, index_value: int | np.datetime64 | np.timedelta64, segment_id: str) -> FrameRgbChw | None:
         """Return a segment's latest frame at or before an index value."""
-        self._ensure_segment(segment_id)
+        decoder: ChunkedVideoDecoder = self._ensure_segment(segment_id)
         frame_index: int = int(np.searchsorted(self.times, index_value, side="right")) - 1
         if frame_index < 0:
             return None
-        assert self._decoder is not None
         started: float = perf_counter()
-        frame_chw: FrameRgbChw = self._decoder.get_frame_at(frame_index).data
+        frame_chw: FrameRgbChw = decoder.get_frame_at(frame_index)
         self.decode_seconds += perf_counter() - started
         return frame_chw
 
     def decode(self, batch: FieldBatch, requests: Sequence[DecodeRequest]) -> Sequence[Tensor | None]:
         """Decode one aligned result per request in a fetched field block: an RGB ``FrameRgbChw``, or its ``transform``.
 
-        Contiguous same-segment requests share one ``get_frames_at`` call, so a
-        block costs one codec pass per segment instead of one seek per request.
+        Contiguous same-segment requests share one ``get_frames_at`` call, so a block costs one codec pass per segment
+        instead of one seek per request.
         """
-        del batch  # decoded from the segment-wide cache, not the fetched point reads
+        del batch  # decoded from the segment's chunks, not the fetched point reads
         decoded: list[Tensor | None] = [None] * len(requests)
         start: int = 0
         while start < len(requests):
@@ -254,7 +119,7 @@ class SegmentNvdecDecoder(ColumnDecoder[Tensor]):
             stop: int = start
             while stop < len(requests) and requests[stop].segment_id == segment_id:
                 stop += 1
-            self._ensure_segment(segment_id)
+            decoder: ChunkedVideoDecoder = self._ensure_segment(segment_id)
             positions: list[int] = []
             frame_indices: list[int] = []
             for position in range(start, stop):
@@ -264,9 +129,8 @@ class SegmentNvdecDecoder(ColumnDecoder[Tensor]):
                     frame_indices.append(frame_index)
             step: int = self._max_frames or max(len(frame_indices), 1)
             for first in range(0, len(frame_indices), step):
-                assert self._decoder is not None
                 started: float = perf_counter()
-                frames_nchw: Tensor = self._decoder.get_frames_at(frame_indices[first : first + step]).data
+                frames_nchw: Tensor = decoder.get_frames_at(frame_indices[first : first + step])
                 if self._transform is not None:
                     frames_nchw = self._transform(frames_nchw)
                 self.decode_seconds += perf_counter() - started

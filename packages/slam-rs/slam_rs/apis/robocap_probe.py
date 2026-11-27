@@ -8,15 +8,14 @@ from typing import Literal
 import rerun as rr
 from jaxtyping import Float64
 from numpy import ndarray
+from simplecv.catalog_video_reader import DecodeRequest, select_decode_device
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from slam_rs import BackendRequest, _core
 from slam_rs.catalog_feed import (
     ROBOCAP_RIG,
     CatalogSegment,
-    DecodeRequest,
     open_segment,
-    select_decode_device,
 )
 from slam_rs.catalog_layer import LayerDetail, LayerRun, track_layer
 from slam_rs.config import SlamConfig, load_slam_config

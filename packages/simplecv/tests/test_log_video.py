@@ -17,12 +17,13 @@ from jaxtyping import Int64, UInt8
 from numpy import ndarray
 from pyarrow import ChunkedArray
 
+from simplecv.catalog_video import packet_views
+from simplecv.catalog_video_codec import wrap_mp4
 from simplecv.rerun_log_utils import (
     log_video,
     mp4_frame_timestamps_ns,
-    mux_h264_to_mp4,
-    read_video_stream_from_rrd,
 )
+from simplecv.testing import read_video_stream_from_rrd
 
 _FRAME_COUNT: int = 12
 _WIDTH: int = 64
@@ -371,11 +372,12 @@ def test_log_video_stream_roundtrip_pixels_match_source(
         timeline,
     )
     codec: rr.VideoCodec = stream_data[0]
-    times: ChunkedArray = stream_data[1]
     samples_chunked: ChunkedArray = stream_data[2]
     assert codec == rr.VideoCodec.H264
     stream_mp4: Path = tmp_path / "stream_remuxed.mp4"
-    mux_h264_to_mp4(times, samples_chunked, str(stream_mp4))
+    # Decoded front to back, so only the first sample's keyframe flag matters.
+    samples: list[UInt8[ndarray, " n_bytes"]] = packet_views(samples_chunked)
+    stream_mp4.write_bytes(wrap_mp4(samples, [index == 0 for index in range(len(samples))], 30, codec="h264"))
     stream_frames: list[UInt8[ndarray, "h w 3"]] = _decode_mp4(stream_mp4)
 
     assert len(stream_frames) == _FRAME_COUNT

@@ -1,10 +1,10 @@
 """The catalog streaming dataset: one decode feeds DetNet and KeyNet batches.
 
 Producer threads (default 4, ``num_workers=0`` style: threads in this process) take segments from the epoch's shuffled
-list. Per segment a producer reads the statics, the hand timeline and the video packets (three catalog queries), computes
-the labels of the kept frames (every 6th UmeTrack / 12th SHOW3D frame: the 5 fps pool) on CPU, and decodes each camera
-with its own torchcodec NVDEC decoder created on that thread. Images the validity rules reject are never decoded. Each
-kept image is letterboxed to the 640x480 net frame on the GPU, then
+list. Per segment a fetcher reads the statics, the hand timeline, the video index and the video packets a chunk of whole
+GOPs at a time (simplecv's ``CatalogVideoReader``); a producer computes the labels of the kept frames (every 6th UmeTrack /
+12th SHOW3D frame: the 5 fps pool) on CPU, and decodes each camera on NVDEC on its own thread. Images the validity rules
+reject are never decoded. Each kept image is letterboxed to the 640x480 net frame on the GPU, then
 
 - DetNet: pooled 4x4 to 160x120 and stored as uint8 (the rounded 4x4 mean) with its per-hand targets;
 - KeyNet: cut into 96x96 crops (positives and presence negatives, with their keypoint inputs) and stored in uint8.
@@ -30,7 +30,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Literal, Protocol, TypeAlias, runtime_checkable
+from typing import Literal, TypeAlias
 
 import numpy as np
 import pyarrow as pa
@@ -40,10 +40,8 @@ import torch.nn.functional as F
 from jaxtyping import Bool, Float32, Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
-from simplecv.catalog_video import CatalogVideo, read_catalog_videos
-from simplecv.catalog_video_codec import wrap_mp4
+from simplecv.catalog_video_reader import ChunkedVideoDecoder, open_decoders
 from torch import Tensor
-from torchcodec.decoders import VideoDecoder
 
 from handtrack.data.batches import CropKind, DetNetBatch, KeyNetBatch
 from handtrack.data.catalog import (
@@ -837,7 +835,7 @@ class _SegmentWork:
     hand_scale: float
     times: Int64[ndarray, "k"]
     """``video_time`` of the labelled rows."""
-    videos: tuple[CatalogVideo, ...]
+    videos: tuple[ChunkedVideoDecoder, ...]
     rig: CameraRig
     camera_angles: tuple[float, ...]
 
@@ -859,37 +857,20 @@ class SegmentFailure(Exception):
     """A per-segment failure (bad or corrupted data), retried once and then skipped; the message names the camera."""
 
 
-@runtime_checkable
-class FrameBatchLike(Protocol):
-    data: Tensor
-
-
-@runtime_checkable
-class FrameDecoder(Protocol):
-    """What the producers need from a decoder (torchcodec's ``VideoDecoder``)."""
-
-    def get_frames_at(self, indices: list[int]) -> FrameBatchLike: ...
-
-
 @dataclass(frozen=True, slots=True)
 class SegmentData:
-    """One segment as read from the catalog: rig, letterboxes, hand timeline and the cameras' encoded video."""
+    """One segment as read from the catalog: rig, letterboxes, hand timeline and the cameras' video."""
 
     rig: CameraRig
     letterboxes: tuple[Letterbox, ...]
     timeline: HandTimeline
-    videos: tuple[CatalogVideo, ...]
+    videos: tuple[ChunkedVideoDecoder, ...]
+    """One per camera over one shared reader; a decoder decodes on the thread that asks it for frames."""
     camera_angles: tuple[float, ...] = ()
     """Each camera's mounting roll in degrees (``catalog.camera_angles``: UmeTrack's ``source_camera_angle_deg``; SHOW3D, HOT3D 0), for perspective crops; empty = 0."""
 
 
 SegmentReader: TypeAlias = Callable[[SegmentInfo], SegmentData]
-DecoderOpener: TypeAlias = Callable[[CatalogVideo, int, torch.device], FrameDecoder]
-
-
-def open_nvdec_decoder(video: CatalogVideo, fps: int, device: torch.device) -> FrameDecoder:
-    """torchcodec on NVDEC over the segment's packets muxed into one MP4 (create it on the thread that uses it)."""
-    return VideoDecoder(wrap_mp4(video.samples, video.keyframes, fps, codec=video.codec), device=device, seek_mode="exact", num_ffmpeg_threads=0)
 
 
 def is_fatal(error: BaseException) -> bool:
@@ -945,17 +926,15 @@ class CatalogStream:
         config: StreamConfig,
         segments: tuple[SegmentInfo, ...] | None = None,
         read_segment: SegmentReader | None = None,
-        open_decoder: DecoderOpener | None = None,
     ) -> None:
-        """``read_segment`` and ``open_decoder`` replace the catalog and NVDEC (tests); then ``segments`` must be given."""
+        """``read_segment`` replaces the catalog and NVDEC (tests); then ``segments`` must be given."""
         if config.producers < 1 or config.fetchers < 1:
             raise ValueError("need at least one producer and one fetcher")
         self.config: StreamConfig = config
         self.device: torch.device = torch.device(config.device)
-        if open_decoder is None and (self.device.type != "cuda" or not torch.cuda.is_available()):
+        if read_segment is None and (self.device.type != "cuda" or not torch.cuda.is_available()):
             raise RuntimeError("the catalog stream decodes with NVDEC and needs a CUDA device")
         self._read_segment: SegmentReader = read_segment if read_segment is not None else self._read_from_catalog
-        self._open_decoder: DecoderOpener = open_decoder if open_decoder is not None else open_nvdec_decoder
         self._local: threading.local = threading.local()
         self._skipped: set[str] = set()
         self._detnet_on: bool = config.nets in ("detnet", "both")
@@ -1390,7 +1369,7 @@ class CatalogStream:
         return self._stop.is_set() or generation != self._generation
 
     def _read_from_catalog(self, info: SegmentInfo) -> SegmentData:
-        """Statics, timeline and video packets: three catalog queries on this thread's own client."""
+        """Statics, timeline and video index, on this thread's own client; frame requests fetch the packets."""
         entries: dict[str, DatasetEntry] | None = getattr(self._local, "entries", None)
         if entries is None:
             client: rr.catalog.CatalogClient = rr.catalog.CatalogClient(self.config.catalog_url)
@@ -1401,7 +1380,7 @@ class CatalogStream:
         statics: pa.Table = read_statics(entry, info)
         rig_letterboxes: tuple[CameraRig, tuple[Letterbox, ...]] = read_rig(statics, info, UPRIGHT_TURNS[info.dataset] if self.config.upright else None)
         timeline: HandTimeline = read_hand_timeline(entry, info, statics)
-        videos: tuple[CatalogVideo, ...] = read_catalog_videos(entry, info.segment_id, [f"{camera}/pinhole/video" for camera in layout.cameras], TIMELINE)
+        videos: tuple[ChunkedVideoDecoder, ...] = open_decoders(entry, info.segment_id, [f"{camera}/pinhole/video" for camera in layout.cameras], TIMELINE, self.device)
         angles: tuple[float, ...] = camera_angles(statics, info)
         return SegmentData(rig=rig_letterboxes[0], letterboxes=rig_letterboxes[1], timeline=timeline, videos=videos, camera_angles=angles)
 
@@ -1563,8 +1542,8 @@ class CatalogStream:
         for camera, video in enumerate(work.videos):
             if self._stale(work.generation):
                 raise _Stale
-            position: Int64[ndarray, "k"] = np.clip(np.searchsorted(video.t_ns, work.times), 0, len(video.t_ns) - 1)
-            matched: Bool[ndarray, "k"] = video.t_ns[position] == work.times
+            position: Int64[ndarray, "k"] = np.clip(np.searchsorted(video.index.t_ns, work.times), 0, len(video) - 1)
+            matched: Bool[ndarray, "k"] = video.index.t_ns[position] == work.times
             valid: Bool[ndarray, "k"] = work.labels.image_valid[:, camera].numpy()
             keep: Int64[ndarray, "m"] = np.flatnonzero(matched & valid)
             if camera not in self._local.considered:
@@ -1588,7 +1567,7 @@ class CatalogStream:
         self,
         work: _SegmentWork,
         camera: int,
-        video: CatalogVideo,
+        video: ChunkedVideoDecoder,
         position: Int64[ndarray, "k"],
         keep: Int64[ndarray, "m"],
         labels: SegmentLabels,
@@ -1598,7 +1577,6 @@ class CatalogStream:
     ) -> None:
         """Decode one camera's kept images in chunks and queue their DetNet and KeyNet samples."""
         layout: DatasetLayout = layout_for(work.info.dataset)
-        decoder: FrameDecoder | None = None
         letterbox: Letterbox = work.letterboxes[camera]
         chunk: int = max(1, DECODE_CHUNK_PIXELS // (letterbox.source_width * letterbox.source_height))
         for begin in range(0, len(keep), chunk):
@@ -1606,20 +1584,13 @@ class CatalogStream:
             identity: tuple[int, int] = (camera, int(chunk_rows[0]))
             if identity in self._local.committed:
                 continue
-            if decoder is None:
-                try:
-                    decoder = self._open_decoder(video, work.info.fps, self.device)
-                except RuntimeError as error:
-                    if isinstance(error, torch.OutOfMemoryError | torch.AcceleratorError):
-                        raise
-                    raise SegmentFailure("decoder creation") from error
             try:
-                decoded_frames: FrameBatchLike = decoder.get_frames_at(position[chunk_rows].tolist())
+                decoded: UInt8[Tensor, "m 3 h w"] = video.get_frames_at(position[chunk_rows].tolist())
             except RuntimeError as error:
                 if isinstance(error, torch.OutOfMemoryError | torch.AcceleratorError):
                     raise
                 raise SegmentFailure("decoder frames") from error
-            frames: UInt8[Tensor, "m h w"] = decoded_frames.data[:, 0]
+            frames: UInt8[Tensor, "m h w"] = decoded[:, 0]
             net: UInt8[Tensor, "m 480 640"] = letterbox.apply(frames)
             index: Int64[Tensor, "m"] = torch.from_numpy(chunk_rows).to(self.device)
             hand_label: Int64[Tensor, "m 2"] = labels.hand_label[index, camera]

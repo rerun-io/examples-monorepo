@@ -56,9 +56,9 @@ def test_catalog_hands_match_frozen_and_session_offsets(target, models, tmp_path
             if key == target:
                 videos = read_phone_videos(handle)
                 first = next(iter(videos.values()))
-                indices = pick_frames(quest, len(first.samples), 1e9 / float(np.median(np.diff(first.t_ns))))
+                indices = pick_frames(quest, len(first), 1e9 / float(np.median(np.diff(first.index.t_ns))))
                 for phone, video in videos.items():
-                    np.testing.assert_array_equal(video.t_ns[indices], np.rint(frozen[phone].times_s * 1e9).astype(np.int64))
+                    np.testing.assert_array_equal(video.index.t_ns[indices], np.rint(frozen[phone].times_s * 1e9).astype(np.int64))
                 detections = detect_episode(handle, quest, *models)
                 assert detections.keys() == frozen.keys()
                 for phone, actual in detections.items():

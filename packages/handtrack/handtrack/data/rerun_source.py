@@ -317,13 +317,11 @@ def rerun_producer(spec: SourceSpec, segments: Sequence[str], *, catalog_url: st
 
 NVDEC_SLICE: int = 64
 """Frames per NVDEC call: bounds the RGB peak (64 x 1080p = 400 MB) before the luma + letterbox transform shrinks it."""
-NOMINAL_FPS: int = 30
-"""Rate written into the decoder's MP4 wrapper; frames are addressed by position, so it does not change which frame is served."""
 
 
 def nvdec_producer(spec: SourceSpec, segments: Sequence[str], *, catalog_url: str, device: torch.device, endless: bool = False,
                    fetch_block_size: int = 1024, chunk: int = 256) -> Producer:
-    """A ``Producer`` that decodes on NVDEC in the training process (simplecv's segment-wide ``KeyedNvdecDecoder``).
+    """A ``Producer`` that decodes on NVDEC in the training process (simplecv's chunked ``KeyedNvdecDecoder``).
 
     The Rerun dataloader still queries the catalog and orders samples (``BlockShuffle``); frames are decoded, turned to luma and
     letterboxed on the device, so no CPU decode workers and no inter-process copies remain.
@@ -342,7 +340,7 @@ def nvdec_producer(spec: SourceSpec, segments: Sequence[str], *, catalog_url: st
 
         dataset = rr.catalog.CatalogClient(catalog_url).get_dataset(spec.dataset)
         fields = {f"cam{c}": Field(_video_field(camera), decode=KeyedNvdecDecoder(dataset, f"{camera}/pinhole/video".lstrip("/"), "frame_index", device,
-                                                                                   NOMINAL_FPS, max_frames_per_call=NVDEC_SLICE, transform=to_net(c)))
+                                                                                   max_frames_per_call=NVDEC_SLICE, transform=to_net(c)))
                   for c, camera in enumerate(spec.cameras)}
         stream = RerunIterableDataset(DataSource(dataset=dataset, segments=list(segments)), index="frame_index", fields=fields,
                                       fetch_block_size=fetch_block_size, shuffle_strategy=BlockShuffle(), decode_threads=1)

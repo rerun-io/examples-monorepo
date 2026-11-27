@@ -3,7 +3,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
-from test_stream import _fake_segment, _GrayDecoder
+from test_stream import _fake_segment
 
 from handtrack.data.cache import DetNetCache, KeyNetCache, read_manifest, write_cache
 from handtrack.data.catalog import UMETRACK
@@ -13,8 +13,7 @@ from handtrack.data.stream import CatalogStream, StreamConfig
 def _build(directory: Path) -> None:
     segments = {str(i): _fake_segment(str(i), i) for i in range(5)}
     with CatalogStream(StreamConfig(datasets=(UMETRACK,), device='cpu', nets='detnet', producers=1, fetchers=1, detnet_buffer=4, min_fill=0.0),
-                       segments=tuple(info for info, _ in segments.values()), read_segment=lambda info: segments[info.segment_id][1],
-                       open_decoder=lambda *_args: _GrayDecoder()) as stream:
+                       segments=tuple(info for info, _ in segments.values()), read_segment=lambda info: segments[info.segment_id][1]) as stream:
         write_cache(stream, directory, 'training', draw=3)
 
 
@@ -76,8 +75,7 @@ def _build_keynet(directory: Path, seed: int = 0, row_phase: float = 0.0) -> Non
     segments = {str(i): _fake_segment(str(i), i) for i in range(5)}
     with CatalogStream(StreamConfig(datasets=(UMETRACK,), device='cpu', nets='keynet', producers=1, fetchers=1, keynet_buffer=64, min_fill=0.0,
                                     seed=seed, row_phase=row_phase),
-                       segments=tuple(info for info, _ in segments.values()), read_segment=lambda info: segments[info.segment_id][1],
-                       open_decoder=lambda *_args: _GrayDecoder()) as stream:
+                       segments=tuple(info for info, _ in segments.values()), read_segment=lambda info: segments[info.segment_id][1]) as stream:
         write_cache(stream, directory, 'training', draw=3, net='keynet')
 
 
@@ -119,8 +117,7 @@ def test_row_phase_and_density_are_validated_and_density_multiplies_the_samples(
     for density in (1, 3):
         with CatalogStream(StreamConfig(datasets=(UMETRACK,), device='cpu', nets='detnet', producers=1, fetchers=1, detnet_buffer=64, min_fill=0.0,
                                         row_density=density),
-                           segments=tuple(info for info, _ in segments.values()), read_segment=lambda info: segments[info.segment_id][1],
-                           open_decoder=lambda *_args: _GrayDecoder()) as stream:
+                           segments=tuple(info for info, _ in segments.values()), read_segment=lambda info: segments[info.segment_id][1]) as stream:
             counts.append(write_cache(stream, tmp_path / str(density), 'training', draw=64).samples)
     assert counts == [6, 18]  # 12 frames at UmeTrack's stride 6: rows {0, 6}, then every second row
 

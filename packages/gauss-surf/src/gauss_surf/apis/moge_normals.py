@@ -36,7 +36,6 @@ from gauss_surf.contracts import (
     MOGE_INFERENCE_BATCH_SIZE,
     MOGE_NORMALS_LAYER,
     WIDE_CHOSEN_SHARPNESS_COLUMN,
-    WIDE_FPS,
     WIDE_INTRINSICS_COLUMN,
     WIDE_RESOLUTION_COLUMN,
 )
@@ -134,7 +133,6 @@ def _infer_and_write_normals(
     decoded_frames: Iterator[UInt8[Tensor, "3 h w"]] = reader.decode_frames(
         VIDEO_WIDE,
         inputs.timestamps,
-        fps=WIDE_FPS,
         device=torch.device("cuda"),
     )
     inferred_frames: int = 0

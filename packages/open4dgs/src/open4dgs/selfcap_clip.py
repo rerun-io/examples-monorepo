@@ -31,8 +31,10 @@ from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
 from simplecv.catalog_rig_layout import CatalogCamera, CatalogRigLayout, catalog_components, parse_rig_layout
-from simplecv.catalog_video import CatalogVideo, catalog_keyframes, catalog_video_from_table
-from simplecv.catalog_video_decode import StreamDecoder
+from simplecv.catalog_video import CatalogVideo, catalog_video_from_table
+from simplecv.catalog_video_codec import wrap_mp4
+from simplecv.catalog_video_reader import StreamIndex, read_video_index, select_decode_device
+from simplecv.video_io import bind_cuda_device
 from torch import Tensor
 
 from open4dgs.catalog_clip import (
@@ -214,7 +216,9 @@ def read_timed_clip(
         ValueError: If a camera is missing, uncalibrated or lensed, a camera has no frame near a reference time, or the
             window runs past the segment.
     """
-    decode_on: torch.device = decode_device if decode_device is not None else torch.device("cuda")
+    from torchcodec.decoders import VideoDecoder
+
+    decode_on: torch.device = decode_device if decode_device is not None else torch.device(select_decode_device())
     entry: DatasetEntry = CatalogClient(catalog_url).get_dataset(dataset)
     layout: CatalogRigLayout = parse_rig_layout(catalog_components(entry.filter_segments(segment_id).schema()))
     by_name: dict[str, CatalogCamera] = {camera.name: camera for camera in layout.cameras}
@@ -242,21 +246,9 @@ def read_timed_clip(
             raise ValueError(f"{segment_id} {camera.name}: lens coefficients {distortion[:4].tolist()}... are not undistorted here (pinhole only)")
 
     videos: list[str] = [camera.video_entity for camera in chosen]
-    # is_keyframe is sparse (logged on keyframes only), so one query per camera: its rows are its frames.
-    per_camera_times: list[Float64[ndarray, " m"]] = []
-    per_camera_keyframes: list[Float64[ndarray, " k"]] = []
-    for video in videos:
-        flags: pa.Table = (
-            entry.filter_segments(segment_id)
-            .filter_contents([video])
-            .reader(index=VIDEO_TIMELINE)
-            .select(VIDEO_TIMELINE, f"{video}:VideoStream:is_keyframe")
-            .to_arrow_table()
-        )
-        all_times: Float64[ndarray, " n"] = _seconds(flags.column(VIDEO_TIMELINE))
-        key: Bool[ndarray, " n"] = np.asarray(catalog_keyframes(flags.column(f"{video}:VideoStream:is_keyframe")), dtype=bool)
-        per_camera_times.append(np.unique(all_times))
-        per_camera_keyframes.append(np.unique(all_times[key]))
+    streams: tuple[StreamIndex, ...] = read_video_index(entry, segment_id, videos, VIDEO_TIMELINE)
+    per_camera_times: list[Float64[ndarray, " m"]] = [stream.t_ns.astype(np.float64) / 1e9 for stream in streams]
+    per_camera_keyframes: list[Float64[ndarray, " k"]] = [times[stream.keyframes] for times, stream in zip(per_camera_times, streams, strict=True)]
     reference: Float64[ndarray, " m"] = per_camera_times[0]
     first: int = int(np.searchsorted(reference, time_start_s - 1e-6))
     if first + num_frames > len(reference):
@@ -314,8 +306,11 @@ def read_timed_clip(
         positions: list[int] = [int(np.argmin(np.abs(stream_times[start:] - t))) for t in times_s[index]]
         if np.abs(stream_times[start:][positions] - times_s[index]).max() > 1e-6:
             raise ValueError(f"{video}: some clip frames have no packet")
-        decoder = StreamDecoder(stream, start, len(stream.samples), str(decode_on), max(1, round(fps)))
-        decoded: UInt8[Tensor, "t 3 h w"] = decoder.frames([start + p for p in positions]).permute(0, 3, 1, 2)
+        bind_cuda_device(str(decode_on))
+        # The clip's window of packets, not the stream's: the table above holds only the clip.
+        mp4: bytes = wrap_mp4(stream.samples[start:], stream.keyframes[start:], max(1, round(fps)), codec=stream.codec)
+        decoder = VideoDecoder(mp4, device=str(decode_on), seek_mode="exact", num_ffmpeg_threads=0)
+        decoded: UInt8[Tensor, "t 3 h w"] = decoder.get_frames_at(positions).data
         if (decoded.shape[3], decoded.shape[2]) != stored_wh:
             raise ValueError(f"{video}: decoded {decoded.shape[3]}x{decoded.shape[2]}, the pinhole says {stored_wh}")
         out_frames.append(

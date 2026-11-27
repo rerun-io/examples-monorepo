@@ -34,10 +34,12 @@ from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
 from simplecv.catalog_calibration import CatalogCameraCalibration, camera_models_from_static_table, read_lens
 from simplecv.catalog_rig_layout import CatalogCamera, CatalogRigLayout, catalog_components, parse_rig_layout
-from simplecv.catalog_video import CatalogVideo, catalog_keyframes, catalog_video_from_table
-from simplecv.catalog_video_decode import StreamDecoder
+from simplecv.catalog_video import CatalogVideo, catalog_video_from_table
+from simplecv.catalog_video_codec import wrap_mp4
+from simplecv.catalog_video_reader import StreamIndex, read_video_index, select_decode_device
 from simplecv.rrd_query_utils import first_valid_value
 from simplecv.sensors.camera.vicon_radial import ViconRadialLens
+from simplecv.video_io import bind_cuda_device
 from torch import Tensor
 
 from open4dgs.roi_cameras import VirtualCamera, fit_virtual_camera, virtual_to_source_pixels
@@ -415,7 +417,9 @@ def read_catalog_clip(
     """
     if roi is not None and not undistort:
         raise ValueError("roi needs undistort=True (the virtual cameras are pinholes)")
-    decode_on: torch.device = decode_device if decode_device is not None else torch.device("cuda")
+    from torchcodec.decoders import VideoDecoder
+
+    decode_on: torch.device = decode_device if decode_device is not None else torch.device(select_decode_device())
     entry: DatasetEntry = CatalogClient(catalog_url).get_dataset(dataset)
     layout: CatalogRigLayout = parse_rig_layout(catalog_components(entry.filter_segments(segment_id).schema()))
     by_name: dict[str, CatalogCamera] = {camera.name: camera for camera in layout.cameras}
@@ -440,22 +444,14 @@ def read_catalog_clip(
         raise ValueError(f"segment {segment_id} has no property:capture:fps")
     fps: float = float(np.asarray(fps_cell).reshape(-1)[0])
 
-    # Keyframe flags of the whole segment (no samples) fix each camera's decode window.
+    # The cameras' keyframe flags (no samples) fix each camera's decode window.
     videos: list[str] = [camera.video_entity for camera in chosen]
-    flag_table: pa.Table = (
-        entry.filter_segments(segment_id)
-        .filter_contents(videos)
-        .reader(index=FRAME_TIMELINE)
-        .select(FRAME_TIMELINE, *[f"{video}:VideoStream:is_keyframe" for video in videos])
-        .to_arrow_table()
-    )
-    timeline: Int64[ndarray, " n"] = flag_table.column(FRAME_TIMELINE).to_numpy().astype(np.int64)
+    streams: tuple[StreamIndex, ...] = read_video_index(entry, segment_id, videos, FRAME_TIMELINE)
+    timeline: Int64[ndarray, " n"] = np.unique(np.concatenate([stream.t_ns for stream in streams]))
     frames: Int64[ndarray, " t"] = select_frame_indices(frame_start, num_frames, frame_step, timeline)
     window_start: int = int(frames.min())
-    for video in videos:
-        keyframe_times: Int64[ndarray, " k"] = timeline[
-            np.asarray(catalog_keyframes(flag_table.column(f"{video}:VideoStream:is_keyframe")), dtype=bool)
-        ]
+    for video, indexed in zip(videos, streams, strict=True):
+        keyframe_times: Int64[ndarray, " k"] = indexed.t_ns[indexed.keyframes]
         before: Int64[ndarray, " k"] = keyframe_times[keyframe_times <= frames.min()]
         if len(before) == 0:
             raise ValueError(f"{video}: no keyframe at or before frame {int(frames.min())}")
@@ -491,8 +487,11 @@ def read_catalog_clip(
         positions: list[int] = [int(np.searchsorted(times[first:], frame)) for frame in frames.tolist()]
         if any(times[first + p] != f for p, f in zip(positions, frames.tolist(), strict=True)):
             raise ValueError(f"{video}: some clip frames have no packet")
-        decoder = StreamDecoder(stream, first, len(stream.samples), str(decode_on), max(1, round(fps)))
-        decoded: UInt8[Tensor, "t 3 h w"] = decoder.frames([first + p for p in positions]).permute(0, 3, 1, 2)
+        bind_cuda_device(str(decode_on))
+        # The clip's window of packets, not the stream's: the table above holds only the clip.
+        mp4: bytes = wrap_mp4(stream.samples[first:], stream.keyframes[first:], max(1, round(fps)), codec=stream.codec)
+        decoder = VideoDecoder(mp4, device=str(decode_on), seek_mode="exact", num_ffmpeg_threads=0)
+        decoded: UInt8[Tensor, "t 3 h w"] = decoder.get_frames_at(positions).data
         if (decoded.shape[3], decoded.shape[2]) != stored_wh:
             raise ValueError(f"{video}: decoded {decoded.shape[3]}x{decoded.shape[2]}, the pinhole says {stored_wh}")
         lens: ViconRadialLens | None = read_lens(static, node) if undistort else None

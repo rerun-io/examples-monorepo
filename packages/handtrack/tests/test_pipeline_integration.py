@@ -41,3 +41,14 @@ def test_oracle_pipeline_tracks_both_hands_within_a_few_millimetres(tmp_path: Pa
     track: SegmentTrack = load_track(tmp_path / "it" / "known" / f"{SEGMENT}.npz")
     assert track.tracked.shape == (30, 2) and track.box.shape == (30, 4, 2, 4)
     assert bool(np.isfinite(track.landmarks[track.tracked]).all())
+
+
+def test_a_segment_decodes_on_nvdec(tmp_path: Path) -> None:
+    from handtrack.pipeline import decoded_frames, read_segment
+
+    entry: rr.catalog.DatasetEntry = _entry()
+    config: RunConfig = RunConfig(name="it", segments=(SEGMENT,), max_frames=4, detector="oracle", keypoints="oracle", output_root=tmp_path)
+    data = read_segment(entry, select_segments(config, entry)[0])
+    assert all(video.device.type == "cuda" for video in data.videos)
+    native = next(decoded_frames(data, 4, torch.device("cuda"))).native
+    assert all(images.device.type == "cuda" and images.shape[0] == 4 for images in native)

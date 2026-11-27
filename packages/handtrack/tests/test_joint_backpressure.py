@@ -6,7 +6,7 @@ from threading import Event, Timer
 
 import pytest
 import torch
-from test_stream import _fake_segment, _Frames
+from test_stream import _fake_segment, _FakeVideo
 from test_train_loop import DETNET_SGD, KEYNET_SGD, FakeSource
 
 from handtrack.data.batches import DetNetBatch, KeyNetBatch
@@ -15,15 +15,14 @@ from handtrack.train.loop import LoopSettings, Trainer
 
 
 def joint_stream() -> CatalogStream:
-    segments = [_fake_segment(str(i), i * 12) for i in range(6)]
+    def decode(marker: int, indices: list[int]) -> torch.Tensor:
+        pixels = torch.tensor([marker + i + 1 for i in indices], dtype=torch.uint8)
+        return pixels[:, None, None, None].expand(-1, 3, 480, 640).clone()
 
-    class Decoder:
-        def __init__(self, marker: int) -> None:
-            self.marker = marker
-
-        def get_frames_at(self, indices: list[int]) -> _Frames:
-            pixels = torch.tensor([self.marker + i + 1 for i in indices], dtype=torch.uint8)
-            return _Frames(pixels[:, None, None, None].expand(-1, 3, 480, 640).clone())
+    segments = []
+    for i in range(6):
+        info, data = _fake_segment(str(i), i * 12)
+        segments.append((info, replace(data, videos=tuple(_FakeVideo(video.index.t_ns, video.marker, decode) for video in data.videos))))
 
     augment = replace(evaluation_augment(KeyNetAugment()), drift_probability=0.0, edge_probability=0.0,
                       other_hand_probability=0.0, background_probability=1.0)
@@ -33,7 +32,6 @@ def joint_stream() -> CatalogStream:
                      queue_chunks=1, min_fill=1.0, intensity_range=(1.0, 1.0), keynet=augment),
         segments=tuple(info for info, _ in segments),
         read_segment=lambda info: segments[int(info.segment_id)][1],
-        open_decoder=lambda video, fps, device: Decoder(int(video.samples[0][0])),
     )
 
 

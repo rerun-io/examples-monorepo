@@ -10,21 +10,19 @@ from pathlib import Path
 import numpy as np
 import torch
 from dataforge.clocks import nearest_framesets
+from einops import rearrange
 from jaxtyping import Bool, Float16, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from posekit.artifacts import DEFAULT_ONNX_CACHE_DIR
 from posekit.models.rtmpose import RtmPoseConfig
 from posekit.models.yolox import YoloxDetector, YoloxDetectorConfig, dynamic_yolox
 from posekit.predictions import BoxDetections, Keypoints2d
-from simplecv.catalog_video import CatalogVideo
-from simplecv.catalog_video_codec import wrap_mp4
+from simplecv.catalog_video_reader import ChunkedVideoDecoder
 from torch import Tensor
-from torchcodec import FrameBatch
-from torchcodec.decoders import VideoDecoder
 from trtkit.backends import TensorRtBackendConfig
 from trtkit.onnx_precision import fp16_trunk
 
-from selfcap_curate.catalog_io import Segment, aligned_phone_videos, read_phone_videos
+from selfcap_curate.catalog_io import Segment, aligned_phone_times, read_phone_videos
 from selfcap_curate.keypoints import Keypoints2D, PoseModel, ViewDetections
 from selfcap_curate.records import TimeSync
 
@@ -71,59 +69,45 @@ def nearest_indices(pts: Float64[ndarray, "f"], want: Float64[ndarray, "n"]) -> 
 class FramePlan:
     times: Float64[ndarray, "n"]  # Aligned sampling grid in seconds.
     indices: dict[str, Int64[ndarray, "n"]]  # Nearest original frame index per synced phone.
-    videos: dict[str, CatalogVideo]  # Packets corresponding to the selected original frame indices.
+    videos: dict[str, ChunkedVideoDecoder]  # The synced phones' videos; the indices are their sample indices.
 
 
-def plan_frames(aligned: dict[str, CatalogVideo], rate: float) -> FramePlan:
-    """Anchor a half-open common grid at cut zero; use original sample clocks."""
-    if len(aligned) < 2 or not np.isfinite(rate) or rate <= 0.0 or any(len(v.samples) < 2 for v in aligned.values()):
+def plan_frames(videos: dict[str, ChunkedVideoDecoder], aligned_t_ns: dict[str, Int64[ndarray, "f"]], rate: float) -> FramePlan:
+    """Anchor a half-open common grid at cut zero; use original sample clocks (``aligned_t_ns``, per phone in ``videos``)."""
+    aligned: dict[str, Int64[ndarray, "f"]] = {phone: aligned_t_ns[phone] for phone in videos}
+    if len(aligned) < 2 or not np.isfinite(rate) or rate <= 0.0 or any(len(t) < 2 for t in aligned.values()):
         raise ValueError("need two synced videos, two frames and a positive finite rate")
-    lo: float = max(0.0, max(float(v.t_ns[0]) * 1e-9 for v in aligned.values()))
-    hi: float = min(float(v.t_ns[-1] + np.median(np.diff(v.t_ns))) * 1e-9 for v in aligned.values())
+    lo: float = max(0.0, max(float(t[0]) * 1e-9 for t in aligned.values()))
+    hi: float = min(float(t[-1] + np.median(np.diff(t))) * 1e-9 for t in aligned.values())
     times: Float64[ndarray, "n"] = np.arange(np.ceil(lo * rate), np.ceil(hi * rate), dtype=np.float64) / rate
     times = times[times < hi]
     if not len(times):
         raise ValueError("empty synced overlap")
-    return FramePlan(times, {p: nearest_indices(v.t_ns.astype(np.float64) * 1e-9, times) for p, v in aligned.items()}, aligned)
+    return FramePlan(times, {p: nearest_indices(t.astype(np.float64) * 1e-9, times) for p, t in aligned.items()}, videos)
 
 
-def decode_wanted(decoder: VideoDecoder, indices: Int64[ndarray, "n"], batch: int, chunk: int = 64) -> Iterator[FrameBatch]:
-    """Decode in order from the first to the last wanted frame and yield the wanted frames, repeats included, ``batch`` at a time.
+def decode_wanted(decoder: ChunkedVideoDecoder, indices: Int64[ndarray, "n"], batch: int) -> Iterator[UInt8[Tensor, "b h w 3"]]:
+    """The wanted frames (sorted, repeats included) as NHWC, ``batch`` at a time, each chunk of the video decoded once.
 
-    One pass costs no more than picking: AV1 references keep about 85% of a phone's frames needed even for a
-    2 Hz plan, and a plan at the native rate wants every frame.
+    Asking for the wanted frames costs no more than decoding the range: AV1 references keep about 85% of a phone's
+    frames needed even for a 2 Hz plan, and a plan at the native rate wants every frame.
     """
     if np.any(np.diff(indices) < 0):
         raise ValueError("wanted frames must be sorted")
     if len(indices) and (indices[0] < 0 or indices[-1] >= len(decoder)):
         raise ValueError("wanted frames must lie inside the video")
-    stop: int = int(indices[-1]) + 1 if len(indices) else 0
-    held: FrameBatch | None = None
-    for start in range(int(indices[0]) if len(indices) else 0, stop, chunk):
-        frames: FrameBatch = decoder.get_frames_in_range(start, min(start + chunk, stop))
-        picked: FrameBatch = frames[torch.from_numpy(indices[(indices >= start) & (indices < start + chunk)] - start)]
-        held = (
-            picked
-            if held is None
-            else FrameBatch(
-                torch.cat([held.data, picked.data]),
-                torch.cat([held.pts_seconds, picked.pts_seconds]),
-                torch.cat([held.duration_seconds, picked.duration_seconds]),
-            )
-        )
-        while len(held) >= batch:
-            yield held[:batch]
-            held = held[batch:]
-    if held is not None and len(held):
-        yield held
+    for begin in range(0, len(indices), batch):
+        yield rearrange(decoder.get_frames_at(indices[begin : begin + batch].tolist()), "n c h w -> n h w c").contiguous()
 
 
-def plan_episode(segment: Segment, rate: float, sync: TimeSync, videos: dict[str, CatalogVideo] | None = None) -> FramePlan:
-    """Read named segment streams and prepare original-frame selections."""
-    videos = aligned_phone_videos(read_phone_videos(segment), sync) if videos is None else videos
+def plan_episode(
+    segment: Segment, rate: float, sync: TimeSync, videos: dict[str, ChunkedVideoDecoder] | None = None
+) -> FramePlan:
+    """Index named segment streams (or take ``videos`` already indexed on the capture clock) and prepare original-frame selections."""
+    videos = read_phone_videos(segment) if videos is None else videos
     offsets: dict[str, float | None] = sync.offsets_ms or {}
-    videos = {p: v for p, v in videos.items() if offsets.get("exo/" + p) is not None}
-    return plan_frames(videos, rate)
+    synced: dict[str, ChunkedVideoDecoder] = {p: v for p, v in videos.items() if offsets.get("exo/" + p) is not None}
+    return plan_frames(synced, aligned_phone_times(synced, sync), rate)
 
 
 @torch.inference_mode()
@@ -134,7 +118,7 @@ def detect_keypoints(
     rate: float,
     *,
     sync: TimeSync,
-    videos: dict[str, CatalogVideo] | None = None,
+    videos: dict[str, ChunkedVideoDecoder] | None = None,
 ) -> Keypoints2D:
     """Infer three people per phone on the aligned grid; dense plans track, sparse plans detect every sample in batches of eight."""
     plan: FramePlan = plan_episode(segment, rate, sync, videos)
@@ -142,19 +126,14 @@ def detect_keypoints(
         return Keypoints2D(plan.times, detect_tracked(plan, detector, pose, refresh=round(rate)), rate)
     views: dict[str, ViewDetections] = {}
     for phone, video in plan.videos.items():
-        fps: int = round(1e9 / float(np.median(np.diff(video.t_ns))))
         indices: Int64[ndarray, "n"] = plan.indices[phone]
-        wanted: Float64[ndarray, "n"] = indices.astype(np.float64) / fps
-        decoder = VideoDecoder(wrap_mp4(video.samples, video.keyframes, fps, video.codec), device="cuda", dimension_order="NHWC", seek_mode="exact")
         xy: Float32[ndarray, "n 3 133 2"] = np.full((len(plan.times), 3, 133, 2), np.nan, np.float32)
         scores: Float16[ndarray, "n 3 133"] = np.zeros((len(plan.times), 3, 133), np.float16)
         boxes: Float32[ndarray, "n 3 4"] = np.full((len(plan.times), 3, 4), np.nan, np.float32)
         confidence: Float32[ndarray, "n 3"] = np.zeros((len(plan.times), 3), np.float32)
         start: int = 0
-        for frames in decode_wanted(decoder, indices, batch=8):
-            if not np.allclose(frames.pts_seconds.cpu().numpy(), wanted[start : start + len(frames)], rtol=0.0, atol=1e-9):
-                raise ValueError("decoder changed selected source timestamps")
-            detected: BoxDetections = detector(frames.data)
+        for frames in decode_wanted(video, indices, batch=8):
+            detected: BoxDetections = detector(frames)
             fi: Int64[ndarray, "d"] = detected.frame_indices.cpu().numpy()
             sc: Float32[ndarray, "d"] = detected.scores.cpu().numpy()
             rows: list[int] = []
@@ -163,7 +142,7 @@ def detect_keypoints(
                 rows.extend(candidates[np.argsort(-sc[candidates], kind="stable")[:3]].tolist())
             if len(rows):
                 selected: BoxDetections = BoxDetections(detected.xyxy[rows], detected.scores[rows], detected.frame_indices[rows])
-                keypoints: Keypoints2d = pose(frames.data, selected)
+                keypoints: Keypoints2d = pose(frames, selected)
                 kfi: Int64[ndarray, "d"] = keypoints.frame_indices.cpu().numpy()
                 if not np.array_equal(kfi, fi[rows]):
                     raise ValueError("pose changed detection instance order")
@@ -173,7 +152,7 @@ def detect_keypoints(
             start += len(frames)
         if start != len(plan.times):
             raise ValueError(f"{phone}: decoded {start} of {len(plan.times)} planned frames")
-        del decoder
+        video.close()
         views[phone] = ViewDetections(boxes.astype(np.float64), confidence.astype(np.float64), xy.astype(np.float64), scores.astype(np.float64))
     return Keypoints2D(plan.times, views, rate)
 
@@ -192,20 +171,18 @@ def detect_tracked(
     # One decode thread per phone owns that phone's chunk decoders (a CUDA decoder must stay on the thread that made it) and
     # decodes each stream one batch ahead, so both NVDEC engines work while this thread runs YOLOX and RTMW.
     threads = [ThreadPoolExecutor(1, thread_name_prefix=f"decode-{i}") for i in range(len(phones))]
-    owner_phone, first_tick, length, wanted, opened = [], [], [], [], []
+    owner_phone, first_tick, length, opened = [], [], [], []
     for p_index, (phone, video) in enumerate(plan.videos.items()):
-        fps: int = round(1e9 / float(np.median(np.diff(video.t_ns))))
         chunks = [plan.indices[phone][begin:stop] for begin, stop in zip(bounds[:-1], bounds[1:], strict=True)]
-        opened.append(threads[p_index].submit(open_chunk_sources, video, fps, chunks))
+        opened.append(threads[p_index].submit(open_chunk_sources, video, chunks))
         for begin, chunk in zip(bounds[:-1], chunks, strict=True):
             owner_phone.append(p_index)
             first_tick.append(int(begin))
             length.append(len(chunk))
-            wanted.append(chunk.astype(np.float64) / fps)
-    per_phone: list[list[Iterator[FrameBatch]]] = [future.result() for future in opened]
-    sources: list[Iterator[FrameBatch]] = [source for phone_sources in per_phone for source in phone_sources]
+    per_phone: list[list[Iterator[Tensor]]] = [future.result() for future in opened]
+    sources: list[Iterator[Tensor]] = [source for phone_sources in per_phone for source in phone_sources]
     try:
-        return track_streams(plan, detector, pose, refresh, threads, sources, owner_phone, first_tick, length, wanted)
+        return track_streams(plan, detector, pose, refresh, threads, sources, owner_phone, first_tick, length)
     finally:
         sources.clear()
         for thread, phone_sources in zip(threads, per_phone, strict=True):
@@ -213,11 +190,11 @@ def detect_tracked(
             thread.shutdown(wait=True, cancel_futures=True)
 
 
-def open_chunk_sources(video: CatalogVideo, fps: int, chunks: list[Int64[ndarray, "c"]]) -> list[Iterator[FrameBatch]]:
-    """One CUDA decoder per time chunk, created on the calling (decode) thread."""
-    data = wrap_mp4(video.samples, video.keyframes, fps, video.codec)
+def open_chunk_sources(video: ChunkedVideoDecoder, chunks: list[Int64[ndarray, "c"]]) -> list[Iterator[Tensor]]:
+    """One decoder per time chunk over the phone's reader: the chunks advance in lockstep, so each keeps its own place, and
+    walks forward, so one open chunk each."""
     return [
-        decode_wanted(VideoDecoder(data, device="cuda", dimension_order="NHWC", seek_mode="exact"), chunk, batch=TRACK_DECODE_BATCH, chunk=TRACK_DECODE_BATCH)
+        decode_wanted(ChunkedVideoDecoder(video.reader, video.stream, video.device, max_open=1), chunk, batch=TRACK_DECODE_BATCH)
         for chunk in chunks
     ]
 
@@ -228,11 +205,10 @@ def track_streams(
     pose: Callable[[Tensor, BoxDetections], Keypoints2d],
     refresh: int,
     threads: list[ThreadPoolExecutor],
-    sources: list[Iterator[FrameBatch]],
+    sources: list[Iterator[Tensor]],
     owner_phone: list[int],
     first_tick: list[int],
     length: list[int],
-    wanted: list[Float64[ndarray, "c"]],
 ) -> dict[str, ViewDetections]:
     """The lockstep tracking loop of detect_tracked over prefetched decode streams."""
     phones: list[str] = list(plan.videos)
@@ -247,8 +223,8 @@ def track_streams(
     alive = torch.zeros((streams, 3), dtype=torch.bool, device=device)
     lost = torch.zeros(streams, dtype=torch.bool, device=device)
     last_detect: Int64[ndarray, "s"] = np.full(streams, -(2**40))
-    held: list[FrameBatch | None] = [None] * streams
-    ahead: list[Future[FrameBatch]] = [threads[owner_phone[stream]].submit(next, sources[stream]) for stream in range(streams)]
+    held: list[Tensor | None] = [None] * streams
+    ahead: list[Future[Tensor]] = [threads[owner_phone[stream]].submit(next, sources[stream]) for stream in range(streams)]
     for step in range(max(length)):
         active: Int64[ndarray, "a"] = np.flatnonzero(step < np.asarray(length))
         for stream in active:
@@ -256,9 +232,7 @@ def track_streams(
                 held[stream] = ahead[stream].result()
                 if step + TRACK_DECODE_BATCH < length[stream]:
                     ahead[stream] = threads[owner_phone[stream]].submit(next, sources[stream])
-                if not np.allclose(held[stream].pts_seconds.cpu().numpy(), wanted[stream][step : step + len(held[stream])], rtol=0.0, atol=1e-9):
-                    raise ValueError(f"{phones[owner_phone[stream]]}: decoder changed selected source timestamps")
-        frames: UInt8[Tensor, "a h w 3"] = torch.stack([held[stream].data[step % TRACK_DECODE_BATCH] for stream in active])
+        frames: UInt8[Tensor, "a h w 3"] = torch.stack([held[stream][step % TRACK_DECODE_BATCH] for stream in active])
         height, width = int(frames.shape[1]), int(frames.shape[2])
         act = torch.as_tensor(active, device=device)
         need: Int64[ndarray, "m"] = np.flatnonzero((~alive[act].any(1) | lost[act]).cpu().numpy() | (step - last_detect[active] >= refresh))

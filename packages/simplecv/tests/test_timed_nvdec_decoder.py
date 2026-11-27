@@ -18,44 +18,38 @@ from rerun.catalog import DatasetEntry  # noqa: E402
 from rerun.experimental.dataloader import DecodeRequest, FieldBatch  # noqa: E402
 
 import simplecv.rerun_dataloader as rerun_dataloader  # noqa: E402
+from simplecv.catalog_video_reader import ChunkedVideoDecoder  # noqa: E402
 from simplecv.rerun_dataloader import TimedFrame, TimedNvdecDecoder  # noqa: E402
 
 SEGMENT: str = "segment"
 """The one segment every request in these tests belongs to."""
 
 
-class _StubVideoDecoder:
-    """Segment-wide decoder stand-in whose frames carry their own sample index as pixels."""
+class _StubVideoDecoder(ChunkedVideoDecoder):
+    """Chunked decoder stand-in whose frames carry their own sample index as pixels."""
 
-    def __init__(self) -> None:
+    def __init__(self, times_ns: list[int]) -> None:
         self.requested: list[int] = []
         """Sample indices asked for so far, in call order."""
+        self._index = SimpleNamespace(times=np.asarray(times_ns, dtype=np.int64).astype("timedelta64[ns]"))
 
-    def get_frames_at(self, indices: list[int]) -> SimpleNamespace:
-        """Return one 2x2 frame per index, filled with that index, in torchcodec's batch result shape."""
+    @property
+    def index(self) -> SimpleNamespace:  # pyrefly: ignore[bad-override]
+        return self._index
+
+    def get_frames_at(self, indices: list[int]) -> Tensor:
+        """One 2x2 frame per index, filled with that index."""
         self.requested.extend(indices)
         frames_nchw: UInt8[Tensor, "n 3 2 2"] = torch.stack([torch.full((3, 2, 2), index, dtype=torch.uint8) for index in indices])
-        return SimpleNamespace(data=frames_nchw)
+        return frames_nchw
 
 
 def _bound_decoder(monkeypatch: pytest.MonkeyPatch, times_ns: list[int]) -> tuple[TimedNvdecDecoder, _StubVideoDecoder]:
-    """Build a decoder whose one segment holds samples at *times_ns*, with no catalog and no torchcodec."""
-    video = _StubVideoDecoder()
-
-    def open_decoder(
-        _dataset: DatasetEntry,
-        _segment_id: str,
-        _entity: str,
-        _timeline: str,
-        _device: torch.device,
-        _fps: int,
-    ) -> tuple[np.ndarray, list[bytes], list[bool], _StubVideoDecoder]:
-        """Stand in for the catalog and torchcodec boundary."""
-        return np.asarray(times_ns, dtype=np.int64).astype("timedelta64[ns]"), [], [], video
-
-    monkeypatch.setattr(rerun_dataloader, "open_segment_decoder", open_decoder)
+    """A decoder whose one segment holds samples at *times_ns*, with no catalog and no torchcodec."""
+    video = _StubVideoDecoder(times_ns)
+    monkeypatch.setattr(rerun_dataloader, "open_decoders", lambda _dataset, _segment_id, _entities, _timeline, _device: (video,))
     dataset: DatasetEntry = object.__new__(DatasetEntry)
-    return TimedNvdecDecoder(dataset, "video/wide", "video_time", torch.device("cpu"), 30), video
+    return TimedNvdecDecoder(dataset, "video/wide", "video_time", torch.device("cpu")), video
 
 
 def _requests(*index_ns: int) -> list[DecodeRequest]:

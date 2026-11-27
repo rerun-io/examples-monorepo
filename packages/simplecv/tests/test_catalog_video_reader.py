@@ -1,10 +1,9 @@
 """Chunked catalog video reads give the frames of the whole-column path, and never hold the whole column."""
 
 from collections.abc import Iterator
-from fractions import Fraction
 from pathlib import Path
+from types import SimpleNamespace
 
-import av
 import numpy as np
 import pyarrow as pa
 import pytest
@@ -14,7 +13,7 @@ import torch
 pytest.importorskip("rerun.catalog", reason="rerun.catalog is required by this test module")
 pytest.importorskip("torchcodec", reason="torchcodec is required by this test module")
 
-from simplecv.catalog_video import CatalogVideo, read_catalog_videos  # noqa: E402
+from simplecv.catalog_video import CatalogVideo  # noqa: E402
 from simplecv.catalog_video_codec import wrap_mp4  # noqa: E402
 from simplecv.catalog_video_reader import (  # noqa: E402
     CatalogVideoReader,
@@ -24,8 +23,12 @@ from simplecv.catalog_video_reader import (  # noqa: E402
     VideoChunk,
     chunk_starts,
     iter_chunks,
+    open_decoders,
     read_video_index,
+    relay_video,
+    select_decode_device,
 )
+from simplecv.testing import encode_h264, whole_column  # noqa: E402
 
 pytestmark = pytest.mark.integration
 
@@ -37,30 +40,13 @@ CAMERAS: dict[str, tuple[int, int, int, bool]] = {
 }
 
 
-def _encode(frames: int, gop: int, seed: int) -> list[tuple[bytes, bool]]:
-    """H.264 samples of moving noise (every frame distinct), closed GOPs of ``gop`` frames, no B-frames."""
-    codec = av.CodecContext.create("libx264", "w")
-    codec.width, codec.height, codec.pix_fmt = 96, 64, "yuv420p"
-    codec.time_base = Fraction(1, 30)
-    codec.options = {"g": str(gop), "keyint_min": str(gop), "bf": "0", "sc_threshold": "0"}
-    rng: np.random.Generator = np.random.default_rng(seed)
-    base: np.ndarray = rng.integers(0, 255, (64, 96, 3), dtype=np.uint8)
-    samples: list[tuple[bytes, bool]] = []
-    for index in range(frames):
-        frame = av.VideoFrame.from_ndarray(np.roll(base, 3 * index, axis=1), format="rgb24")
-        frame.pts = index
-        samples += [(bytes(packet), bool(packet.is_keyframe)) for packet in codec.encode(frame)]
-    samples += [(bytes(packet), bool(packet.is_keyframe)) for packet in codec.encode(None)]
-    return samples
-
-
 @pytest.fixture(scope="module")
 def recording(tmp_path_factory: pytest.TempPathFactory) -> Path:
     path: Path = tmp_path_factory.mktemp("video") / "cameras.rrd"
     with rr.RecordingStream("test", recording_id="segment") as rec:
         rec.save(path)
         for seed, (entity, (frames, gop, offset_ns, sparse)) in enumerate(CAMERAS.items()):
-            samples: list[tuple[bytes, bool]] = _encode(frames, gop, seed)
+            samples: list[tuple[bytes, bool]] = encode_h264(frames, gop, seed)
             times = (offset_ns + FRAME_NS * np.arange(len(samples), dtype=np.int64)).astype("timedelta64[ns]")
             rec.log(entity, rr.VideoStream(codec=rr.VideoCodec.H264), static=True)
             rec.send_columns(
@@ -85,7 +71,7 @@ def server(recording: Path) -> Iterator[rr.server.Server]:
 @pytest.fixture(scope="module")
 def whole(server: rr.server.Server) -> tuple[CatalogVideo, ...]:
     """The reference: today's whole-column read."""
-    return read_catalog_videos(server.client().get_dataset("test"), "segment", list(CAMERAS), "video_time")
+    return whole_column(server.client().get_dataset("test"), "segment", list(CAMERAS), "video_time")
 
 
 @pytest.fixture(scope="module")
@@ -226,19 +212,215 @@ def test_a_stream_that_runs_too_far_ahead_fails_instead_of_holding_the_session(s
         next(lead)
 
 
-def test_a_sequence_timeline_is_refused(tmp_path: Path) -> None:
-    path: Path = tmp_path / "frames.rrd"
-    with rr.RecordingStream("test", recording_id="segment") as rec:
-        rec.save(path)
-        rec.log("/cam/video", rr.VideoStream(codec=rr.VideoCodec.H264), static=True)
-        rec.set_time("frame", sequence=0)
-        rec.log("/cam/video", rr.VideoStream.from_fields(sample=b"x", is_keyframe=True))
-    with rr.server.Server(datasets={"test": [path]}) as running, pytest.raises(ValueError, match="seconds"):
-        read_video_index(running.client().get_dataset("test"), "segment", ["/cam/video"], "frame")
-
-
 def test_a_stream_without_keyframes_is_refused_rather_than_read_whole() -> None:
     times = np.arange(5, dtype=np.int64).astype("timedelta64[ns]")
     flagless = StreamIndex(entity="/cam/video", times=times, keyframes=np.zeros(5, dtype=bool), codec="h264")
     with pytest.raises(ValueError, match="/cam/video: the stream has no keyframe"):
         chunk_starts([flagless], chunk_ns=2)
+
+
+def test_decoders_land_frames_on_cuda_whenever_it_is_available(server: rr.server.Server, whole: tuple[CatalogVideo, ...]) -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("no CUDA device: the NVDEC path cannot be checked here")
+    assert select_decode_device() == "cuda"
+    decoders = open_decoders(server.client().get_dataset("test"), "segment", list(CAMERAS), "video_time", torch.device(select_decode_device()))
+    for decoder, video in zip(decoders, whole, strict=True):
+        frame: torch.Tensor = decoder.get_frame_at(len(decoder) - 1)
+        assert frame.device.type == "cuda"
+        assert torch.equal(frame, _whole_frames(video)[-1])
+        np.testing.assert_array_equal(decoder.index.times, video.times)
+
+
+@pytest.fixture
+def fresh_decode_policy(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Forget the cached NVDEC discovery and the printed notice for one test."""
+    import simplecv.catalog_video_reader as reader_module
+
+    discovery = reader_module.nvdec_unavailable_reason  # a test may replace it; clear the real cache
+    discovery.cache_clear()
+    monkeypatch.setattr(reader_module, "_CPU_NOTICE_PRINTED", [])
+    yield
+    discovery.cache_clear()
+
+
+@pytest.mark.usefixtures("fresh_decode_policy")
+@pytest.mark.parametrize(
+    ("torchcodec_present", "cuda", "reason"),
+    [(False, False, "no torchcodec"), (False, True, "no torchcodec"), (True, False, "torch sees no CUDA device"), (True, True, None)],
+)
+def test_nvdec_discovery_covers_every_combination(monkeypatch: pytest.MonkeyPatch, torchcodec_present: bool, cuda: bool, reason: str | None) -> None:
+    import simplecv.catalog_video_reader as reader_module
+
+    monkeypatch.setattr(reader_module, "find_spec", lambda name: object() if name != "torchcodec" or torchcodec_present else None)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: cuda)
+    found: str | None = reader_module.nvdec_unavailable_reason()
+    assert (found is None) == (reason is None) and (reason is None or reason in str(found))
+    if reason is None:
+        assert select_decode_device("auto") == select_decode_device("cuda") == "cuda"
+    else:
+        assert select_decode_device("auto") == "cpu"
+        with pytest.raises(ValueError, match="NVDEC decoding is unavailable"):
+            select_decode_device("cuda")
+    assert select_decode_device("cpu") == "cpu"
+
+
+@pytest.mark.usefixtures("fresh_decode_policy")
+def test_the_cpu_decoding_notice_is_printed_once_per_process(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    import simplecv.catalog_video_reader as reader_module
+
+    monkeypatch.setattr(reader_module, "nvdec_unavailable_reason", lambda: "no CUDA here")
+    assert select_decode_device() == select_decode_device("auto") == "cpu"
+    with ThreadPoolExecutor(8) as pool:
+        assert set(pool.map(lambda _: select_decode_device(), range(32))) == {"cpu"}
+    assert capsys.readouterr().out.count("decoding on the CPU") == 1
+
+
+def test_a_sequence_timeline_reads_in_frame_counted_chunks(tmp_path: Path) -> None:
+    path: Path = tmp_path / "frames.rrd"
+    samples: list[tuple[bytes, bool]] = encode_h264(70, 9, seed=3)
+    with rr.RecordingStream("test", recording_id="segment") as rec:
+        rec.save(path)
+        rec.log("/cam/video", rr.VideoStream(codec=rr.VideoCodec.H264), static=True)
+        frames = 2 * np.arange(len(samples), dtype=np.int64)  # every other frame number: counts need not be contiguous
+        rec.send_columns(
+            "/cam/video",
+            indexes=[rr.TimeColumn("frame_index", sequence=frames)],
+            columns=rr.VideoStream.columns(sample=[s for s, _ in samples], is_keyframe=[k for _, k in samples]),
+        )
+    with rr.server.Server(datasets={"test": [path]}) as running:
+        dataset = running.client().get_dataset("test")
+        video: CatalogVideo = whole_column(dataset, "segment", ["/cam/video"], "frame_index")[0]
+        index: tuple[StreamIndex, ...] = read_video_index(dataset, "segment", ["/cam/video"], "frame_index", window_s=0.5)
+        np.testing.assert_array_equal(index[0].times, video.times)
+        reader = CatalogVideoReader(dataset, "segment", index, "frame_index", chunk_s=1.0)  # 30 frame numbers a chunk
+        assert reader.num_chunks >= 4
+        decoder = ChunkedVideoDecoder(reader, 0, _device())
+        assert torch.equal(decoder.get_frames_at(list(range(len(samples)))), _whole_frames(video))
+
+
+def test_relay_logs_the_window_from_the_keyframe_at_or_before_it(server: rr.server.Server, index: tuple[StreamIndex, ...], tmp_path: Path) -> None:
+    dataset = server.client().get_dataset("test")
+    reader = CatalogVideoReader(dataset, "segment", index, "video_time", chunk_s=0.5)
+    first_ns, last_ns = 25 * FRAME_NS + 1, 71 * FRAME_NS
+    targets: list[str] = [f"/relayed{entity}" for entity in CAMERAS]
+    relayed_path: Path = tmp_path / "relayed.rrd"
+    with rr.RecordingStream("test", recording_id="segment") as rec:
+        rec.save(relayed_path)
+        logged: int = relay_video(reader, targets, first_ns, last_ns, recording=rec)
+    with rr.server.Server(datasets={"relayed": [relayed_path]}) as relayed_server:
+        relayed = whole_column(relayed_server.client().get_dataset("relayed"), "segment", targets, "video_time")
+    whole_videos = whole_column(dataset, "segment", list(CAMERAS), "video_time")
+    expected_total: int = 0
+    for got, video, (_, gop, offset_ns, _) in zip(relayed, whole_videos, CAMERAS.values(), strict=True):
+        # The keyframes are every gop-th sample: the window opens on the last one at or before first_ns.
+        first: int = ((first_ns - offset_ns) // FRAME_NS) // gop * gop
+        stop: int = int(np.searchsorted(video.t_ns, last_ns, side="right"))
+        assert [bytes(sample) for sample in got.samples] == [bytes(sample) for sample in video.samples[first:stop]]
+        np.testing.assert_array_equal(got.times, video.times[first:stop])
+        assert got.keyframes == video.keyframes[first:stop]
+        expected_total += stop - first
+    assert logged == expected_total
+
+
+def test_concurrent_misses_of_one_chunk_share_one_fetch(
+    server: rr.server.Server, index: tuple[StreamIndex, ...], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    reader = CatalogVideoReader(server.client().get_dataset("test"), "segment", index, "video_time", chunk_s=0.5)
+    plain_fetch = CatalogVideoReader.fetch
+    calls: list[int] = []
+    lock = threading.Lock()
+
+    def slow_fetch(self: CatalogVideoReader, chunk: int) -> VideoChunk:
+        with lock:
+            calls.append(chunk)
+        time.sleep(0.2)  # long enough that every thread misses before the first fetch lands
+        return plain_fetch(self, chunk)
+
+    monkeypatch.setattr(CatalogVideoReader, "fetch", slow_fetch)
+    with ThreadPoolExecutor(4) as pool:
+        chunks: list[VideoChunk] = list(pool.map(lambda _: reader.packets(2), range(4)))
+    assert calls == [2]
+    assert all(chunk is chunks[0] for chunk in chunks)
+
+
+def test_a_cuda_decoder_that_falls_back_to_the_cpu_says_so_once(
+    server: rr.server.Server, index: tuple[StreamIndex, ...], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import torchcodec.decoders
+
+    class _FallingBack:
+        cpu_fallback = "NVDEC cannot decode this stream"
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def get_frames_at(self, indices: list[int]) -> SimpleNamespace:
+            return SimpleNamespace(data=torch.zeros((len(indices), 3, 2, 2), dtype=torch.uint8))
+
+    monkeypatch.setattr(torchcodec.decoders, "VideoDecoder", _FallingBack)
+    reader = CatalogVideoReader(server.client().get_dataset("test"), "segment", index, "video_time", chunk_s=0.5)
+    decoder = ChunkedVideoDecoder(reader, 0, torch.device("cuda"))
+    decoder.get_frames_at([0, 1])
+    decoder.get_frames_at([40])
+    assert capsys.readouterr().out.count("decodes on the CPU") == 1
+
+
+def test_a_stream_that_starts_mid_gop_decodes_from_its_first_keyframe(tmp_path: Path) -> None:
+    samples: list[tuple[bytes, bool]] = encode_h264(40, 10, seed=7)[3:]  # the first 7 samples precede the first keyframe
+    times = (33_333_333 * np.arange(len(samples), dtype=np.int64)).astype("timedelta64[ns]")
+    path: Path = tmp_path / "mid_gop.rrd"
+    with rr.RecordingStream("test", recording_id="segment") as rec:
+        rec.save(path)
+        rec.log("/cam/video", rr.VideoStream(codec=rr.VideoCodec.H264), static=True)
+        rec.send_columns(
+            "/cam/video",
+            indexes=[rr.TimeColumn("video_time", duration=times)],
+            columns=rr.VideoStream.columns(sample=[s for s, _ in samples], is_keyframe=[k for _, k in samples]),
+        )
+    from torchcodec.decoders import VideoDecoder
+
+    first_keyframe: int = next(position for position, (_, key) in enumerate(samples) if key)
+    tail = samples[first_keyframe:]
+    reference: torch.Tensor = VideoDecoder(wrap_mp4([s for s, _ in tail], [k for _, k in tail], 30, codec="h264"), device=str(_device())).get_frames_at(
+        list(range(len(tail)))
+    ).data
+    with rr.server.Server(datasets={"test": [path]}) as running:
+        decoder: ChunkedVideoDecoder = open_decoders(running.client().get_dataset("test"), "segment", ["/cam/video"], "video_time", _device(), chunk_s=0.5)[0]
+        assert torch.equal(decoder.get_frames_at(list(range(first_keyframe, len(samples)))), reference)
+        with pytest.raises(ValueError, match="before the stream's first keyframe"):
+            decoder.get_frame_at(first_keyframe - 1)
+
+
+def test_the_decoder_binds_its_cuda_device_on_the_thread_that_decodes(
+    server: rr.server.Server, index: tuple[StreamIndex, ...], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    import torchcodec.decoders
+
+    import simplecv.video_io
+
+    class _Decoder:
+        cpu_fallback = ""
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def get_frames_at(self, indices: list[int]) -> SimpleNamespace:
+            return SimpleNamespace(data=torch.zeros((len(indices), 3, 2, 2), dtype=torch.uint8))
+
+    bound: list[tuple[str, int]] = []
+    monkeypatch.setattr(torchcodec.decoders, "VideoDecoder", _Decoder)
+    monkeypatch.setattr(simplecv.video_io, "bind_cuda_device", lambda device: bound.append((device, threading.get_ident())))
+    decoder = ChunkedVideoDecoder(CatalogVideoReader(server.client().get_dataset("test"), "segment", index, "video_time", chunk_s=0.5), 0, torch.device("cuda"))
+    worker = threading.Thread(target=decoder.get_frames_at, args=([0, 1],))
+    worker.start()
+    worker.join()
+    # NVDEC needs the CUDA context current on the decoding thread, which a fresh worker thread does not have.
+    assert bound == [("cuda", worker.ident)]

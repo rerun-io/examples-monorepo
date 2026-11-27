@@ -55,13 +55,14 @@ from dataforge.selfcap_schema import (
 from dataforge.video_encoding import resolve_ffmpeg
 from dataforge.writing import atomic_write
 from datafusion import col, lit
-from jaxtyping import Bool, Float32, Float64, Int64
+from jaxtyping import Float32, Float64, Int64
 from numpy import ndarray
 from rerun.catalog import DatasetEntry, Schema
 from rerun.chunk import Chunk, LazyChunkStream, LazyStore, OptimizationProfile
 from simplecv.catalog_rig_layout import CatalogRigLayout, catalog_components
-from simplecv.catalog_video import CatalogVideo, catalog_codec, catalog_keyframes, packet_views
-from simplecv.catalog_video_codec import CatalogCodecName, wrap_mp4
+from simplecv.catalog_video import CatalogVideo, packet_views
+from simplecv.catalog_video_codec import wrap_mp4
+from simplecv.catalog_video_reader import StreamIndex, read_video_index
 
 from selfcap_curate.catalog_io import rig_layout, select_layout
 
@@ -136,18 +137,6 @@ class CameraModel:
     def is_posed(self) -> bool:
         """Whether both a pose and a pinhole exist."""
         return bool(self.pose and self.pinhole)
-
-
-@dataclass(frozen=True, slots=True)
-class VideoIndex:
-    """Timing of one video, read without its samples."""
-
-    entity: str
-    """The VideoStream entity."""
-    times: Int64[ndarray, "n"]
-    """Sample times on the source timeline, strictly increasing, in nanoseconds."""
-    keyframes: Bool[ndarray, "n"]
-    """Whether each sample is a keyframe."""
 
 
 def has_component(chunk: Chunk, prefix: str) -> bool:
@@ -312,41 +301,27 @@ def body_center(chunks: list[Chunk]) -> Float32[ndarray, "3"]:
     return xyz.mean(axis=0) if len(xyz) else np.zeros(3, np.float32)
 
 
-def read_video_index(entry: DatasetEntry, segment: str, entity: str) -> VideoIndex:
-    """Every sample time and keyframe flag of a video; the sparse flag column leaves the samples on the server."""
-    flags: str = f"{entity}:VideoStream:is_keyframe"
-    table: pa.Table = entry.filter_segments(segment).filter_contents([entity]).reader(index=TIMELINE).select(TIMELINE, flags).to_arrow_table()
-    times: Int64[ndarray, "n"] = table[TIMELINE].cast(pa.int64()).to_numpy()
-    if not len(times):
-        raise ValueError(f"{entity} has no video samples on {TIMELINE}")
-    if not np.all(np.diff(times) > 0):
-        raise ValueError(f"{entity}: expected strictly increasing sample times")
-    return VideoIndex(entity, times, np.asarray(catalog_keyframes(table[flags]), dtype=bool))
-
-
-def read_video_samples(entry: DatasetEntry, segment: str, index: VideoIndex, first: int, last: int) -> CatalogVideo:
+def read_video_samples(entry: DatasetEntry, segment: str, index: StreamIndex, first: int, last: int) -> CatalogVideo:
     """Samples ``first`` to ``last`` (exclusive) of a video, as views into the Arrow column.
 
     Raises:
         RuntimeError: If the catalog returns other samples than the index promised.
     """
     sample_column: str = f"{index.entity}:VideoStream:sample"
-    codec_column: str = f"{index.entity}:VideoStream:codec"
-    start: pa.Scalar = pa.scalar(int(index.times[first]), pa.duration("ns"))
-    stop: pa.Scalar = pa.scalar(int(index.times[last - 1]), pa.duration("ns"))
+    start: pa.Scalar = pa.scalar(int(index.t_ns[first]), pa.duration("ns"))
+    stop: pa.Scalar = pa.scalar(int(index.t_ns[last - 1]), pa.duration("ns"))
     table: pa.Table = (
         entry.filter_segments(segment)
         .filter_contents([index.entity])
         .reader(index=TIMELINE)
         .filter((col(TIMELINE) >= lit(start)) & (col(TIMELINE) <= lit(stop)))
-        .select(TIMELINE, sample_column, codec_column)
+        .select(TIMELINE, sample_column)
         .to_arrow_table()
     )
-    times: Int64[ndarray, "k"] = index.times[first:last]
+    times: Int64[ndarray, "k"] = index.t_ns[first:last]
     if not np.array_equal(table[TIMELINE].cast(pa.int64()).to_numpy(), times):
         raise RuntimeError(f"{index.entity}: the catalog returned {table.num_rows} samples for {len(times)} indexed ones")
-    codec: CatalogCodecName = catalog_codec(table[codec_column], f"{segment} {index.entity}")
-    return CatalogVideo(times, packet_views(table[sample_column]), index.keyframes[first:last].tolist(), codec)
+    return CatalogVideo(times, packet_views(table[sample_column]), index.keyframes[first:last].tolist(), index.codec)
 
 
 def read_ivf(path: Path) -> list[bytes]:
@@ -362,14 +337,14 @@ def read_ivf(path: Path) -> list[bytes]:
 
 
 def reencode(
-    entry: DatasetEntry, segment: str, index: VideoIndex, lo: int, hi: int, work_dir: Path, name: str, fps: float | None
+    entry: DatasetEntry, segment: str, index: StreamIndex, lo: int, hi: int, work_dir: Path, name: str, fps: float | None
 ) -> tuple[Int64[ndarray, "k"], list[bytes]]:
     """Low-res AV1 of the [lo, hi) window at about ``fps`` (every k-th source frame); decoding starts at the last keyframe."""
-    first: int = int(np.searchsorted(index.times, lo))
-    last: int = int(np.searchsorted(index.times, hi))
+    first: int = int(np.searchsorted(index.t_ns, lo))
+    last: int = int(np.searchsorted(index.t_ns, hi))
     if first == last:
         raise ValueError(f"{name}: no samples in the window")
-    step: int = max(1, round(1e9 / float(np.median(np.diff(index.times[first:last]))) / fps)) if fps and last - first > 1 else 1
+    step: int = max(1, round(1e9 / float(np.median(np.diff(index.t_ns[first:last]))) / fps)) if fps and last - first > 1 else 1
     keyframes: Int64[ndarray, "j"] = np.flatnonzero(index.keyframes[: first + 1])
     if not len(keyframes):
         raise ValueError(f"{name}: no keyframe at or before sample {first}")
@@ -393,7 +368,7 @@ def reencode(
     if encode.returncode != 0:
         raise RuntimeError(f"{name}: ffmpeg exited with {encode.returncode}: {encode.stderr.strip()[-400:]}")
     frames: list[bytes] = read_ivf(low)
-    kept: Int64[ndarray, "k"] = index.times[first:last][::step]
+    kept: Int64[ndarray, "k"] = index.t_ns[first:last][::step]
     if len(frames) != len(kept):
         raise RuntimeError(f"{name}: re-encode gave {len(frames)} frames for {len(kept)} kept source samples")
     return kept, frames
@@ -440,12 +415,11 @@ def build_segment_preview(entry: DatasetEntry, segment: str, target: Path, optio
     exo_model: CameraModel = models[exo_rig]
     check_resolution(exo_model, segment, pinhole_path(exo_rig, 0), EXO_SIZE)
     check_resolution(models[ego_rig], segment, pinhole_path(ego_rig, 0), EGO_SIZE)
-    exo_index: VideoIndex = read_video_index(entry, segment, video_path(exo_rig, 0))
-    ego_index: VideoIndex = read_video_index(entry, segment, video_path(ego_rig, 0))
-    middle: int = (int(exo_index.times[0]) + int(exo_index.times[-1])) // 2
+    exo_index, ego_index = read_video_index(entry, segment, [video_path(exo_rig, 0), video_path(ego_rig, 0)], TIMELINE)
+    middle: int = (int(exo_index.t_ns[0]) + int(exo_index.t_ns[-1])) // 2
     half: int = int(options.seconds * 1e9 / 2)
-    lo: int = max(int(exo_index.times[0]), middle - half)
-    hi: int = min(int(exo_index.times[-1]) + 1, middle + half)
+    lo: int = max(int(exo_index.t_ns[0]), middle - half)
+    hi: int = min(int(exo_index.t_ns[-1]) + 1, middle + half)
     body: list[Chunk] = []
     for source, destination in ((SKELETON, PREVIEW_SKELETON), (SOMA_XLO, PREVIEW_SOMA_XLO)):
         for chunk in store.stream().filter(content=source).to_chunks():

@@ -42,6 +42,7 @@ ignore_names = [
     "product_frames",
     "wide_normal_frames",
     "ultrawide",
+    "pytestmark",
 ]
 
 [tool.pytest.ini_options]

@@ -15,12 +15,13 @@ from typing import Literal, TypeAlias
 import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
+import torch
 from jaxtyping import Bool, Float32, Float64, Int64
 from numpy import ndarray
 from rerun.catalog import DatasetEntry, DatasetSelection
 from scipy.spatial.transform import Rotation
 from serde import serde
-from simplecv.catalog_video import CatalogVideo, read_catalog_videos
+from simplecv.catalog_video_reader import ChunkedVideoDecoder, open_decoders, select_decode_device
 
 from posekit.cameras import CalibratedCamera
 from posekit.predictions import HandSide
@@ -113,8 +114,8 @@ class HandGtSegment:
     """Catalog segment id."""
     camera: CalibratedCamera
     """Calibration of the evaluated camera, in its native lens model."""
-    video: CatalogVideo
-    """The camera's compressed video, all samples."""
+    video: ChunkedVideoDecoder
+    """The camera's video, fetched and decoded a chunk at a time."""
     sample_indices: Int64[ndarray, "f"]
     """Video sample of each evaluation frame."""
     video_time_ns: Int64[ndarray, "f"]
@@ -214,8 +215,8 @@ def read_hand_gt(dataset: DatasetEntry, subset: HandGtSubset, *, max_frames: int
         camera, cam_from_rig = calibrated_camera(statics.filter(pc.field("rerun_segment_id") == segment_id), subset.camera)
         rows: pa.Table = temporal.filter(pc.field("rerun_segment_id") == segment_id)
         row_times: Int64[ndarray, "r"] = rows["video_time"].cast(pa.int64()).to_numpy()
-        video: CatalogVideo = read_catalog_videos(dataset, segment_id, [f"{pinhole}/video"], "video_time")[0]
-        times: Int64[ndarray, "f"] = video.t_ns.astype(np.int64)
+        video: ChunkedVideoDecoder = open_decoders(dataset, segment_id, [f"{pinhole}/video"], "video_time", torch.device(select_decode_device()))[0]
+        times: Int64[ndarray, "f"] = video.index.t_ns.astype(np.int64)
 
         def aligned(
             name: str, segment_id: str = segment_id, rows: pa.Table = rows, row_times: Int64[ndarray, "r"] = row_times, times: Int64[ndarray, "f"] = times

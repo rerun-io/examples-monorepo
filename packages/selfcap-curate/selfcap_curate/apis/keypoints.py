@@ -6,7 +6,7 @@ from pathlib import Path
 from dataforge.timing import SequenceTimer
 from rerun.chunk import Chunk
 from rerun.server import Server
-from simplecv.catalog_video import CatalogVideo
+from simplecv.catalog_video_reader import ChunkedVideoDecoder
 
 from selfcap_curate.apis import open_session
 from selfcap_curate.camera_centers import CenterTrack, camera_center_chunks, read_quest_centers
@@ -14,7 +14,7 @@ from selfcap_curate.catalog_io import (
     CATALOG_URL,
     DATASET_NAME,
     Segment,
-    aligned_phone_videos,
+    aligned_phone_times,
     median_rate,
     open_segment,
     read_calibration_sync,
@@ -58,8 +58,8 @@ class KeypointEpisode:
     """Canonical episode and output names."""
     segment: Segment
     """Base segment and its discovered physical layout."""
-    videos: dict[str, CatalogVideo]
-    """Phone packets already read for centres and native-rate measurement."""
+    videos: dict[str, ChunkedVideoDecoder]
+    """Phone videos already indexed for centres and native-rate measurement, on the capture clock."""
     hands: CatalogHands | None
     """Normalized capture-clock Quest samples, absent when the Quest clock is missing."""
     sync: TimeSync
@@ -105,9 +105,9 @@ def main(config: Config) -> None:
             else:
                 ego: tuple[EgoCamera, ...] = tuple(read_ego_cameras(calibration, dataset, segment.id, segment.layout.oak_rig, segment.layout.quest_rig))
                 quest: list[CenterTrack] = read_quest_centers(calibration, dataset, segment.id, segment.layout.quest_rig)
-                videos: dict[str, CatalogVideo] = aligned_phone_videos(read_phone_videos(segment), sync)
-                centers: tuple[Chunk, ...] = tuple(camera_center_chunks(cameras, ego, quest, {phone: video.t_ns for phone, video in videos.items()}))
-                # A phone's video_time is its capture_time plus one constant, so these packets hold the native spacing: no second read.
+                videos: dict[str, ChunkedVideoDecoder] = read_phone_videos(segment)
+                centers: tuple[Chunk, ...] = tuple(camera_center_chunks(cameras, ego, quest, aligned_phone_times(videos, sync)))
+                # A phone's video_time is its capture_time plus one constant, so these samples hold the native spacing: no second read.
                 rate: float = config.rate if config.rate is not None else median_rate(videos)
                 print("KEYPOINTS_RATE", key, rate, flush=True)
                 processable.append(KeypointEpisode(key, segment, videos, read_catalog_hands(segment) if (sync.offsets_ms or {}).get("quest_pose") is not None else None, sync, rate, cameras, ego, centers))

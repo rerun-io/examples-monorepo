@@ -8,7 +8,7 @@ videos and the slam poses line up. Nothing is registered back to the catalog.
 """
 
 from dataclasses import dataclass, field
-from typing import Literal, Protocol
+from typing import Literal
 
 import cv2
 import depth_png
@@ -22,9 +22,9 @@ from jaxtyping import Float32, Float64, UInt8, UInt16
 from rerun.catalog import CatalogClient, DatasetEntry, DatasetSelection
 from scipy.spatial.transform import Rotation
 from simplecv.camera_parameters import Extrinsics, Fisheye62Parameters, Intrinsics, KannalaBrandtDistortion, PinholeParameters, rescale_intri
-from simplecv.catalog_video_codec import CatalogCodecName, catalog_codec_name
+from simplecv.catalog_video_codec import CatalogCodecName
+from simplecv.catalog_video_reader import ChunkedVideoDecoder, open_decoders, relay_video, select_decode_device
 from simplecv.ops.tsdf_depth_fuser import Open3DFuser
-from simplecv.rerun_dataloader import open_segment_decoder
 from simplecv.rerun_log_utils import RerunTyroConfig, log_open3d_mesh
 from simplecv.rerun_rig_logger import log_rig_static
 from simplecv.rig import CameraSensor, Rig, RigCalibration
@@ -37,20 +37,6 @@ from monopriors.models.stereo_depth.rectify import StereoRectification, fisheye_
 
 TIMELINE: str = "video_time"
 RIG: str = "world/rig_00"
-
-
-class VideoFrame(Protocol):
-    """Decoded RGB frame returned by the catalog video decoder."""
-
-    data: UInt8[torch.Tensor, "3 h w"]
-
-
-class SegmentVideoDecoder(Protocol):
-    """Subset of the TorchCodec decoder used by this catalog tool."""
-
-    def get_frame_at(self, index: int) -> VideoFrame:
-        """Decode one frame by sample index."""
-        ...
 
 
 @dataclass
@@ -96,7 +82,7 @@ class StereoCatalogConfig:
     mesh_every: int = 25
     """Re-log the growing mesh every N processed frames (0 = only at the end)."""
     device: Literal["cuda", "cpu"] = "cuda"
-    """Where the network runs (decode is always NVDEC)."""
+    """Where the network runs (decoding takes NVDEC whenever CUDA is available)."""
 
 
 def read_static(view: DatasetSelection, entity: str, component: str) -> object:
@@ -182,14 +168,12 @@ def main(config: StereoCatalogConfig) -> None:
     pose_times, world_T_rig_n44 = read_rig_poses(view)
     print(f"rectified pair: baseline {rect.baseline_m * 1000:.1f} mm, fx_rect {rect.left_rect.intrinsics.fl_x:.1f} px; {len(pose_times)} rig poses")
 
-    device: torch.device = torch.device("cuda")
-    codec_value: int = int(np.asarray(read_static(view, f"{RIG}/{config.left_cam}/pinhole/video", "VideoStream:codec")).ravel()[0])
-    video_codec: rr.VideoCodec = rr.VideoCodec(codec_value)
-    codec: CatalogCodecName = catalog_codec_name(codec_value)
-    decoders: dict[str, tuple[np.ndarray, list[bytes], list[bool], SegmentVideoDecoder]] = {
-        cam: open_segment_decoder(dataset, config.segment_id, f"{RIG}/{cam}/pinhole/video", TIMELINE, device, 30) for cam in (config.left_cam, config.right_cam)
-    }
-    left_times, right_times = decoders[config.left_cam][0], decoders[config.right_cam][0]
+    device: torch.device = torch.device(select_decode_device())
+    cams: tuple[str, str] = (config.left_cam, config.right_cam)
+    videos: list[str] = [f"{RIG}/{cam}/pinhole/video" for cam in cams]
+    decoders: dict[str, ChunkedVideoDecoder] = dict(zip(cams, open_decoders(dataset, config.segment_id, videos, TIMELINE, device), strict=True))
+    codec: CatalogCodecName = decoders[config.left_cam].index.codec
+    left_times, right_times = decoders[config.left_cam].index.times, decoders[config.right_cam].index.times
     t_start_ns: int = int(max(left_times[0], right_times[0]).astype("int64"))
     t_end_ns: int = int(min(left_times[-1], right_times[-1]).astype("int64"))
     if config.max_seconds is not None:
@@ -215,9 +199,12 @@ def main(config: StereoCatalogConfig) -> None:
         image_plane_distance=0.1,
     )
     log_rig_static(rig)
-    for cam, (times, samples, keyframes, _) in decoders.items():
-        rr.log(f"{RIG}/{cam}/pinhole/video", rr.VideoStream(codec=video_codec), static=True)
-        rr.send_columns(f"{RIG}/{cam}/pinhole/video", indexes=[rr.TimeColumn(TIMELINE, duration=times)], columns=rr.VideoStream.columns(sample=samples, is_keyframe=keyframes))
+    relay_video(
+        decoders[config.left_cam].reader,
+        videos,
+        min(int(decoder.index.t_ns[0]) for decoder in decoders.values()),
+        max(int(decoder.index.t_ns[-1]) for decoder in decoders.values()),
+    )
 
     predictor: BaseStereoPredictor = config.predictor.setup(device=config.device)
     rect_pinhole: str = f"{RIG}/cam_{LEFT_RECT_INDEX}/pinhole"
@@ -229,9 +216,8 @@ def main(config: StereoCatalogConfig) -> None:
     fuser: Open3DFuser | None = Open3DFuser(fusion_resolution=config.fusion_voxel_m, max_fusion_depth=config.fusion_max_depth_m) if config.fuse else None
 
     def frame_at(cam: str, t_ns: int) -> UInt8[torch.Tensor, "1 3 h w"]:
-        times, _, _, decoder = decoders[cam]
-        index: int = int(np.searchsorted(times, np.timedelta64(t_ns, "ns"), side="right")) - 1
-        return decoder.get_frame_at(index).data[None]
+        index: int = int(np.searchsorted(decoders[cam].index.times, np.timedelta64(t_ns, "ns"), side="right")) - 1
+        return decoders[cam].get_frame_at(index)[None]
 
     # Rectify on the decoder's device and hand the predictor device tensors; only the logged
     # (output-scale) left image goes to the host.

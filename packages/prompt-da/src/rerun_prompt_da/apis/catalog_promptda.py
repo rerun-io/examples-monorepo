@@ -29,6 +29,7 @@ from einops import rearrange
 from jaxtyping import Float32, Float64, UInt16
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
+from simplecv.catalog_video_reader import StreamIndex, relay_video
 from simplecv.rerun_log_utils import RerunTyroConfig
 from torch import Tensor
 from torch.utils.data import DataLoader
@@ -154,17 +155,12 @@ def process_segment(dataset: DatasetEntry, segment_id: str, config: Config, pred
 
         if first_batch:
             first_batch = False
-            assert video_decoder.samples is not None and video_decoder.keyframes is not None
+            assert video_decoder.decoder is not None
             rr.log(WORLD, rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
             rr.send_blueprint(stream_blueprint(portrait=batch.quarter_turns % 2 == 1))
-            # The decoder already fetched every AV1 packet, so relay them once as a
-            # VideoStream layer instead of re-encoding decoded frames.
-            rr.log(VIDEO_WIDE, rr.VideoStream(codec=rr.VideoCodec.AV1), static=True)
-            rr.send_columns(
-                VIDEO_WIDE,
-                indexes=[rr.TimeColumn(TIMELINE, duration=video_decoder.times)],
-                columns=rr.VideoStream.columns(sample=video_decoder.samples, is_keyframe=video_decoder.keyframes),
-            )
+            # Relay the stored AV1 packets once as a VideoStream layer instead of re-encoding decoded frames.
+            stream: StreamIndex = video_decoder.decoder.index
+            relay_video(video_decoder.decoder.reader, [VIDEO_WIDE], int(stream.t_ns[0]), int(stream.t_ns[-1]))
         row: int
         for row, timestamp_ns in enumerate(batch.timestamps_ns):
             rr.set_time(TIMELINE, duration=np.timedelta64(timestamp_ns, "ns"))

@@ -10,14 +10,10 @@ import torch
 from jaxtyping import Shaped, UInt8
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
+from simplecv.catalog_video_reader import ChunkedVideoDecoder
 from torch import Tensor
-from torchcodec.decoders import VideoDecoder
 
 from exo_calib.layer_io import TIMELINE
-
-MP4_NOMINAL_FPS: int = 30
-"""Frame rate written into the MP4 wrapper around the catalog packets. Frames are addressed by sample
-index and timestamps come from the catalog, so this only labels the container; it is not a capture property."""
 
 
 @dataclass(slots=True)
@@ -28,20 +24,20 @@ class ExoVideoStreams:
     """Camera entity names, index-aligned with ``decoders``."""
     times_ns: list[Shaped[ndarray, " n_samples"]]
     """Per-camera sample timestamps (timedelta64[ns], timeline order)."""
-    decoders: list[VideoDecoder]
-    """One whole-segment torchcodec GPU decoder per camera."""
+    decoders: list[ChunkedVideoDecoder]
+    """One chunked decoder per camera, over a reader the cameras share."""
 
     def frame_rgb(self, cam_idx: int, sample_idx: int) -> UInt8[ndarray, "h w 3"]:
         """Decode one frame to a uint8 RGB HWC numpy array."""
-        frame: UInt8[Tensor, "3 h w"] = self.decoders[cam_idx].get_frame_at(sample_idx).data
+        frame: UInt8[Tensor, "3 h w"] = self.decoders[cam_idx].get_frame_at(sample_idx)
         return frame.permute(1, 2, 0).contiguous().cpu().numpy()
 
 
 def open_exo_streams(dataset: DatasetEntry, segment_id: str, names: tuple[str, ...]) -> ExoVideoStreams:
-    """Open one NVDEC decoder per exo camera from catalog video packets.
+    """Open one decoder per exo camera, on NVDEC whenever CUDA is available.
 
-    Each stream is fetched with one catalog query and muxed in its own codec
-    (``VideoStream:codec``: AV1, H.264 or H.265) by simplecv's segment decoder.
+    One catalog query fetches a chunk of every camera; each chunk is muxed in
+    its stream's codec (``VideoStream:codec``: AV1, H.264 or H.265).
 
     Args:
         dataset: Catalog dataset entry.
@@ -51,12 +47,8 @@ def open_exo_streams(dataset: DatasetEntry, segment_id: str, names: tuple[str, .
     Returns:
         Decoders and per-camera sample timestamps.
     """
-    from simplecv.rerun_dataloader import open_segment_decoder
+    from simplecv.catalog_video_reader import open_decoders, select_decode_device
 
-    times_per_camera: list[Shaped[ndarray, " n_samples"]] = []
-    decoders: list[VideoDecoder] = []
-    for name in names:
-        times, _, _, decoder = open_segment_decoder(dataset, segment_id, f"world/{name}/pinhole/video", TIMELINE, torch.device("cuda"), MP4_NOMINAL_FPS)
-        times_per_camera.append(times)
-        decoders.append(decoder)
-    return ExoVideoStreams(names=names, times_ns=times_per_camera, decoders=decoders)
+    videos: list[str] = [f"world/{name}/pinhole/video" for name in names]
+    decoders: list[ChunkedVideoDecoder] = list(open_decoders(dataset, segment_id, videos, TIMELINE, torch.device(select_decode_device())))
+    return ExoVideoStreams(names=names, times_ns=[decoder.index.times for decoder in decoders], decoders=decoders)

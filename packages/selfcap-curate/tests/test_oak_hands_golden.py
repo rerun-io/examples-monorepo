@@ -13,7 +13,7 @@ from dataforge.schema import CAPTURE_TIMELINE, video_path
 from frozen_v2 import GOLDEN_REFS, RAW, ROOT, SERVED, load_oak_detections, load_oak_reference, oak_median_reference
 from legacy_oak import legacy_solve_oak as solve_oak
 from serde import from_dict
-from simplecv.catalog_video import read_catalog_videos
+from simplecv.catalog_video_reader import open_decoders
 
 from selfcap_curate.catalog_io import DATASET_NAME, open_segment, read_factories
 from selfcap_curate.device_tables import read_rotations
@@ -74,8 +74,8 @@ def test_oak_gpu_matches_frozen_frames_and_served_mount(session, pose, tmp_path,
         for mount in mounts:
             key = mount.sync.key
             source = GOLDEN_REFS / "oak-sapiens2" / f"selfcap__{key}.rrd"
-            video = read_catalog_videos(dataset, f"selfcap__{key}", [video_path(len(mount.sync.exo_fit), 0)], CAPTURE_TIMELINE)[0]
-            indices = pick_oak_frames(load_quest_hands(mount.hands), len(video.samples), 1e9 / float(np.median(np.diff(video.t_ns))), mount.sync)
+            video = open_decoders(dataset, f"selfcap__{key}", [video_path(len(mount.sync.exo_fit), 0)], CAPTURE_TIMELINE, torch.device("cuda"))[0]
+            indices = pick_oak_frames(load_quest_hands(mount.hands), len(video), 1e9 / float(np.median(np.diff(video.index.t_ns))), mount.sync)
             if oak_quest_offset_ms(mount.sync) is None:
                 assert indices.size == 0
                 actual = detect_oak_hands_gpu(dataset, mount.sync, load_quest_hands(mount.hands), mount.layout, pose)
@@ -86,7 +86,7 @@ def test_oak_gpu_matches_frozen_frames_and_served_mount(session, pose, tmp_path,
                 continue
             fixture = load_oak_reference(source)
             assert indices.tolist() == fixture.indices.tolist(), key
-            capture = video.t_ns[indices].astype(np.float64) * 1e-9
+            capture = video.index.t_ns[indices].astype(np.float64) * 1e-9
             time_error = float(np.max(np.abs(capture - fixture.times_s))) if len(indices) else 0.0
             aligned_error = (
                 float(np.max(np.abs(mount.sync.oak_rgb_model.video_time_s(capture) - fixture.detections.video_time))) if len(indices) else 0.0

@@ -13,8 +13,7 @@ from numpy import ndarray
 from rerun.catalog import CatalogClient
 from serde import SerdeError, serde
 from serde.json import from_json, to_json
-from simplecv.catalog_video import read_catalog_videos
-from simplecv.catalog_video_codec import wrap_mp4
+from simplecv.catalog_video_reader import open_decoders
 from torch import Tensor
 from torchcodec.decoders import VideoDecoder
 from torchvision.io import ImageReadMode, decode_image
@@ -257,11 +256,9 @@ def evaluation_inputs(config: Config, calibration: BodyCalibration) -> list[tupl
                 raise ValueError(f"Evaluation pixels changed or overlap calibration: {source} frame {row.index}")
             inputs.append((row, frame.clone()))
     for segment, sources in by_segment.items():
-        videos = read_catalog_videos(dataset, segment, list(sources), "video_time")
-        for (entity, rows), video in zip(sources.items(), videos, strict=True):
-            fps: float = 1e9 / float(np.median(np.diff(video.t_ns)))
-            decoder = VideoDecoder(wrap_mp4(video.samples, video.keyframes, round(fps), codec=video.codec), device="cuda", dimension_order="NHWC", seek_mode="approximate")
-            frames = decoder.get_frames_at([frame.index for frame in rows]).data.contiguous()
+        decoders = open_decoders(dataset, segment, list(sources), "video_time", torch.device("cuda"))
+        for (entity, rows), chunked in zip(sources.items(), decoders, strict=True):
+            frames = chunked.get_frames_at([frame.index for frame in rows]).permute(0, 2, 3, 1).contiguous()
             for row, frame in zip(rows, frames, strict=True):
                 digest: str = frame_sha256(frame)
                 if digest != row.sha256 or digest in forbidden:

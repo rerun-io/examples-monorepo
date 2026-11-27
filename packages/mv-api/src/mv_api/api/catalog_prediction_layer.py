@@ -18,7 +18,6 @@ from jaxtyping import Bool, Float32, Float64, Int, UInt8
 from numpy import ndarray
 from simplecv.camera_parameters import PinholeParameters
 from simplecv.catalog_rig_layout import CatalogComponent, CatalogRigLayout, SchemaLike, catalog_components, parse_rig_layout
-from simplecv.catalog_video_codec import CatalogCodecName, catalog_codec_name
 from simplecv.data.skeleton.coco_133 import COCO_133_IDS
 from simplecv.rrd_query_utils import first_valid_value
 
@@ -321,12 +320,8 @@ def discover_exo_camera_streams(schema: SchemaLike) -> list[ExoCameraStream]:
     """
     components: list[CatalogComponent] = catalog_components(schema)
     streams_by_entity: dict[str, ExoCameraStream] = {}
-    asset_video_entities: list[str] = []
     for item in components:
         if not item.entity_path.startswith("/world/exo/"):
-            continue
-        if item.archetype == "AssetVideo" and item.field == "blob":
-            asset_video_entities.append(item.entity_path)
             continue
         if item.archetype != "VideoStream" or item.field != "sample":
             continue
@@ -353,11 +348,6 @@ def discover_exo_camera_streams(schema: SchemaLike) -> list[ExoCameraStream]:
 
     streams: list[ExoCameraStream] = sorted(streams_by_entity.values(), key=lambda stream: stream.name)
     if not streams:
-        if asset_video_entities:
-            raise ValueError(
-                "Found exo AssetVideo:blob fields but v1 requires VideoStream:sample fields: "
-                f"{sorted(asset_video_entities)}"
-            )
         raise ValueError("No exo VideoStream:sample fields were found in the catalog schema.")
     return streams
 
@@ -764,36 +754,6 @@ def detect_uniform_native_fps(
     return reference_fps
 
 
-def detect_video_codecs(
-    *,
-    dataset_entry: Any,
-    segment: CatalogSegment,
-    streams: list[ExoCameraStream],
-) -> dict[str, CatalogCodecName]:
-    """Read every selected exo stream's static ``VideoStream:codec`` component in one catalog query.
-
-    Args:
-        dataset_entry: Rerun catalog dataset entry.
-        segment: Selected catalog segment.
-        streams: Selected exo camera streams.
-
-    Returns:
-        Decoder codec name keyed by stream name.
-    """
-    selectors: dict[str, str] = {stream.name: f"{stream.video_entity}:VideoStream:codec" for stream in streams}
-    table: pa.Table = (
-        dataset_entry.filter_segments(segment.recording_id)
-        .filter_contents([stream.video_entity for stream in streams])
-        .reader(index=None)
-        .select(*selectors.values())
-        .to_arrow_table()
-    )
-    codecs: dict[str, CatalogCodecName] = {}
-    for name, selector in selectors.items():
-        codecs[name] = catalog_codec_name(int(np.asarray(first_valid_value(table.column(selector), component_name=selector)).reshape(-1)[0]))
-    return codecs
-
-
 def _read_first_catalog_component(
     *,
     segment_view: Any,
@@ -1001,8 +961,8 @@ def build_rerun_iterable_dataset(
         FixedRateSampling,
         NoShuffle,
         RerunIterableDataset,
-        VideoFrameDecoder,
     )
+    from simplecv.catalog_video_reader import select_decode_device
     from simplecv.rerun_dataloader import SegmentNvdecDecoder
 
     native_fps: float = (
@@ -1010,17 +970,10 @@ def build_rerun_iterable_dataset(
         if config.native_fps_override is not None
         else detect_uniform_native_fps(dataset_entry=dataset_entry, segment=segment, streams=streams)
     )
-    codecs: dict[str, CatalogCodecName] = detect_video_codecs(dataset_entry=dataset_entry, segment=segment, streams=streams)
-    print(f"Video codecs: {codecs}", flush=True)
-    # A CUDA tracker gets NVDEC: one whole-segment decoder per stream, frames stay on the GPU.
-    # A CPU tracker keeps rerun's PyAV decoder.
+    # NVDEC whenever CUDA is available, whatever the tracker's device: the batch loop moves frames to it.
+    decode_device: torch.device = torch.device(select_decode_device())
     fields: dict[str, Any] = {
-        stream.name: Field(
-            path=stream.field_path,
-            decode=SegmentNvdecDecoder(dataset_entry, stream.video_entity.lstrip("/"), CATALOG_TIMELINE, torch.device("cuda"), round(native_fps))
-            if config.tracker_device == "cuda"
-            else VideoFrameDecoder(codec=codecs[stream.name]),
-        )
+        stream.name: Field(path=stream.field_path, decode=SegmentNvdecDecoder(dataset_entry, stream.video_entity.lstrip("/"), CATALOG_TIMELINE, decode_device))
         for stream in streams
     }
     source: Any = DataSource(dataset=dataset_entry, segments=[segment.recording_id])

@@ -9,7 +9,7 @@ import numpy as np
 import rerun as rr
 from jaxtyping import UInt8
 from numpy import ndarray
-from simplecv.rerun_log_utils import read_video_stream_from_rrd
+from simplecv.testing import read_video_stream_from_rrd
 
 from fdanyone.video import write_video
 from fdanyone_rerun.outputs import InputRecord

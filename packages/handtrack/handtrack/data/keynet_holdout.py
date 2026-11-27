@@ -20,7 +20,7 @@ from handtrack.data.catalog import list_segments, select_split
 from handtrack.data.keynet_holdout_cuts import HOLDOUT_CUTS, HOLDOUT_SEGMENTS
 from handtrack.data.keynet_rerun import NVDEC_SLICE, KeyNetCutter, keynet_finish
 from handtrack.data.luma import grey_from_rgb
-from handtrack.data.rerun_source import DATASET_SPECS, NOMINAL_FPS
+from handtrack.data.rerun_source import DATASET_SPECS
 from handtrack.data.stream import KeyNetAugment, KeyNetSamples, evaluation_augment, sample_count, select_samples
 from handtrack.train.source import KeyNetValidation
 
@@ -62,7 +62,7 @@ def load_holdout(catalog_url: str, device: torch.device) -> KeyNetHoldout:
     """Cut the frozen holdout from the catalog: decode every (segment, camera)'s ``HOLDOUT_CUTS`` frames once, then replay the cuts in
     their recorded order on the build's generator (CUDA, seed 0), so the random draws (negatives, roll angles) fall as they did."""
     import rerun as rr
-    from simplecv.rerun_dataloader import open_segment_decoder
+    from simplecv.catalog_video_reader import open_decoders
 
     if device.type != "cuda":  # a CPU generator draws another sequence from the same seed: another benchmark
         raise ValueError(f"the frozen KeyNet holdout is cut on CUDA (NVDEC, and the build's CUDA generator), not {device}")
@@ -80,11 +80,11 @@ def load_holdout(catalog_url: str, device: torch.device) -> KeyNetHoldout:
         images: dict[tuple[str, int, int], Tensor] = {}
         for (segment, camera), frames in wanted.items():  # as SegmentNvdecDecoder.decode: frame_index -> sample, NVDEC_SLICE frames a call
             entity: str = f"{DATASET_SPECS[name][0][camera]}/pinhole/video".lstrip("/")
-            times, _, _, decoder = open_segment_decoder(dataset, segment, entity, "frame_index", device, NOMINAL_FPS)
+            decoder = open_decoders(dataset, segment, [entity], "frame_index", device)[0]
             values: list[int] = sorted(set(frames))
-            positions: list[int] = (np.searchsorted(times, values, side="right") - 1).tolist()
+            positions: list[int] = (np.searchsorted(decoder.index.times, values, side="right") - 1).tolist()
             for first in range(0, len(values), NVDEC_SLICE):
-                grey: Tensor = grey_from_rgb(decoder.get_frames_at(positions[first : first + NVDEC_SLICE]).data)
+                grey: Tensor = grey_from_rgb(decoder.get_frames_at(positions[first : first + NVDEC_SLICE]))
                 images.update({(segment, camera, value): image for value, image in zip(values[first : first + NVDEC_SLICE], grey.cpu(), strict=True)})
         cutter = KeyNetCutter(dataset, name, index, holdout_augments(), device, torch.Generator(device=device).manual_seed(0))
         for cut in HOLDOUT_CUTS[name]:

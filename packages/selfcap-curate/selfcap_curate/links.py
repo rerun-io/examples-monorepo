@@ -17,8 +17,7 @@ import torch.nn.functional as F
 from jaxtyping import Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from numpy.lib.stride_tricks import sliding_window_view
-from simplecv.catalog_video import CatalogVideo
-from simplecv.catalog_video_codec import wrap_mp4
+from simplecv.catalog_video_reader import ChunkedVideoDecoder
 from torch import Tensor
 
 from selfcap_curate.records import Lag, RepeatPattern
@@ -111,17 +110,11 @@ GRAY_BATCH: int = 16
 """Frames per float-RGB luma batch (~0.4 GB per 1080p video); links decodes three videos at once in every session sharing the GPU."""
 
 
-def gray_frames(video: CatalogVideo, first: int, last: int, scale: float) -> Iterator[UInt8[Tensor, "b h w"]]:
-    """CUDA-decode samples first..last from the keyframe at or before first; BT.601 luma, resized by scale, one batch at a time."""
-    from torchcodec.decoders import VideoDecoder
-
-    key: int = max(i for i in range(first + 1) if video.keyframes[i])
-    decoder = VideoDecoder(
-        wrap_mp4(video.samples[key : last + 1], video.keyframes[key : last + 1], 30, codec=video.codec), device="cuda", seek_mode="exact"
-    )
-    luma: Float32[Tensor, "1 3 1 1"] = torch.tensor([0.299, 0.587, 0.114], device="cuda").view(1, 3, 1, 1)
-    for begin in range(first - key, last - key + 1, GRAY_BATCH):
-        rgb: UInt8[Tensor, "b 3 h w"] = decoder.get_frames_in_range(begin, min(begin + GRAY_BATCH, last - key + 1)).data
+def gray_frames(video: ChunkedVideoDecoder, first: int, last: int, scale: float) -> Iterator[UInt8[Tensor, "b h w"]]:
+    """Decode samples first..last on the video's device (NVDEC with CUDA); BT.601 luma, resized by scale, one batch at a time."""
+    luma: Float32[Tensor, "1 3 1 1"] = torch.tensor([0.299, 0.587, 0.114], device=video.device).view(1, 3, 1, 1)
+    for begin in range(first, last + 1, GRAY_BATCH):
+        rgb: UInt8[Tensor, "b 3 h w"] = video.get_frames_at(range(begin, min(begin + GRAY_BATCH, last + 1)))
         size: tuple[int, int] = (int(round(rgb.shape[2] * scale)), int(round(rgb.shape[3] * scale)))
         # Antialiased bilinear is the closest GPU match to swscale's default; the tracker reacts to the filter by a few ms.
         gray = F.interpolate((rgb.float() * luma).sum(1, keepdim=True), size=size, mode="bilinear", align_corners=False, antialias=True)
@@ -129,7 +122,7 @@ def gray_frames(video: CatalogVideo, first: int, last: int, scale: float) -> Ite
 
 
 def rotation_speed(
-    video: CatalogVideo, focal_px: float, width_px: int, start_s: float, stop_s: float, *, changes: list[tuple[float, float]] | None = None
+    video: ChunkedVideoDecoder, focal_px: float, width_px: int, start_s: float, stop_s: float, *, changes: list[tuple[float, float]] | None = None
 ) -> SpeedSeries:
     """Measure rotation between distinct frames in a capture-time window.
 
@@ -137,7 +130,7 @@ def rotation_speed(
     """
 
     cv2.setNumThreads(1)
-    t: Float64[ndarray, "f"] = video.t_ns * 1e-9
+    t: Float64[ndarray, "f"] = video.index.t_ns * 1e-9
     inside: Int64[ndarray, "w"] = np.flatnonzero((t >= start_s) & (t <= stop_s))
     if not len(inside):
         return SpeedSeries(np.empty(0), np.empty(0))

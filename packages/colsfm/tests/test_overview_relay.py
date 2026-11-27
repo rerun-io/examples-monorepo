@@ -8,7 +8,8 @@ import rerun as rr
 
 pytest.importorskip("rerun.catalog", reason="rerun.catalog is required by this test module")
 
-from simplecv.catalog_video import CatalogVideo, read_catalog_videos  # noqa: E402
+from simplecv.catalog_video import CatalogVideo  # noqa: E402
+from simplecv.testing import whole_column  # noqa: E402
 
 from colsfm.overview import relay_source_video  # noqa: E402
 
@@ -44,12 +45,12 @@ def test_the_chunked_relay_logs_the_whole_column_relays_samples(tmp_path: Path) 
     targets: list[str] = [f"/world/colsfm/rig/cam_{camera:02d}/pinhole/video" for camera in range(len(SOURCES))]
     with rr.server.Server(datasets={"source": [source_path]}) as server:
         dataset = server.client().get_dataset("source")
-        reference: tuple[CatalogVideo, ...] = read_catalog_videos(dataset, "segment", list(SOURCES), "video_time")
+        reference: tuple[CatalogVideo, ...] = whole_column(dataset, "segment", list(SOURCES), "video_time")
         with rr.RecordingStream("overview", recording_id="segment") as recording:
             recording.save(relayed_path)
             relay_source_video(dataset, "segment", list(SOURCES), targets, "video_time", recording)
     with rr.server.Server(datasets={"relayed": [relayed_path]}) as server:
-        relayed: tuple[CatalogVideo, ...] = read_catalog_videos(server.client().get_dataset("relayed"), "segment", targets, "video_time")
+        relayed: tuple[CatalogVideo, ...] = whole_column(server.client().get_dataset("relayed"), "segment", targets, "video_time")
     for got, want in zip(relayed, reference, strict=True):
         np.testing.assert_array_equal(got.times, want.times)
         assert [bytes(sample) for sample in got.samples] == [bytes(sample) for sample in want.samples]

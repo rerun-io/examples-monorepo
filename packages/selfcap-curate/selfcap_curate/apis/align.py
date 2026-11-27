@@ -61,7 +61,7 @@ def main(config: Config) -> None:
                 layouts.append(handle.layout)
                 inputs = read_episode(handle)
                 clock = read_session_clock(handle)
-                duration: float = float(inputs.videos[0].t_ns[-1] - inputs.videos[0].t_ns[0]) * 1e-9
+                duration: float = float(inputs.videos[0].index.t_ns[-1] - inputs.videos[0].index.t_ns[0]) * 1e-9
                 window: tuple[float, float] = max(0.5, duration / 2.0 - 25.0), min(duration - 0.5, duration / 2.0 + 25.0)
             with timer.stage(f"{key}/links"):
                 result = measure_links(inputs, window_s=window)

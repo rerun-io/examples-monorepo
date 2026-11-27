@@ -100,7 +100,7 @@ def depth_dataset(
         A natural-order iterable dataset over the segment's video grid, and its video
         decoder (whose raw AV1 samples are relayable as a Rerun VideoStream).
     """
-    video_decoder: SegmentNvdecDecoder = SegmentNvdecDecoder(dataset, VIDEO_WIDE, TIMELINE, device, int(NATIVE_FPS))
+    video_decoder: SegmentNvdecDecoder = SegmentNvdecDecoder(dataset, VIDEO_WIDE, TIMELINE, device)
     fields: dict[str, Field] = {
         "video": Field(f"/{VIDEO_WIDE}:VideoStream:sample", decode=video_decoder),
         "rig_quaternion": Field(RIG_QUATERNION, decode=NumericDecoder()),

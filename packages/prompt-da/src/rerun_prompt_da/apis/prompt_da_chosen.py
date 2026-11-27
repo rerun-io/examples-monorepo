@@ -28,10 +28,9 @@ from datafusion import col
 from jaxtyping import Float64, UInt16
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer
-from simplecv.rerun_dataloader import open_segment_decoder
-from torchcodec.decoders import VideoDecoder
+from simplecv.catalog_video_reader import ChunkedVideoDecoder, open_decoders
 
-from rerun_prompt_da.apis.arkitscenes_shared import NATIVE_FPS, connect_catalog, world_t_cam_from_pose
+from rerun_prompt_da.apis.arkitscenes_shared import connect_catalog, world_t_cam_from_pose
 from rerun_prompt_da.apis.prompt_da_arkitscenes import (
     PROMPTDA_LAYER,
     SegmentResult,
@@ -88,7 +87,7 @@ def chosen_batches(
 
     Reads the chosen timestamps with latest-at prompt depth, confidence,
     intrinsics, and pose in one catalog query, then decodes those packets
-    (and only those) from the whole-segment NVDEC decoder.
+    (and only those) on NVDEC from the chunks that hold them.
     """
     view = dataset.filter_segments(video_id).filter_contents(
         [f"/{FRAME_SELECTION_WIDE}", f"/{DEPTH}", f"/{CONFIDENCE}", f"/{PINHOLE_WIDE}", f"/{RIG}"]
@@ -106,9 +105,8 @@ def chosen_batches(
         raise RuntimeError(f"segment {video_id} frame_selection layer contains no chosen wide rows")
 
     device: torch.device = torch.device("cuda")
-    decoder: VideoDecoder
-    packet_times_n, _, _, decoder = open_segment_decoder(dataset, video_id, VIDEO_WIDE, TIMELINE, device, int(NATIVE_FPS))
-    packet_indices_n: ndarray = match_exact_timestamps(packet_times_n, table_timestamps(table))
+    decoder: ChunkedVideoDecoder = open_decoders(dataset, video_id, [VIDEO_WIDE], TIMELINE, device)[0]
+    packet_indices_n: ndarray = match_exact_timestamps(decoder.index.times, table_timestamps(table))
 
     for batch_start in range(0, table.num_rows, batch_size):
         # Convert one batch at a time: the PNG blob cells are large as Python lists.
@@ -131,7 +129,7 @@ def chosen_batches(
         yield assemble_promptda_batch(
             packet_indices,
             [int(row[TIMELINE].value) for row in batch_rows],
-            [decoder.get_frame_at(i).data for i in packet_indices],
+            list(decoder.get_frames_at(packet_indices)),
             [torch.from_numpy(prompt_hw) for prompt_hw in prompts_hw],
             [
                 torch.from_numpy(np.asarray(component_instance(row[CONFIDENCE_COLUMN], CONFIDENCE_COLUMN), dtype=np.uint8).reshape(prompt_hw.shape))

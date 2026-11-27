@@ -25,8 +25,7 @@ import rerun.blueprint as rrb
 from jaxtyping import Float64, Int64
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
-from simplecv.catalog_video_codec import video_codec
-from simplecv.catalog_video_reader import CatalogVideoReader, StreamIndex, iter_chunks, read_video_index
+from simplecv.catalog_video_reader import CatalogVideoReader, StreamIndex, read_video_index, relay_video
 
 from colsfm.benchmark import ReconstructionMetrics, RunArtifacts, reconstruction_metrics
 from colsfm.catalog import CatalogCameraModel, CatalogTrajectory
@@ -248,19 +247,9 @@ def relay_source_video(
         recording: None logs to the global recording.
     """
     index: tuple[StreamIndex, ...] = read_video_index(dataset, segment, sources, timeline)
-    for target, stream in zip(targets, index, strict=True):
-        rr.log(target, rr.VideoStream(codec=video_codec(stream.codec)), static=True, recording=recording)
-    reader: CatalogVideoReader = CatalogVideoReader(dataset, segment, index, timeline)
-    for chunk in iter_chunks(reader, range(reader.num_chunks)):
-        for target, stream, packets in zip(targets, index, chunk.streams, strict=True):
-            if packets.samples:
-                stop: int = packets.first + len(packets.samples)
-                rr.send_columns(
-                    target,
-                    indexes=[rr.TimeColumn(timeline, duration=stream.t_ns[packets.first : stop].astype("timedelta64[ns]"))],
-                    columns=rr.VideoStream.columns(sample=packets.samples, is_keyframe=packets.keyframes),
-                    recording=recording,
-                )
+    first: int = min(int(stream.t_ns[0]) for stream in index)
+    last: int = max(int(stream.t_ns[-1]) for stream in index)
+    relay_video(CatalogVideoReader(dataset, segment, index, timeline), targets, first, last, recording=recording)
 
 
 def overview_eye(ground_truth: CatalogTrajectory) -> tuple[list[float], list[float]]:

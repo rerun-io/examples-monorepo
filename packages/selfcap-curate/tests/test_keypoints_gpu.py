@@ -1,12 +1,15 @@
-"""CPU contracts for GPU planning and the one-pass wanted-frame decode."""
+"""CPU contracts for GPU planning and the wanted-frame decode."""
 
 import subprocess
 
+import av
 import numpy as np
 import pytest
+import rerun as rr
 import torch
-from simplecv.catalog_video import CatalogVideo
+from simplecv.catalog_video_reader import open_decoders, select_decode_device
 from torchcodec.decoders import VideoDecoder
+from video_stubs import TimesOnly
 
 from selfcap_curate.keypoints_gpu import decode_wanted, nearest_indices, plan_frames, pose_boxes, top_slots
 
@@ -15,7 +18,8 @@ def test_nearest_frame_ties_choose_left():
     np.testing.assert_array_equal(nearest_indices(np.array([0.0, 0.25, 0.5]), np.array([-1.0, 0.125, 0.38, 1.0])), [0, 0, 2, 2])
 
 
-def test_one_pass_decode_yields_wanted_frames_in_batches(tmp_path):
+@pytest.mark.integration
+def test_wanted_frames_decode_from_the_catalog_in_batches(tmp_path):
     source = tmp_path / "source.mp4"
     subprocess.run(
         [
@@ -41,32 +45,45 @@ def test_one_pass_decode_yields_wanted_frames_in_batches(tmp_path):
         check=True,
     )
 
-    full = VideoDecoder(str(source), dimension_order="NHWC", seek_mode="exact")
+    with av.open(str(source)) as container:
+        packets = [(bytes(packet), bool(packet.is_keyframe)) for packet in container.demux(video=0) if packet.size]
+    recording = tmp_path / "phone.rrd"
+    with rr.RecordingStream("test", recording_id="segment") as rec:
+        rec.save(recording)
+        rec.log("/phone/video", rr.VideoStream(codec=rr.VideoCodec.AV1), static=True)
+        rec.send_columns(
+            "/phone/video",
+            indexes=[rr.TimeColumn("capture_time", duration=(41_666_667 * np.arange(len(packets), dtype=np.int64)).astype("timedelta64[ns]"))],
+            columns=rr.VideoStream.columns(sample=[sample for sample, _ in packets], is_keyframe=[key for _, key in packets]),
+        )
+    device: str = select_decode_device()
+    full = VideoDecoder(str(source), device=device, dimension_order="NHWC", seek_mode="exact")
     wanted = np.array([0, 3, 3, 20, 49, 50], dtype=np.int64)
-    batches = list(decode_wanted(VideoDecoder(str(source), dimension_order="NHWC", seek_mode="exact"), wanted, batch=4))
-    assert [len(frames.data) for frames in batches] == [4, 2]
-    assert torch.equal(torch.cat([frames.data for frames in batches]), full.get_frames_at(wanted.tolist()).data)
-    np.testing.assert_allclose(torch.cat([frames.pts_seconds for frames in batches]).numpy(), wanted / 24.0, rtol=0.0, atol=1e-9)
-    with pytest.raises(ValueError, match="sorted"):
-        next(decode_wanted(full, np.array([3, 2]), batch=4))
-    with pytest.raises(ValueError, match="inside"):
-        next(decode_wanted(full, np.array([0, len(full)]), batch=4))
+    with rr.server.Server(datasets={"test": [recording]}) as server:
+        video = open_decoders(server.client().get_dataset("test"), "segment", ["/phone/video"], "capture_time", torch.device(device), chunk_s=1.0)[0]
+        batches = list(decode_wanted(video, wanted, batch=4))
+        with pytest.raises(ValueError, match="sorted"):
+            next(decode_wanted(video, np.array([3, 2]), batch=4))
+        with pytest.raises(ValueError, match="inside"):
+            next(decode_wanted(video, np.array([0, len(video)]), batch=4))
+    assert [len(frames) for frames in batches] == [4, 2]
+    assert batches[0].device.type == device
+    assert torch.equal(torch.cat(batches), full.get_frames_at(wanted.tolist()).data)
 
 
 def test_plan_uses_common_half_open_clock_and_checks_missing_overlap():
-    def video(times):
-        return CatalogVideo(
-            np.rint(np.array(times) * 1e9).astype("timedelta64[ns]"), [np.empty(0, dtype=np.uint8)] * len(times), [True] * len(times), "av1"
-        )
+    def plan(**times):
+        aligned = {phone: np.rint(np.array(t) * 1e9).astype(np.int64) for phone, t in times.items()}
+        return plan_frames({phone: TimesOnly(t) for phone, t in aligned.items()}, aligned, 10.0)
 
-    result = plan_frames({"a": video([0.1, 0.2, 0.3, 0.4]), "b": video([0.16, 0.26, 0.36])}, 10.0)
+    result = plan(a=[0.1, 0.2, 0.3, 0.4], b=[0.16, 0.26, 0.36])
     np.testing.assert_array_equal(result.times, [0.2, 0.3, 0.4])
     np.testing.assert_array_equal(result.indices["a"], [1, 2, 3])
     np.testing.assert_array_equal(result.indices["b"], [0, 1, 2])
     with pytest.raises(ValueError, match="two synced"):
-        plan_frames({"a": video([0.0, 1.0])}, 10.0)
+        plan(a=[0.0, 1.0])
     with pytest.raises(ValueError, match="empty synced overlap"):
-        plan_frames({"a": video([0.0, 0.1]), "b": video([1.0, 1.1])}, 10.0)
+        plan(a=[0.0, 0.1], b=[1.0, 1.1])
 
 
 def test_pose_boxes_cover_confident_keypoints_and_flag_lost_tracks():
