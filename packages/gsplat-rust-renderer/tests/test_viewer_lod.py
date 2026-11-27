@@ -105,13 +105,13 @@ def test_still_camera_encodes_no_new_frame_and_selects_once(gsplat: Path, tmp_pa
     root: Path = write_lod_set(tmp_path / "set")
     rrd: Path = write_recording(tmp_path / "still.rrd", lambda r: log_sog_lod(ENTITY, read_sog_lod(root), 64, recording=r), spin=0.0)
     report, _ = probe(gsplat, rrd, tmp_path / "still.json", {"GSPLAT_LOD_MODE": "lod"}, "--frames-in-flight", "2")
-    assert report["fresh_frames"] == 0, "a still camera encoded splat frames during the measurement"
+    assert report["encoded_frames"] == 0, "a still camera encoded splat frames during the measurement"
     [view] = report["lod"]
     assert view["selections"] == 1, "a still camera selected more than once"
     moving: Path = write_recording(tmp_path / "moving.rrd", lambda r: log_sog_lod(ENTITY, read_sog_lod(root), 64, recording=r), spin=1.2)
     report, _ = probe(gsplat, moving, tmp_path / "moving.json", {"GSPLAT_LOD_MODE": "lod"}, "--frames-in-flight", "2", "--require-motion")
     [view] = report["lod"]
-    assert report["fresh_frames"] > 0 and view["selections"] > 1
+    assert report["encoded_frames"] > 0 and view["selections"] > 1
 
 
 @pytest.mark.integration
