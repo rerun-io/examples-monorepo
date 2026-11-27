@@ -17,8 +17,9 @@ chunks and none of the failing one.
 
 The result is what COLMAP's verifier writes (`WriteVerifiedTwoViewGeometry` in `feature_matching_utils.cc` at the
 pinned COLMAP): the same `EstimateTwoViewGeometry`, an `UNDEFINED` result is not stored, and a `DEGENERATE` result or
-one with fewer than `min_num_inliers` inliers becomes an empty `DEGENERATE` row. RANSAC is not deterministic run to
-run either way, so agreement with `verify_matches` is statistical, not bitwise.
+one with fewer than `min_num_inliers` inliers becomes an empty `DEGENERATE` row. RANSAC runs on a fixed seed
+(`colsfm.matching.verification_options`), so a pair's result does not depend on which thread verifies it: given the
+same options, `verify_matches` writes the same rows.
 """
 
 from __future__ import annotations

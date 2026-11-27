@@ -18,8 +18,8 @@ import pytest
 from mapping_helpers import SyntheticRig, synthetic_matches, write_database
 
 from colsfm import verification
-from colsfm.database import ImagePair, KeypointsXY, MatchIndices
-from colsfm.matching import MatchingOptions, PairMatchStats, verification_options, verify_and_report, write_and_count
+from colsfm.database import ImagePair, Keypoints, KeypointsXY, MatchIndices, read_keypoints_batch
+from colsfm.matching import MatchingOptions, PairMatchStats, verification_options, verifier_inputs, verify_and_report, write_and_count
 from colsfm.verification import CapFunction, ChunkedVerifier, PairToVerify, VerifiedPair, VerifyChunking, verify_pair, write_verified
 
 DEGENERATE: int = int(pycolmap.TwoViewGeometryConfiguration.DEGENERATE)
@@ -118,6 +118,28 @@ def test_chunked_verification_writes_what_colmaps_verify_matches_writes(matched_
     assert set(ours) == set(colmap) == set(pairs)
     assert ours == colmap, "clean synthetic matches: every pair's configuration and inlier count agree"
     assert {pair: stats.inlier_matches for pair, stats in report.pair_stats.items()} == {pair: n for pair, (_, n) in ours.items()}
+
+
+def test_a_pair_verifies_the_same_way_whatever_was_verified_before_on_its_thread(matched_database: Path) -> None:
+    """The rig's pair (0, 2), on the CALIBRATED / PLANAR_OR_PANORAMIC boundary, verified 30 times in a row on one thread.
+
+    Unseeded, COLMAP's RANSAC continues a thread-local PRNG stream, so this pair came out PLANAR_OR_PANORAMIC on about
+    3 calls in 4 and CALIBRATED on the rest, by the work its thread did before (the chunked-vs-COLMAP comparison above
+    failed 1 run in 3 that way).
+    """
+    pair: ImagePair = (0, 2)
+    keypoints: dict[int, Keypoints] = read_keypoints_batch(matched_database, list(pair))
+    with pycolmap.Database.open(matched_database) as database:
+        cameras, _ = verifier_inputs(database)
+        matches: MatchIndices = np.asarray(database.read_matches(*pair), dtype=np.int64).reshape(-1, 2)
+    item: PairToVerify = PairToVerify(pair=pair, matches=matches, keypoints1=keypoints[pair[0]], keypoints2=keypoints[pair[1]])
+    options: pycolmap.TwoViewGeometryOptions = verification_options(MatchingOptions())
+    answers: set[tuple[int, int]] = set()
+    for _ in range(30):
+        verified: VerifiedPair = verify_pair(item, cameras[pair[0]], cameras[pair[1]], options, None)
+        assert verified.geometry is not None
+        answers.add((int(verified.geometry.config), verified.num_inliers))
+    assert len(answers) == 1, answers
 
 
 # --- COLMAP's write rules (WriteVerifiedTwoViewGeometry) ------------------------------------------------------------
