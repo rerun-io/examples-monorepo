@@ -43,4 +43,4 @@ ignore = ["E501", "F722", "F821", "UP037", "UP040"]
 paths = ["robocap_live", "tools/apps", "tests"]
 min_confidence = 80
 # The registration test double keeps the real RegistrationHandle.wait and DatasetEntry.register signatures.
-ignore_names = ["timeout_secs", "object_store_config"]
+ignore_names = ["timeout_secs", "segment_id", "storage_location", "object_store_config"]

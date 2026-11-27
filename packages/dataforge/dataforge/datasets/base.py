@@ -219,7 +219,7 @@ class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
 
     @abstractmethod
     def table_blueprint(self) -> rrb.Blueprint:
-        """Lightweight segment-table preview card, registered with ``segment_table=True``.
+        """Lightweight segment-table preview card, registered with ``DatasetEntry.register_table_blueprint``.
 
         The viewer renders every visible dataset row through this blueprint at
         once ("Table cards and blueprints" experimental setting), so it must

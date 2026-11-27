@@ -39,7 +39,9 @@ class FakeEntry:
     duplicates: dict[str, Any] = field(default_factory=dict)
     """The ``on_duplicate`` policy each layer was registered under."""
     blueprints: list[tuple[str, bool, bool]] = field(default_factory=list)
-    """``(uri, set_default, segment_table)`` of every ``register_blueprint`` call."""
+    """``(uri, set_default, segment_table)`` of every ``register_blueprint`` / ``register_table_blueprint`` call."""
+    names: dict[str, str] = field(default_factory=dict)
+    """Blueprint name by entry id; names are unique within the dataset."""
     opened_as: tuple[str, str] = ("", "")
     """``(catalog url, dataset name)`` the client was asked for."""
     blueprint_rows: dict[str, str] = field(default_factory=dict)
@@ -52,9 +54,30 @@ class FakeEntry:
         self.duplicates[layer_name] = on_duplicate
         return FakeRegistration()
 
-    def register_blueprint(self, uri: str, set_default: bool = True, *, segment_table: bool = False) -> None:
+    def register_blueprint(self, uri: str, name: str, *, set_default: bool = True) -> None:
+        self._add(uri, name, set_default, segment_table=False)
+
+    def register_table_blueprint(self, uri: str, name: str, *, set_default: bool = True) -> None:
+        self._add(uri, name, set_default, segment_table=True)
+
+    def _add(self, uri: str, name: str, set_default: bool, *, segment_table: bool) -> None:
+        assert name not in self.names.values(), f"blueprint name {name!r} is taken"  # AlreadyExistsError on a real catalog
         self.blueprints.append((uri, set_default, segment_table))
-        self.blueprint_rows[f"rec_new_{len(self.blueprints)}"] = uri  # the server lists new entries beside the old ones
+        entry_id: str = f"rec_new_{len(self.blueprints)}"
+        self.blueprint_rows[entry_id] = uri  # the server lists new entries beside the old ones
+        self.names[entry_id] = name
+
+    def get_blueprint_by_name(self, name: str) -> SimpleNamespace | None:
+        held_by: str | None = next((key for key, held in self.names.items() if held == name), None)
+        if held_by is None:
+            return None
+        entry_id: str = held_by
+
+        def rename(new_name: str) -> None:
+            assert new_name not in self.names.values()
+            self.names[entry_id] = new_name
+
+        return SimpleNamespace(id=entry_id, rename=rename)
 
     def blueprint_dataset(self) -> FakeEntry:
         """The real entry has a hidden per-dataset blueprint dataset; one object plays both here."""
@@ -63,6 +86,8 @@ class FakeEntry:
     def unregister(self, *, segments_to_drop: list[str], layers_to_drop: list[str]) -> FakeRegistration:
         assert layers_to_drop == [], "a refresh drops whole blueprint entries, never single layers"
         self.unregistered.extend(segments_to_drop)
+        for entry_id in segments_to_drop:
+            self.names.pop(entry_id, None)  # an unregistered blueprint frees its name
         return FakeRegistration()
 
     def segment_table(self) -> SimpleNamespace:
@@ -197,6 +222,7 @@ def test_back_to_back_runs_keep_only_the_latest_blueprints(tmp_path: Path, catal
     register.main(Config(dataset=RobocapConfig()))
     assert sorted(catalog.unregistered) == ["rec_new_1", "rec_new_2"]
     assert sorted((tmp_path / "blueprints").iterdir()) == sorted(registered_files(catalog)[2:])
+    assert catalog.names == {"rec_new_3": "robocap", "rec_new_4": "robocap table"}, "the latest pair holds the stable names"
 
 
 def test_reports_a_count_per_layer(tmp_path: Path, catalog: FakeEntry, capsys) -> None:

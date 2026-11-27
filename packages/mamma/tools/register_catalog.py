@@ -108,8 +108,13 @@ def main(config: RegisterCatalogConfig) -> int:
         ds.register([f"file://{props_path}"], layer_name="props", on_duplicate=replace).wait()
         print(f"  {name:42s} ppl={n_people} p99={gate.get('pve_p99_mm')} pass={gate.get('pass')}")
 
-    ds.register_blueprint(rbl_path.resolve().as_uri(), set_default=True)
-    print(f"\nDONE: {len(ds.segment_ids())} segments on {config.catalog_url}, default_blueprint={ds.default_blueprint()}")
+    # One blueprint per name: this run's layout replaces the one an earlier run registered.
+    previous = ds.get_blueprint_by_name("mamma")
+    blueprints = ds.blueprint_dataset()
+    if previous is not None and blueprints is not None:
+        blueprints.unregister(segments_to_drop=[previous.id], layers_to_drop=[]).wait()
+    registered = ds.register_blueprint(rbl_path.resolve().as_uri(), "mamma", set_default=True)
+    print(f"\nDONE: {len(ds.segment_ids())} segments on {config.catalog_url}, default_blueprint={registered.name} ({registered.id})")
     print(f"Open a Rerun 0.33 viewer on {config.catalog_url} (ensure no stale viewer holds :9876).")
     return 0
 

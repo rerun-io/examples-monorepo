@@ -160,20 +160,18 @@ def main(config: Config) -> None:
         register_layer(dataset, rrd_path, layer_name)
         print(f"registered {layer_name}: {rrd_path}")
 
-    existing_blueprints: list[str] = dataset.blueprints()
-    if existing_blueprints and len(existing_blueprints) != len(blueprint_paths):
-        raise RuntimeError(
-            f"dataset already has {len(existing_blueprints)} blueprints; expected zero or {len(blueprint_paths)}, refusing to add duplicates"
-        )
-    if existing_blueprints:
+    # One blueprint per name: the pair replaces whatever holds "landscape" / "portrait" (an earlier run, the ingest's pair).
+    names: tuple[str, str] = ("landscape", "portrait")
+    held: list[str] = [blueprint.id for blueprint in map(dataset.get_blueprint_by_name, names) if blueprint is not None]
+    if held:
         blueprint_dataset: DatasetEntry | None = dataset.blueprint_dataset()
         if blueprint_dataset is None:
             raise RuntimeError("dataset reports blueprints but has no blueprint dataset")
-        print(f"replacing blueprint ids: {', '.join(existing_blueprints)}")
-        blueprint_dataset.unregister(segments_to_drop=existing_blueprints, layers_to_drop=[]).wait()
+        print(f"replacing blueprint ids: {', '.join(held)}")
+        blueprint_dataset.unregister(segments_to_drop=held, layers_to_drop=[]).wait()
     landscape_is_default: bool = config.default_orientation == "landscape"
-    dataset.register_blueprint(blueprint_paths[0].resolve().as_uri(), set_default=landscape_is_default)
-    dataset.register_blueprint(blueprint_paths[1].resolve().as_uri(), set_default=not landscape_is_default)
+    dataset.register_blueprint(blueprint_paths[0].resolve().as_uri(), names[0], set_default=landscape_is_default)
+    dataset.register_blueprint(blueprint_paths[1].resolve().as_uri(), names[1], set_default=not landscape_is_default)
     print(f"registered blueprints: {blueprint_paths[0].name}, {blueprint_paths[1].name} (default: {config.default_orientation})")
     print(
         f"segment {config.video_id}: cleanly replaced {len(standard_paths) + len(extra_layers)} layers "

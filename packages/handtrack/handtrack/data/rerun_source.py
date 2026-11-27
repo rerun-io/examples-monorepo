@@ -1,8 +1,8 @@
-"""DetNet producers on the Rerun 0.42 dataloader: catalog -> CPU luma decode -> labels, in spawn workers; letterbox on the GPU.
+"""DetNet producers on the Rerun 0.44 dataloader: catalog -> CPU luma decode -> labels, in spawn workers; letterbox on the GPU.
 
-One ``RerunIterableDataset`` per training dataset replays a frozen ``Manifest`` (index ``frame_index``, one field per camera
-video), so each epoch's order is reproducible. Samples carry only their fields; ``Manifest.worker_plan`` names the
-(segment, frame) of each, and the worker labels it from a per-segment table it builds once: the existing hand-model path
+One ``RerunIterableDataset`` per training dataset samples a frozen ``Curation`` (the segments' ``frame_index`` ranges, one field
+per camera video) with a seeded ``BlockShuffle``, so each epoch's order is reproducible. Each decoded frame carries its
+(segment, frame) (``KeyedYuv``), and the worker labels it from a per-segment table it builds once: the existing hand-model path
 (``segment_labels``) for UmeTrack and SHOW3D, ``coco133_hands`` for datasets that ship 2D keypoints (GSI, Gen-HumanEgo).
 Workers letterbox and pool too, so only 160x120 samples reach the training process.
 """
@@ -21,8 +21,9 @@ import pyarrow as pa
 import torch
 from jaxtyping import Bool, Float32, Int64, UInt8
 from numpy import ndarray
+from rerun.experimental.dataloader import DecodeRequest, FieldBatch, VideoFrameDecoder, Yuv420Frame
 from torch import Tensor
-from torch.utils.data import DataLoader, IterableDataset, get_worker_info
+from torch.utils.data import DataLoader, IterableDataset
 
 from handtrack.data.augment import DetNetAugment, augment_detnet
 from handtrack.data.batches import DetNetBatch
@@ -199,19 +200,39 @@ def coco133_labels(dataset, spec: SourceSpec, segment: str) -> FrameLabels:
     return out
 
 
+@dataclass(frozen=True, slots=True)
+class KeyedYuv:
+    """One camera's decoded frame with the sample it belongs to: dataloader samples carry only their fields."""
+
+    segment_id: str
+    frame: int
+    """``frame_index`` of the sample."""
+    video: Yuv420Frame
+
+
+class KeyedVideoFrameDecoder(VideoFrameDecoder[Literal["yuv420p"]]):
+    """CPU video decoding whose frames carry their (segment, frame), as ``simplecv``'s ``KeyedNvdecDecoder`` does."""
+
+    # pyrefly: ignore  # bad-override — the base decodes to Yuv420Frame; the dataloader only moves the value into the sample dict.
+    def decode(self, batch: FieldBatch, requests: Sequence[DecodeRequest]) -> list[KeyedYuv | None]:
+        frames = super().decode(batch, requests)
+        return [None if video is None else KeyedYuv(request.segment_id, int(request.index_value), video) for request, video in zip(requests, frames, strict=True)]
+
+
 class LabelledFrames(IterableDataset):
-    """Runs in a spawn worker: replays this worker's manifest shard and yields ready ``DetNetSamples`` chunks (CPU tensors).
+    """Runs in a spawn worker: samples this worker's shard of the curation and yields ready ``DetNetSamples`` chunks (CPU tensors).
 
     The worker also letterboxes and pools each image, so only 160x120 bytes cross the process boundary and the training
     process does no per-image work (its Python threads would otherwise starve the training loop of the interpreter lock).
     """
 
-    def __init__(self, spec: SourceSpec, segments: Sequence[str], manifest_path: str, epoch: int, catalog_url: str, chunk: int = 256) -> None:
-        self.spec, self.segments, self.manifest_path, self.epoch, self.catalog_url, self.chunk = spec, list(segments), manifest_path, epoch, catalog_url, chunk
+    def __init__(self, spec: SourceSpec, segments: Sequence[str], curation_path: str, epoch: int, catalog_url: str, chunk: int = 256) -> None:
+        self.spec, self.segments, self.curation_path, self.epoch, self.catalog_url, self.chunk = spec, list(segments), curation_path, epoch, catalog_url, chunk
 
     def __iter__(self) -> Iterator[DetNetSamples]:
         import rerun as rr
-        from rerun.experimental.dataloader import BlockShuffle, DataSource, Field, Manifest, RerunIterableDataset, VideoFrameDecoder, Yuv420Frame
+        from rerun.experimental.dataloader import BlockShuffle, DataSource, Field, RerunIterableDataset
+        from rerun.experimental.spans import Curation
 
         torch.set_num_threads(1)
         # The file_system strategy starts torch_shm_manager from this worker. It must not inherit the multiprocessing resource
@@ -227,21 +248,22 @@ class LabelledFrames(IterableDataset):
         if len(cores) > RESERVED_CORES:
             os.sched_setaffinity(0, sorted(cores)[RESERVED_CORES:])
         dataset = rr.catalog.CatalogClient(self.catalog_url).get_dataset(self.spec.dataset)
-        manifest = Manifest.from_parquet(self.manifest_path).shuffle(BlockShuffle(), seed=self.epoch)
-        fields = {f"cam{c}": Field(_video_field(camera), decode=VideoFrameDecoder(codec=self.spec.codec, output_format="yuv420p"))
+        curation = Curation.from_parquet(dataset, self.curation_path)
+        fields = {f"cam{c}": Field(_video_field(camera), decode=KeyedVideoFrameDecoder(codec=self.spec.codec, output_format="yuv420p"))
                   for c, camera in enumerate(self.spec.cameras)}
-        stream = RerunIterableDataset.from_manifest(manifest, DataSource(dataset=dataset, segments=self.segments), fields)
-        info = get_worker_info()
-        groups, order = manifest.worker_plan(0, info.id if info is not None else 0)
-        keys: pa.Table = pa.concat_tables(groups).select(["segment_id", "anchor"])
-        segment_ids: list[str] = keys["segment_id"].to_pylist()
-        anchors: list[int] = keys["anchor"].to_pylist()
+        # The dataset shards itself across this DataLoader's workers, as the manifest's worker plan did. Frames a camera lacks are
+        # skipped without a limit: the manifest left them out however long the gap.
+        stream = RerunIterableDataset(DataSource(dataset, self.segments, curation=curation), curation.index_name, fields, shuffle_strategy=BlockShuffle(),
+                                      seed=self.epoch, max_consecutive_skipped_samples=None)
         infos: dict = {i.segment_id: i for i in list_segments(dataset, self.spec.dataset)} if self.spec.labels == "hand_model" else {}
         cache: dict[str, FrameLabels] = {}
         pending: list[DetNetSamples] = []
-        for k, sample in enumerate(stream):
-            segment: str = segment_ids[order[k]]
-            frame: int = int(anchors[order[k]])
+        for sample in stream:
+            first = sample["cam0"]
+            if not isinstance(first, KeyedYuv):
+                raise TypeError(f"{self.spec.dataset}: camera 0 decoded to {type(first).__name__}, not a KeyedYuv")
+            segment: str = first.segment_id
+            frame: int = first.frame
             labels = cache.get(segment)
             if labels is None:
                 cache.clear()  # BlockShuffle keeps a worker on one segment for a block; one segment's labels at a time bounds memory
@@ -252,9 +274,10 @@ class LabelledFrames(IterableDataset):
             for c in range(len(self.spec.cameras)):
                 if not bool(labels.image_valid[frame, c]):
                     continue
-                video = sample[f"cam{c}"]
-                if not isinstance(video, Yuv420Frame):
-                    raise TypeError(f"{self.spec.dataset} {segment} frame {frame}: camera {c} decoded to {type(video).__name__}, not YUV420")
+                keyed = sample[f"cam{c}"]
+                if not isinstance(keyed, KeyedYuv):
+                    raise TypeError(f"{self.spec.dataset} {segment} frame {frame}: camera {c} decoded to {type(keyed).__name__}, not a KeyedYuv")
+                video: Yuv420Frame = keyed.video
                 full: Bool[Tensor, "1"] = torch.tensor([str(video.color_range).lower().endswith("full")])
                 grey: UInt8[Tensor, "1 h w"] = grey_from_luma(video.y[:, 0] if video.y.dim() == 4 else video.y, full)
                 net: UInt8[Tensor, "1 480 640"] = camera_letterbox(self.spec, c, int(grey.shape[-1]), int(grey.shape[-2])).apply(grey)
@@ -273,20 +296,20 @@ def _concat(parts: list[DetNetSamples]) -> DetNetSamples:
     return DetNetSamples(**{f.name: torch.cat([getattr(p, f.name) for p in parts]) for f in dataclasses.fields(DetNetSamples)})
 
 
-def build_manifest(spec: SourceSpec, segments: Sequence[str], catalog_url: str, path: Path, workers: int) -> Path:
-    """Scan the source once into a parquet manifest (natural order; each epoch shuffles it). Reused when it already exists."""
+def build_curation(spec: SourceSpec, segments: Sequence[str], catalog_url: str, path: Path) -> Path:
+    """Freeze the segments' ``frame_index`` ranges into a parquet curation (each epoch shuffles its samples). Reused when it already exists.
+
+    Frames where a camera has no video are skipped while sampling, as the manifest's required fields did."""
     if path.exists():
         return path
     import rerun as rr
-    from rerun.experimental.dataloader import DataSource, Field, Manifest, VideoFrameDecoder
+    from rerun.experimental.spans import Curation
 
     dataset = rr.catalog.CatalogClient(catalog_url).get_dataset(spec.dataset)
-    fields = {f"cam{c}": Field(_video_field(camera), decode=VideoFrameDecoder(codec=spec.codec, output_format="yuv420p")) for c, camera in enumerate(spec.cameras)}
-    manifest = Manifest.generate(DataSource(dataset=dataset, segments=list(segments)), "frame_index", fields, num_workers_per_rank=workers,
-                                 required_fields=list(fields))
+    curation = Curation.from_source(dataset.filter_segments(list(segments)), index="frame_index")
     path.parent.mkdir(parents=True, exist_ok=True)
     partial: Path = path.with_suffix(".partial.parquet")
-    manifest.write_parquet(partial)
+    curation.write_parquet(partial)
     # On the NAS's NFS shares a file created over NFS can refuse later opens until its mode is set explicitly.
     os.chmod(partial, 0o644)
     os.replace(partial, path)
@@ -297,10 +320,10 @@ PASS_STRIDE: int = 1_000_000
 """An endless producer's pass p of epoch e shuffles with seed e * PASS_STRIDE + p."""
 
 
-def rerun_producer(spec: SourceSpec, segments: Sequence[str], *, catalog_url: str, manifest_path: Path, workers: int, device: torch.device,
+def rerun_producer(spec: SourceSpec, segments: Sequence[str], *, catalog_url: str, curation_path: Path, workers: int, device: torch.device,
                    endless: bool = False) -> Producer:
     """A ``Producer`` for ``EchoStream``: spawn workers stream ready samples (decoded, labelled, letterboxed, pooled).
-    ``endless``: after one pass over the manifest start the next (a new shuffle), for ``EchoStream(epoch_steps=...)``."""
+    ``endless``: after one pass over the curation start the next (a new shuffle), for ``EchoStream(epoch_steps=...)``."""
 
     def produce(epoch: int) -> Iterator[DetNetSamples]:
         for seed in itertools.count(epoch * PASS_STRIDE) if endless else (epoch,):
@@ -308,7 +331,7 @@ def rerun_producer(spec: SourceSpec, segments: Sequence[str], *, catalog_url: st
 
     def _one_pass(seed: int) -> Iterator[DetNetSamples]:
         torch.multiprocessing.set_sharing_strategy(SHARING_STRATEGY)
-        loader = DataLoader(LabelledFrames(spec, segments, str(manifest_path), seed, catalog_url), batch_size=None, num_workers=workers,
+        loader = DataLoader(LabelledFrames(spec, segments, str(curation_path), seed, catalog_url), batch_size=None, num_workers=workers,
                             multiprocessing_context="spawn", pin_memory=False, prefetch_factor=4, persistent_workers=False)
         yield from loader
 

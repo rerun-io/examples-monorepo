@@ -151,7 +151,7 @@ def free_port() -> int:
 
 def check_portable_recording(config: Config) -> None:
     """Prove automatic, explicit native, and explicit compute choices in both viewers."""
-    assert rr.__version__ == "0.42.0"
+    assert rr.__version__ == "0.44.0"
     for choice in (None, "GaussianSplats3D", "ComputeGaussianSplats3D"):
         label = {None: "portable", "GaussianSplats3D": "explicit-native", "ComputeGaussianSplats3D": "explicit-compute"}[choice]
         view = splat_view((0, 0, 0),

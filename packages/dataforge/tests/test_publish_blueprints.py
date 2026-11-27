@@ -14,7 +14,7 @@ pytest.importorskip("rerun.catalog", reason="catalog dependencies are optional o
 
 import rerun as rr  # noqa: E402
 import rerun.blueprint as rrb  # noqa: E402
-from rerun.catalog import CatalogClient, DatasetEntry  # noqa: E402
+from rerun.catalog import CatalogClient, DatasetEntry, RegisteredBlueprint  # noqa: E402
 from rerun.chunk import RrdReader  # noqa: E402
 from rerun.server import Server  # noqa: E402
 
@@ -135,12 +135,12 @@ def table_entities(rbl: Path) -> dict[tuple[str, str], object]:
     }
 
 
-def registered_blueprint(entry: DatasetEntry, name: str | None) -> Path:
+def registered_blueprint(entry: DatasetEntry, blueprint: RegisteredBlueprint | None) -> Path:
     """The file behind one registered blueprint, as the blueprint dataset lists it."""
     blueprints: DatasetEntry | None = entry.blueprint_dataset()
-    assert blueprints is not None and name is not None
+    assert blueprints is not None and blueprint is not None
     rows: list[dict] = blueprints.segment_table().select("rerun_segment_id", "rerun_storage_urls").to_arrow_table().to_pylist()
-    return Path(urlparse(next(row["rerun_storage_urls"][0] for row in rows if row["rerun_segment_id"] == name)).path)
+    return Path(urlparse(next(row["rerun_storage_urls"][0] for row in rows if row["rerun_segment_id"] == blueprint.id)).path)
 
 
 def test_the_main_registers_both_defaults_and_a_rerun_retires_only_its_own_older_blueprints(
@@ -173,6 +173,9 @@ def test_the_main_registers_both_defaults_and_a_rerun_retires_only_its_own_older
     assert sorted((output_root / "blueprints").iterdir()) == sorted(second), "the older files are gone"
     assert sorted(tmp_path.glob("*/*.rrd")) == layers, "retiring deletes no layer"
     assert sorted(read_back.segment_ids()) == sorted((FOUR, THREE))
+    assert [(blueprint.name, blueprint.kind) for blueprint in read_back.blueprints()] == [("selfcap-test", "recording"), ("selfcap-test table", "table")]
+    assert read_back.default_blueprint() == read_back.get_blueprint_by_name("selfcap-test")
+    assert read_back.default_segment_table_blueprint() == read_back.get_blueprint_by_name("selfcap-test table")
 
 
 def test_the_main_publishes_the_current_table_before_the_preview_layer_exists(tmp_path: Path, server: Server, layer: Callable[[str, str], str]) -> None:

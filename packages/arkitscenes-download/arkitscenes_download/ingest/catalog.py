@@ -132,6 +132,9 @@ def register_layer(config: Config, layer_name: str, paths: list[Path], progress:
     CONSOLE.print(f"{layer_name}: {expected} files in {time.perf_counter() - started:.1f}s")
 
 
+TABLE_BLUEPRINT_NAME: str = "segment table"
+
+
 def register_default_blueprints(dataset: DatasetEntry, dataset_name: str, blueprint_dir: Path) -> None:
     """Register generic portrait/landscape view defaults and the segment-table blueprint.
 
@@ -143,16 +146,22 @@ def register_default_blueprints(dataset: DatasetEntry, dataset_name: str, bluepr
     registered by the time this runs.
     """
     blueprint_dir.mkdir(parents=True, exist_ok=True)
+    # Each name belongs to one blueprint: a re-run replaces the blueprint holding it (prompt-da's pair, or one
+    # registered from another directory) instead of failing with AlreadyExistsError.
+    held = [dataset.get_blueprint_by_name(name) for name in ("landscape", "portrait", TABLE_BLUEPRINT_NAME)]
+    blueprints: DatasetEntry | None = dataset.blueprint_dataset()
+    if blueprints is not None and (stale := [blueprint.id for blueprint in held if blueprint is not None]):
+        blueprints.unregister(segments_to_drop=stale, layers_to_drop=[]).wait()
     for orientation, is_portrait in (("landscape", False), ("portrait", True)):
         blueprint_path: Path = blueprint_dir / f"{dataset_name}-{orientation}.rbl"
         make_blueprint(is_portrait).save("arkitscenes", blueprint_path)
         blueprint_path.chmod(0o644)  # uid-squashing NFS mounts can land fresh writes as mode 0000
-        dataset.register_blueprint(blueprint_path.resolve().as_uri(), set_default=is_portrait)
+        dataset.register_blueprint(blueprint_path.resolve().as_uri(), orientation, set_default=is_portrait)
     table_blueprint_path: Path = blueprint_dir / f"{dataset_name}-table.rbl"
     make_table_blueprint().save("arkitscenes", table_blueprint_path)
     table_blueprint_path.chmod(0o644)  # uid-squashing NFS mounts can land fresh writes as mode 0000
     try:
-        dataset.register_blueprint(table_blueprint_path.resolve().as_uri(), segment_table=True)
+        dataset.register_table_blueprint(table_blueprint_path.resolve().as_uri(), TABLE_BLUEPRINT_NAME)
     except BeartypeException:
         raise
     except Exception as error:  # noqa: BLE001

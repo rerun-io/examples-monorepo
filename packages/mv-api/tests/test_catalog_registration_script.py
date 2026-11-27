@@ -88,7 +88,7 @@ def test_pixi_mac_registration_env_is_mac_only_and_lean() -> None:
         "natsort": ">=8.4.0,<9",
         "python": "3.12.*",
         "scipy": "*",
-        "rerun-sdk": {"version": "==0.42.0", "channel": "https://prefix.dev/conda-forge"},
+        "rerun-sdk": {"version": "==0.44.0", "channel": "https://prefix.dev/conda-forge"},
         "pandas": ">=2",
         "python-dateutil": "<3",
     }

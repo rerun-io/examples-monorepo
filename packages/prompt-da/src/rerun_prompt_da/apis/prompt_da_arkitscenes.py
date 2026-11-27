@@ -394,21 +394,20 @@ def main(config: PDAArkitScenesConfig) -> None:
         registration_handle.wait()
 
     if config.register and config.update_blueprint:
-        # blueprints() returns opaque rec_* ids with no name column, so stale entries from
-        # previous runs cannot be matched by name. The dataset's blueprints are wholly owned
-        # by ingest and this tool (always the same portrait/landscape pair), so drop them all
-        # and register a fresh pair to keep the viewer's blueprint picker clean.
-        stale_blueprints: list[str] = dataset_entry.blueprints()
-        if stale_blueprints:
+        # The portrait/landscape pair is shared with the ARKitScenes ingest under the same names: replace whatever
+        # holds them, and leave the dataset's other blueprints (the segment-table one) alone.
+        orientations: tuple[tuple[str, bool], ...] = (("landscape", False), ("portrait", True))
+        held: list[str] = [blueprint.id for name, _ in orientations if (blueprint := dataset_entry.get_blueprint_by_name(name)) is not None]
+        if held:
             blueprint_dataset: DatasetEntry | None = dataset_entry.blueprint_dataset()
             if blueprint_dataset is None:
-                raise RuntimeError(f"dataset reports blueprints {stale_blueprints!r} but has no blueprint dataset")
-            blueprint_dataset.unregister(segments_to_drop=stale_blueprints, layers_to_drop=[])
-        for orientation, is_portrait in (("landscape", False), ("portrait", True)):
+                raise RuntimeError(f"dataset reports blueprints {held!r} but has no blueprint dataset")
+            blueprint_dataset.unregister(segments_to_drop=held, layers_to_drop=[]).wait()
+        for orientation, is_portrait in orientations:
             blueprint_path: Path = config.output_dir / f"{ARKITSCENES_DATASET}-{orientation}.rbl"
             blueprint_path.parent.mkdir(parents=True, exist_ok=True)
             make_blueprint(portrait=is_portrait, include_promptda=True).save(f"arkitscenes-{orientation}", blueprint_path)
-            dataset_entry.register_blueprint(blueprint_path.resolve().as_uri(), set_default=is_portrait)
+            dataset_entry.register_blueprint(blueprint_path.resolve().as_uri(), orientation, set_default=is_portrait)
 
     print(f"segments processed: {len(results)}")
     print(f"frames inferred: {sum(r.inferred_frames for r in results)}")

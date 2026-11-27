@@ -36,6 +36,8 @@ HANDTRACK_LAYER: str = "handtrack_v1"
 DETNET_LAYER: str = "detnet_v1"
 GT_LAYERS: tuple[str, ...] = ("base", "hand_pose", "hand_mesh", "projections")
 """The segment's layers a standalone clip carries beside ``handtrack_v1``."""
+BLUEPRINT_NAME: str = "handtrack"
+"""Name of the registered blueprint in the viewer's blueprint menu."""
 
 
 @dataclass(kw_only=True)
@@ -162,8 +164,13 @@ def register_layers(config: Config, segments: list[str]) -> None:
         blueprint_file: Path = config.layers_root / "blueprints" / f"{config.dataset}__handtrack__{stamp}.rbl"
         with writing.atomic_write(blueprint_file) as temp_path:
             handtrack_blueprint(config.dataset).save(writing.APPLICATION_ID, str(temp_path))
-        entry.register_blueprint(blueprint_file.resolve().as_uri(), set_default=True)
-        print(f"registered the handtrack blueprint as {config.dataset}'s default")
+        # One blueprint per name: this run's file replaces the one an earlier run registered.
+        previous = entry.get_blueprint_by_name(BLUEPRINT_NAME)
+        blueprints: DatasetEntry | None = entry.blueprint_dataset()
+        if previous is not None and blueprints is not None:
+            blueprints.unregister(segments_to_drop=[previous.id], layers_to_drop=[]).wait()
+        entry.register_blueprint(blueprint_file.resolve().as_uri(), BLUEPRINT_NAME, set_default=True)
+        print(f"registered the {BLUEPRINT_NAME!r} blueprint as {config.dataset}'s default")
 
 
 def _run_files(directory: Path | None, segments: tuple[str, ...]) -> dict[str, Path]:
