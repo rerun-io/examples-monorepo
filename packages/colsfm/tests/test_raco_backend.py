@@ -157,7 +157,7 @@ def test_the_batch_size_is_checked_against_the_graphs_profile(tmp_path: Path, ga
     database_path: Path = tmp_path / "batch.db"
     create_database(database_path, galileo_input.filtered(list(galileo_input.rig_frames()[0].keyframe_ids)))
     with pytest.raises(ValueError, match="batch_size"):
-        extract_raco(database_path, tmp_path, [], min_score=0.0, max_num_features=BLOB_MAX_KEYPOINTS, batch_size=32)
+        extract_raco(database_path, tmp_path, [], min_score=0.0, max_num_features=BLOB_MAX_KEYPOINTS, batch_size=32, inference_runtime="tensorrt")
 
 
 def test_the_dynamic_profile_covers_both_datasets_on_the_networks_grid() -> None:
@@ -441,6 +441,7 @@ def test_a_640x480_crop_runs_at_its_own_size_and_stays_inside_it(galileo_input: 
         [keyframe.image_name for keyframe in subset.keyframes],
         min_score=0.0,
         max_num_features=BLOB_MAX_KEYPOINTS,
+        inference_runtime="tensorrt",
     )
     assert elapsed_seconds > 0.0
     assert list(counts.values()) == [BLOB_MAX_KEYPOINTS]
@@ -485,6 +486,7 @@ def test_galileo_at_the_profile_maximum_reproduces_the_legacy_stretch(galileo_in
             max_num_features=BLOB_MAX_KEYPOINTS,
             native_resolution=native_resolution,
             raco_engine=raco_engine,
+            inference_runtime="tensorrt",
         )
         assert all(count == BLOB_MAX_KEYPOINTS for count in counts.values())
         stored[label] = read_keypoints(database_path, keyframe_ids[0])
@@ -539,6 +541,7 @@ def test_kitti_survives_running_at_its_own_1226x370(tmp_path: Path) -> None:
             min_score=0.0,
             max_num_features=BLOB_MAX_KEYPOINTS,
             native_resolution=native_resolution,
+            inference_runtime="tensorrt",
         )
         assert list(counts.values()) == [BLOB_MAX_KEYPOINTS] * KITTI_FRAME_COUNT
         matching: MatchReport = match_pairs(database_path, pairs, MatchingOptions(backend="raco"))
@@ -580,6 +583,7 @@ def test_the_fixed_engine_beats_the_dynamic_one_at_the_profile_maximum(galileo_i
             min_score=0.0,
             max_num_features=BLOB_MAX_KEYPOINTS,
             raco_engine=choice,  # type: ignore[arg-type]
+            inference_runtime="tensorrt",
         )
         seconds[choice] = elapsed_seconds
     print(

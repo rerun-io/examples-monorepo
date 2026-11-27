@@ -13,7 +13,15 @@ import torch
 from onnx import TensorProto, helper, numpy_helper
 from torch import Tensor
 
-from trtkit import AutoBackendConfig, OnnxBackendConfig, OnnxRuntime, TensorRtBackendConfig, create_runtime_from_onnx, resolve_backend
+from trtkit import (
+    AutoBackendConfig,
+    OnnxBackendConfig,
+    OnnxDynamicRuntime,
+    OnnxRuntime,
+    TensorRtBackendConfig,
+    create_runtime_from_onnx,
+    resolve_backend,
+)
 
 
 def _affine_graph(path: Path, batch: int | str) -> Path:
@@ -85,3 +93,58 @@ def test_auto_off_nvidia_builds_the_cpu_runtime(monkeypatch: pytest.MonkeyPatch,
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     runtime = create_runtime_from_onnx(_affine_graph(tmp_path / "dynamic.onnx", "batch"), AutoBackendConfig())
     assert isinstance(runtime, OnnxRuntime) and runtime.device == torch.device("cpu")
+
+
+def test_the_dynamic_runtime_takes_any_shape_per_call(tmp_path: Path) -> None:
+    """colsfm's extractors and matchers change every dim between calls; inputs need not share a batch."""
+    graph = helper.make_graph(
+        [helper.make_node("Relu", ["image"], ["activated"]), helper.make_node("ReduceSum", ["points", "last"], ["total"], keepdims=0)],
+        "dynamic",
+        [
+            helper.make_tensor_value_info("image", TensorProto.FLOAT, ["b", 3, "h", "w"]),
+            helper.make_tensor_value_info("points", TensorProto.FLOAT, ["n", 2]),
+        ],
+        [
+            helper.make_tensor_value_info("activated", TensorProto.FLOAT, ["b", 3, "h", "w"]),
+            helper.make_tensor_value_info("total", TensorProto.FLOAT, ["n"]),
+        ],
+        initializer=[numpy_helper.from_array(np.array([1], dtype=np.int64), "last")],
+    )
+    path: Path = tmp_path / "dynamic.onnx"
+    onnx.save(helper.make_model(graph, opset_imports=[helper.make_opsetid("", 18)], ir_version=10), path)
+    with OnnxDynamicRuntime(path) as runtime:
+        assert runtime.max_input_shapes == {"image": (-1, 3, -1, -1), "points": (-1, 2)}
+        for image_shape, num_points in (((1, 3, 4, 6), 5), ((2, 3, 8, 2), 1)):
+            image: Tensor = torch.randn(image_shape)
+            points: Tensor = torch.randn((num_points, 2))
+            outputs: dict[str, Tensor] = runtime({"image": image, "points": points})
+            torch.testing.assert_close(outputs["activated"], torch.relu(image))
+            torch.testing.assert_close(outputs["total"], points.sum(dim=1))
+
+
+def test_the_dynamic_runtime_keeps_a_scalar_output_a_scalar(tmp_path: Path) -> None:
+    """FlexGlue's matcher returns a 0-d covisibility score; the runtime must not widen it to shape (1,)."""
+    graph = helper.make_graph(
+        [helper.make_node("ReduceMax", ["x"], ["peak"], keepdims=0)],
+        "scalar",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, ["n"])],
+        [helper.make_tensor_value_info("peak", TensorProto.FLOAT, [])],
+    )
+    path: Path = tmp_path / "scalar.onnx"
+    onnx.save(helper.make_model(graph, opset_imports=[helper.make_opsetid("", 18)], ir_version=10), path)
+    with OnnxDynamicRuntime(path) as runtime:
+        assert runtime({"x": torch.tensor([1.0, 3.0, 2.0])})["peak"].shape == ()
+
+
+def test_the_dynamic_runtime_refuses_an_input_of_another_dtype(tmp_path: Path) -> None:
+    """As TensorRT's direct binding does: an engine-free lane must fail where the engine would, not cast silently."""
+    graph = helper.make_graph(
+        [helper.make_node("ReduceMax", ["x"], ["peak"], keepdims=0)],
+        "scalar",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, ["n"])],
+        [helper.make_tensor_value_info("peak", TensorProto.FLOAT, [])],
+    )
+    path: Path = tmp_path / "scalar.onnx"
+    onnx.save(helper.make_model(graph, opset_imports=[helper.make_opsetid("", 18)], ir_version=10), path)
+    with OnnxDynamicRuntime(path) as runtime, pytest.raises(ValueError, match="torch.float32"):
+        runtime({"x": torch.tensor([1.0, 3.0], dtype=torch.float64)})

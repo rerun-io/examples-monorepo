@@ -28,6 +28,7 @@ from typing import Final
 
 from colsfm import MODEL_DIR, MODEL_DIR_ENV
 from colsfm.features import FeatureBackend
+from colsfm.inference import InferenceRuntime
 from colsfm.matching import FLEXGLUE_FP8_COMMAND, FLEXGLUE_MODEL_DIR, FLEXGLUE_MODEL_FILES, FlexGlueOptions, MatchingBackend, gpu_has_fp8
 
 RACO_ONNX_PATH: Final[Path] = MODEL_DIR / "raco-aliked-b1-16.onnx"
@@ -42,10 +43,11 @@ RACO_DYNAMIC_ONNX_PATH: Final[Path] = MODEL_DIR / "raco-aliked-dyn.onnx"
 Also not committed. Produce it with
 `pixi run -e colsfm colsfm-raco-export`.
 
-Not in `required_raco_graphs`: it is only reached by an image whose size group the
-fixed-shape engine does not cover (`colsfm.features_raco.select_raco_engine`), which
-Galileo, at the profile maximum, never is. A dataset that does need it says so at the
-engine build, by name."""
+In `required_raco_graphs` only for ONNX Runtime: on TensorRT it is only reached by an
+image whose size group the fixed-shape engine does not cover
+(`colsfm.features_raco.select_raco_engine`), which Galileo, at the profile maximum,
+never is, and a dataset that does need it says so at the engine build, by name. ONNX
+Runtime builds nothing, so it asks up front."""
 
 RACO_LIGHTGLUE_ONNX_PATH: Final[Path] = MODEL_DIR / "raco" / "aliked_lightglue" / "lightglue_aliked.onnx"
 """The RaCo-trained LightGlue+ graph; its engine is cached beside it.
@@ -62,27 +64,34 @@ RACO_EXPORT_COMMANDS: Final[tuple[str, ...]] = (
 the FlexGlue FP8 calibration."""
 
 PYCOLMAP_ABLATION_FLAGS: Final[str] = "--features-backend pycolmap --matching-backend pycolmap"
-"""The documented no-GPU-engine path: COLMAP's own ALIKED and LightGlue, downloaded by COLMAP."""
+"""The ablation that needs no graph of ours: COLMAP's own ALIKED and LightGlue (other models than RaCo's), downloaded by
+COLMAP. Without TensorRT, the product's models run on `--inference-runtime onnxruntime`."""
 
 
-def required_raco_graphs(features_backend: FeatureBackend, matching_backend: MatchingBackend) -> tuple[Path, ...]:
+def required_raco_graphs(
+    features_backend: FeatureBackend, matching_backend: MatchingBackend, inference_runtime: InferenceRuntime
+) -> tuple[Path, ...]:
     """The RaCo graphs one pair of backend choices cannot run without.
 
     Args:
         features_backend: `--features-backend`.
         matching_backend: `--matching-backend`.
+        inference_runtime: `--inference-runtime`. ONNX Runtime builds no engine, so it needs the shape-dynamic RaCo graph
+            up front (`RACO_DYNAMIC_ONNX_PATH`); it runs FlexGlue's fp32 matcher, so it needs no FP8 graph.
 
     Returns:
         The graphs, in stage order; empty unless a `raco` backend was asked for.
     """
     graphs: list[Path] = []
     if features_backend == "raco":
-        graphs.append(RACO_ONNX_PATH)
+        graphs.extend((RACO_ONNX_PATH,) if inference_runtime == "tensorrt" else (RACO_ONNX_PATH, RACO_DYNAMIC_ONNX_PATH))
     if matching_backend == "raco":
         graphs.append(RACO_LIGHTGLUE_ONNX_PATH)
     if matching_backend in ("flexglue", "flexglue_ort"):
         graphs.extend(FLEXGLUE_MODEL_DIR / name for name in FLEXGLUE_MODEL_FILES.values())
-    if matching_backend == "flexglue" and gpu_has_fp8():  # below sm_89 the matcher runs its prepared graph, no FP8 file
+    if (
+        matching_backend == "flexglue" and inference_runtime == "tensorrt" and gpu_has_fp8()
+    ):  # below sm_89 the matcher runs its prepared graph, no FP8 file
         graphs.append(FLEXGLUE_MODEL_DIR / FlexGlueOptions().fp8_file())  # a run keeps FlexGlue's default thresholds
     return tuple(graphs)
 
@@ -95,7 +104,7 @@ def missing_raco_graphs_message(missing: Sequence[Path]) -> str:
 
     Returns:
         One message naming the files, the export that produces them, and the
-        ablation that needs neither.
+        ablation that needs none of them.
     """
     files: str = "\n".join(f"  {path}" for path in missing)
     exports: str = "\n".join(f"  {command}" for command in RACO_EXPORT_COMMANDS)
@@ -103,11 +112,12 @@ def missing_raco_graphs_message(missing: Sequence[Path]) -> str:
         "[colsfm] the default feature and matching backends are RaCo-ALIKED and LightGlue+, "
         f"and the model directory {MODEL_DIR} is missing:\n{files}\n"
         f"Create them (they are not committed; ${MODEL_DIR_ENV} points at another directory):\n{exports}\n"
-        f"Or run the no-GPU-engine ablation, which needs no graph of ours: {PYCOLMAP_ABLATION_FLAGS}"
+        "With the graphs but no TensorRT, `--inference-runtime onnxruntime` runs them on the CPU.\n"
+        f"Or run COLMAP's own ALIKED and LightGlue (other models), which need no graph of ours: {PYCOLMAP_ABLATION_FLAGS}"
     )
 
 
-def check_raco_graphs(features_backend: FeatureBackend, matching_backend: MatchingBackend) -> None:
+def check_raco_graphs(features_backend: FeatureBackend, matching_backend: MatchingBackend, inference_runtime: InferenceRuntime) -> None:
     """Stop a run whose backends need a graph this checkout does not have.
 
     Called from `colsfm.run_config.resolve_run`, i.e. before the workspace exists,
@@ -116,11 +126,14 @@ def check_raco_graphs(features_backend: FeatureBackend, matching_backend: Matchi
     Args:
         features_backend: `--features-backend`.
         matching_backend: `--matching-backend`.
+        inference_runtime: `--inference-runtime`.
 
     Raises:
         FileNotFoundError: When a required graph is missing, with the export command
             and the ablation named.
     """
-    missing: tuple[Path, ...] = tuple(path for path in required_raco_graphs(features_backend, matching_backend) if not path.is_file())
+    missing: tuple[Path, ...] = tuple(
+        path for path in required_raco_graphs(features_backend, matching_backend, inference_runtime) if not path.is_file()
+    )
     if missing:
         raise FileNotFoundError(missing_raco_graphs_message(missing))

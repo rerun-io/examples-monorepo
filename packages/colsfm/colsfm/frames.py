@@ -43,9 +43,13 @@ DECODE_CHUNK: Final[int] = 64
 """Frames decoded per NVDEC call, and the window a request is served in: bounds the transient GPU memory of one call."""
 
 FRAME_STORE_FRACTION: Final[float] = 0.15
-"""Share of the device's total memory the decoded-frame LRU may hold. On the 5090 (32 GB) that is 4.8 GB, so MGO07's
+"""Share of the GPU's total memory the decoded-frame LRU may hold (CPU frames: `FRAME_STORE_CPU_BYTES`). On the 5090 (32 GB) that is 4.8 GB, so MGO07's
 3192 keyframes at 480x640 (2.9 GB) stay resident and every stage after extraction reads them without decoding; a longer
 input evicts and decodes again from the video instead of growing, and leaves the rest to the engines and the mapper."""
+
+FRAME_STORE_CPU_BYTES: Final[int] = 4 * 1024**3
+"""The decoded-frame LRU's budget for CPU frames (an ONNX Runtime run): about the 5090's GPU budget. A share of host RAM
+would be tens of GB that the ONNX Runtime sessions and the mapper need (a 64 GB run was OOM-killed at 15 %)."""
 
 
 @runtime_checkable
@@ -89,7 +93,7 @@ class ImageFolderFrames:
 
         Args:
             root: Directory the image names are relative to.
-            device: CUDA device the frames land on.
+            device: Where the frames land: the GPU for TensorRT, the CPU for ONNX Runtime (`colsfm.inference.frames_device`).
 
         Raises:
             FileNotFoundError: When `root` is not a directory.
@@ -136,7 +140,7 @@ class VideoStreamFrames:
 
         Args:
             manifest: Which segment, streams and samples.
-            device: CUDA device the frames land on.
+            device: Where the frames land: the GPU for TensorRT, the CPU for ONNX Runtime (`colsfm.inference.frames_device`).
             budget_bytes: Decoded bytes the LRU may hold; `FRAME_STORE_FRACTION` of the device's memory when None.
         """
         self.manifest: FrameSourceManifest = manifest
@@ -179,7 +183,11 @@ class VideoStreamFrames:
 
     def _keep(self, name: str, frame: Tensor) -> None:
         if self.budget_bytes is None:
-            self.budget_bytes = int(FRAME_STORE_FRACTION * torch.cuda.get_device_properties(frame.device).total_memory)
+            self.budget_bytes = (
+                int(FRAME_STORE_FRACTION * torch.cuda.get_device_properties(frame.device).total_memory)
+                if frame.device.type == "cuda"
+                else FRAME_STORE_CPU_BYTES
+            )
         self.store[name] = frame
         self.stored_bytes += frame.numel() * frame.element_size()
         while self.stored_bytes > self.budget_bytes and self.store:
@@ -245,7 +253,7 @@ def open_frame_source(input_dir: Path, device: torch.device | None = None) -> Fr
 
     Args:
         input_dir: The run's input directory.
-        device: CUDA device the frames land on.
+        device: Where the frames land: the GPU for TensorRT, the CPU for ONNX Runtime (`colsfm.inference.frames_device`).
 
     Returns:
         A `VideoStreamFrames` when `frame_source.json` is present, else an `ImageFolderFrames` over the directory.

@@ -50,6 +50,7 @@ import pycolmap
 
 from colsfm.database import image_ids_by_name, keypoint_counts
 from colsfm.frame_manifest import FRAME_SOURCE_FILE, FrameSource, is_catalog_input, read_manifest
+from colsfm.inference import InferenceRuntime, ResolvedDevice, frames_device, runtime_device
 from colsfm.keypoint_masks import MaskSource, drop_masked_keypoints, open_mask_source, with_valid_angle_masks
 
 AlikedVariant: TypeAlias = Literal["ALIKED_N16ROT", "ALIKED_N32"]
@@ -71,9 +72,6 @@ what a measurement of the two wants; see `colsfm.features_raco`."""
 
 DeviceChoice: TypeAlias = Literal["auto", "cuda", "cpu"]
 """Requested compute device; `auto` picks CUDA when it is actually usable."""
-
-ResolvedDevice: TypeAlias = Literal["cuda", "cpu"]
-"""The device a stage really ran on."""
 
 TensorRTExtraction: TypeAlias = tuple[dict[int, int], float]
 """What `colsfm.features_raco.extract_raco` returns: keypoints per image id, and seconds."""
@@ -140,6 +138,8 @@ class FeatureOptions:
     raco_batch_pixels: int | None = None
     """On `raco` only: the shape-dynamic engines' pixel budget per execution (`PipelineOptions.raco_batch_pixels`);
     None keeps `colsfm.features_raco.BATCH_PIXEL_BUDGET`."""
+    inference_runtime: InferenceRuntime = "tensorrt"
+    """On `raco` only: TensorRT engines on the GPU, or the same graphs on ONNX Runtime's CPU provider."""
     raco_engine: RacoEngineChoice = "auto"
     """On `raco` with `native_resolution` only: which engine runs each size.
 
@@ -296,7 +296,7 @@ def extract_features(
 
         # The graph's `scores` output is a selection rank, not a detector response, so the blob's
         # `detector_threshold` is meaningless against it; `colsfm.features_raco` documents why the gate is dropped.
-        source: FrameSource = open_frame_source(image_root) if frames is None else frames
+        source: FrameSource = open_frame_source(image_root, frames_device(options.inference_runtime)) if frames is None else frames
         try:
             extracted: TensorRTExtraction = extract_raco(
                 database_path,
@@ -309,11 +309,14 @@ def extract_features(
                 batch_pixels=options.raco_batch_pixels,
                 frames=source,
                 masks=masks,
+                inference_runtime=options.inference_runtime,
             )
         finally:
             if frames is None:
                 source.close()
-        tensorrt_report: ExtractionReport = ExtractionReport(keypoint_counts=extracted[0], device="cuda", elapsed_seconds=extracted[1])
+        tensorrt_report: ExtractionReport = ExtractionReport(
+            keypoint_counts=extracted[0], device=runtime_device(options.inference_runtime), elapsed_seconds=extracted[1]
+        )
         print(f"colsfm.features[{options.backend}]: {tensorrt_report.summary()}")
         return tensorrt_report
 

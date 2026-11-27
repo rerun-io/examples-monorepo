@@ -32,6 +32,7 @@ from colsfm.config import CusfmConfig
 from colsfm.features import DeviceChoice, FeatureBackend, FeatureOptions
 from colsfm.frame_manifest import is_catalog_input
 from colsfm.frames_meta import FRAMES_META_NAME
+from colsfm.inference import InferenceRuntime
 from colsfm.mapping import MappingOptions
 from colsfm.matching import (
     BLOB_MATCH_TOP_K,
@@ -253,6 +254,9 @@ class PipelineOptions:
     (MSD MGO07 SE(3) ATE 1.33 vs 2.08 cm with twice the points; Galileo 4.48 vs 5.17 mm, 226 vs 224 registered) at
     about 1.4x LightGlue+'s per-pair time (20.9 vs 14.6 ms on the 5090). `raco` (LightGlue+) remains the matcher
     trained on these descriptors and the one with per-match scores for SSC."""
+    inference_runtime: InferenceRuntime = "tensorrt"
+    """What runs the `raco` and `flexglue` graphs: TensorRT engines on the GPU, or the same graphs on ONNX Runtime's CPU
+    provider, with the frames decoded on the CPU: a run (or a test lane) with no GPU and no engine."""
 
     @property
     def selection(self) -> SelectionOptions:
@@ -360,6 +364,7 @@ class ResolvedRun:
             match_limit=self.match_limit,
             image_dir=self.selection.input_dir,
             verify=self.verify,
+            inference_runtime=self.features.inference_runtime,
         )
 
 
@@ -394,7 +399,7 @@ def resolve_run(options: PipelineOptions) -> ResolvedRun:
             that is not a settable numeric CASPAR knob, or gives an integer knob a
             fractional value; or when a catalog input asks for a backend that reads image files.
     """
-    check_raco_graphs(options.features_backend, options.matching_backend)
+    check_raco_graphs(options.features_backend, options.matching_backend, options.inference_runtime)
     if is_catalog_input(options.input_dir):
         # COLMAP's own extractor and its ONNX Runtime FlexGlue read image files; a catalog input has none.
         file_readers: list[str] = [
@@ -428,7 +433,11 @@ def resolve_run(options: PipelineOptions) -> ResolvedRun:
     return ResolvedRun(
         selection=options.selection,
         features=FeatureOptions(
-            backend=options.features_backend, num_threads=options.num_threads, device=options.device, raco_batch_pixels=options.raco_batch_pixels
+            backend=options.features_backend,
+            num_threads=options.num_threads,
+            device=options.device,
+            raco_batch_pixels=options.raco_batch_pixels,
+            inference_runtime=options.inference_runtime,
         ),
         matching_backend=options.matching_backend,
         match_limit=MatchLimitPolicy.of(options.match_cap_mode, options.max_matches_per_pair),

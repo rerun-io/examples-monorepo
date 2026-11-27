@@ -60,7 +60,7 @@ descriptors are recovered bit-exactly either way
 
 @runtime_checkable
 class EngineRuntime(Protocol):
-    """What extraction uses of an engine runtime (trtkit's direct-binding `TensorRtDynamicRuntime`)."""
+    """What extraction uses of a runtime: trtkit's direct-binding `TensorRtDynamicRuntime`, or its `OnnxDynamicRuntime`."""
 
     max_input_shapes: dict[str, tuple[int, ...]]
 
@@ -313,7 +313,7 @@ def run_native_extraction(
     masks: MaskSource | None = None,
     open_runtime: Callable[[Path], EngineRuntime] | None = None,
 ) -> None:
-    """Execute every group on GPU frames and store what came back, one direct-binding runtime at a time.
+    """Execute every group on the frames' device and store what came back, one runtime at a time.
 
     A group's runtime is released, and torch's cached blocks returned to the driver, before the next group's is
     created: an execution context reserves activation memory for its profile maximum (3.8 GB for eight 480x800 cube
@@ -323,12 +323,13 @@ def run_native_extraction(
         database_path: An existing COLMAP database whose image rows are written.
         groups: The engines to run and the images to run through each; empty groups are skipped.
         model: The graph's bindings, descriptor label and score meaning.
-        frames: Where the pixels come from, as GPU tensors (`colsfm.frames`).
+        frames: Where the pixels come from (`colsfm.frames`), on the device `open_runtime`'s runtime takes.
         min_score: Gate on the scores; see `select_keypoints`.
         max_num_features: Keypoint ceiling per image.
         batch_size: Images executed together. The caller validates it against its own engines' profiles.
         masks: Per-image keypoint masks; see `store_feature_batch`.
-        open_runtime: Opens an engine file; a direct-binding `TensorRtDynamicRuntime` when None (tests pass a fake).
+        open_runtime: Opens a group's `engine_path`: a direct-binding `TensorRtDynamicRuntime` when None,
+            `trtkit.OnnxDynamicRuntime` for an ONNX graph (tests pass a fake).
 
     Raises:
         RuntimeError: When an engine cannot be deserialised or fails to execute.
@@ -363,7 +364,8 @@ def run_native_extraction(
 
 
 def _device_batch(frames: FrameSource, tasks: Sequence[ImageTask], network_height: int, network_width: int) -> Tensor:
-    """One engine input built on the GPU from frame-source pixels, on torch's current stream (the runtime waits on it).
+    """One runtime input built on the frames' device from frame-source pixels (on the GPU, on torch's current stream: the
+    runtime waits on it).
 
     RGB, stretched to the network size with bilinear interpolation only when the image is not already that size, scaled
     to [0, 1], float32 `[batch, 3, h, w]` — what the RaCo graph was exported against.
