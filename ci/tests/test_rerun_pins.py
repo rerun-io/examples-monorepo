@@ -1,0 +1,76 @@
+"""Rerun pin guards: the Rust crates, their egui patches and the gsplat web build follow the conda rerun-sdk pin.
+
+Rerun 0.44.0 is not on crates.io, so every Rust package takes the `re_*` crates from the rerun-io/rerun release tag
+and patches the egui family, egui_crates and re_mp4 to the revisions in that tag's Cargo.lock. A bump that misses one
+manifest builds a second egui or a viewer a release behind, and nothing else in CI compiles Rust to notice.
+"""
+
+import re
+import subprocess
+from pathlib import Path
+from typing import Any
+
+import tomllib
+
+REPO_ROOT: Path = Path(__file__).resolve().parents[2]
+RERUN_GIT: str = "https://github.com/rerun-io/rerun"
+PATCHED_GIT: tuple[str, ...] = (
+    "https://github.com/emilk/egui.git",
+    "https://github.com/rerun-io/egui_crates.git",
+    "https://github.com/rerun-io/re_mp4.git",
+)
+WEB_VIEWER_BUILD: Path = REPO_ROOT / "packages/gsplat-rust-renderer/gsplat_rust_renderer/apis/build_web_viewer.py"
+
+
+def _cargo_manifests() -> list[Path]:
+    """Every tracked Cargo.toml under packages/ (untracked target/ trees hold upstream checkouts)."""
+    listed: str = subprocess.run(
+        ["git", "ls-files", "-z", "--", "packages/*Cargo.toml"], cwd=REPO_ROOT, check=True, capture_output=True, text=True
+    ).stdout
+    return [REPO_ROOT / name for name in listed.split("\0") if name.endswith("/Cargo.toml")]
+
+
+def _git_sources(table: dict[str, Any], where: str) -> list[tuple[str, dict[str, Any]]]:
+    """(location, entry) for every inline table with a `git` key, at any depth."""
+    found: list[tuple[str, dict[str, Any]]] = []
+    for key, value in table.items():
+        if isinstance(value, dict):
+            found += [(f"{where}.{key}", value)] if "git" in value else _git_sources(value, f"{where}.{key}")
+    return found
+
+
+def _conda_rerun_version() -> str:
+    pin: dict[str, Any] = tomllib.loads((REPO_ROOT / "pixi.toml").read_text())["feature"]["common"]["dependencies"]["rerun-sdk"]
+    match: re.Match[str] | None = re.fullmatch(r"==(\d+\.\d+\.\d+)", pin["version"])
+    assert match is not None, f"[feature.common.dependencies] rerun-sdk: expected an exact ==X.Y.Z pin, got {pin['version']!r}"
+    return match.group(1)
+
+
+def test_rust_rerun_crates_use_the_conda_pin_tag() -> None:
+    version: str = _conda_rerun_version()
+    tags: dict[str, set[str]] = {}
+    for manifest in _cargo_manifests():
+        relative: str = str(manifest.relative_to(REPO_ROOT))
+        for where, entry in _git_sources(tomllib.loads(manifest.read_text()), relative):
+            if entry["git"].removesuffix(".git") == RERUN_GIT:
+                tags.setdefault(str(entry.get("tag")), set()).add(where)
+    assert tags, "no Cargo.toml takes crates from the rerun-io/rerun git tag"
+    assert set(tags) == {version}, f"rerun-io/rerun git deps must all use tag {version!r} (the conda rerun-sdk pin): {tags}"
+
+
+def test_patched_egui_family_uses_one_rev_per_repository() -> None:
+    revs: dict[str, dict[str, set[str]]] = {url: {} for url in PATCHED_GIT}
+    for manifest in _cargo_manifests():
+        relative: str = str(manifest.relative_to(REPO_ROOT))
+        for where, entry in _git_sources(tomllib.loads(manifest.read_text()).get("patch", {}).get("crates-io", {}), f"{relative}:patch.crates-io"):
+            if entry["git"] in revs:
+                revs[entry["git"]].setdefault(str(entry.get("rev")), set()).add(where)
+    problems: list[str] = [f"{url}: {by_rev}" for url, by_rev in revs.items() if len(by_rev) > 1 or "None" in by_rev]
+    assert not problems, "each patched egui repository needs one `rev` across all manifests:\n" + "\n".join(problems)
+    assert revs[PATCHED_GIT[0]], "no [patch.crates-io] entry pins the egui family"
+
+
+def test_gsplat_web_viewer_builds_the_conda_pin_tag() -> None:
+    match: re.Match[str] | None = re.search(r'^RERUN_TAG: str = "([^"]+)"$', WEB_VIEWER_BUILD.read_text(), flags=re.MULTILINE)
+    assert match is not None, f"{WEB_VIEWER_BUILD.relative_to(REPO_ROOT)}: RERUN_TAG constant not found"
+    assert match.group(1) == _conda_rerun_version()
