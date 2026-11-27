@@ -34,6 +34,7 @@ from pathlib import Path
 import rerun as rr
 import rerun.catalog as cat
 import tyro
+from simplecv.catalog_layers import register_named_blueprint
 
 from mamma.viz.blueprint import default_blueprint
 
@@ -108,8 +109,9 @@ def main(config: RegisterCatalogConfig) -> int:
         ds.register([f"file://{props_path}"], layer_name="props", on_duplicate=replace).wait()
         print(f"  {name:42s} ppl={n_people} p99={gate.get('pve_p99_mm')} pass={gate.get('pass')}")
 
-    ds.register_blueprint(rbl_path.resolve().as_uri(), set_default=True)
-    print(f"\nDONE: {len(ds.segment_ids())} segments on {config.catalog_url}, default_blueprint={ds.default_blueprint()}")
+    # One blueprint per name: this run's layout replaces the one an earlier run registered.
+    registered = register_named_blueprint(ds, rbl_path.resolve().as_uri(), "mamma")
+    print(f"\nDONE: {len(ds.segment_ids())} segments on {config.catalog_url}, default_blueprint={registered.name} ({registered.id})")
     print(f"Open a Rerun 0.33 viewer on {config.catalog_url} (ensure no stale viewer holds :9876).")
     return 0
 

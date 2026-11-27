@@ -1,7 +1,7 @@
 diff --git a/src/lib.rs b/src/lib.rs
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -121,6 +121,18 @@
+@@ -123,6 +123,18 @@
  #[cfg(target_arch = "wasm32")]
  mod web;
  
@@ -38,7 +38,7 @@ diff --git a/src/web.rs b/src/web.rs
              depth_buffer: 0,
              dithering: true,
              ..Default::default()
-@@ -722,6 +728,10 @@
+@@ -806,6 +812,10 @@
          AsyncRuntimeHandle::from_current_tokio_runtime_or_wasmbindgen().expect("Infallible on web"),
      );
  
@@ -46,6 +46,6 @@ diff --git a/src/web.rs b/src/web.rs
 +        setup_app(&mut app);
 +    }
 +
-     // An explicit web option takes precedence over the restored theme preference.
-     if let Some(theme) = theme {
-         match theme.to_ascii_lowercase().as_str() {
+     // `App::new` has enabled analytics for this mode, so `is_enabled` is now meaningful.
+     if analytics_mode.allows_analytics() && re_analytics::is_enabled() {
+         show_analytics_notice(&app.command_sender);

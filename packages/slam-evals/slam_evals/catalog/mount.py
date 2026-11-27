@@ -224,7 +224,7 @@ def mount_catalog(
             atexit.register(tmp_dir.cleanup)
             rbl_path = Path(tmp_dir.name) / f"{src.lower()}.rbl"
             blueprint.save(application_id, path=str(rbl_path))
-            dataset.register_blueprint(rbl_path.resolve().as_uri(), set_default=True)
+            dataset.register_blueprint(rbl_path.resolve().as_uri(), src.lower(), set_default=True)
 
     return server
 

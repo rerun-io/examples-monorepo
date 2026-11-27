@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use re_log_encoding::{Encoder, EncodingOptions};
-use re_log_types::LogMsg;
+use rerun::log::LogMsg;
 use rerun::sink::{LogSink, SinkFlushError};
 
 struct State {

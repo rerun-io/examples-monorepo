@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, fs::File, io::BufReader, path::Path};
 use anyhow::{Context, Result};
 use arrow_array::{Array, ArrayRef, ListArray};
 use re_log_encoding::Decoder;
-use re_log_types::LogMsg;
+use rerun::log::LogMsg;
 
 pub const IDR: [u8; 15] = [
     0, 0, 1, 0x67, 0x64, 0, 0, 1, 0x68, 0xef, 0, 0, 1, 0x65, 0x88,

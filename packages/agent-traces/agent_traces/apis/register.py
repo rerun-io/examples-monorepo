@@ -13,6 +13,11 @@ from agent_traces.catalog_layout import save_table_blueprint
 from agent_traces.manifest import Manifest, load_manifest
 from agent_traces.writing import atomic_write
 
+BLUEPRINT_NAME: str = "session"
+"""Name of the recording blueprint in the viewer's blueprint menu; unique within the dataset."""
+TABLE_BLUEPRINT_NAME: str = "session table"
+"""Name of the segment-table blueprint."""
+
 
 @dataclass(frozen=True, slots=True)
 class Config:
@@ -156,8 +161,12 @@ def main(config: Config) -> Summary:
             catalog_blueprint().save("agent_traces", temporary)
         table_path: Path = (profile / f"agent-traces-table-{stamp}.rbl").resolve()
         save_table_blueprint(table_path, entry.segment_table().schema().names)
-        entry.register_blueprint(recording_path.as_uri(), set_default=True)
-        entry.register_blueprint(table_path.as_uri(), set_default=True, segment_table=True)
+        # Names are unique per dataset: the previous run's blueprints give theirs up until they retire below.
+        for blueprint_name in (BLUEPRINT_NAME, TABLE_BLUEPRINT_NAME):
+            if (holder := entry.get_blueprint_by_name(blueprint_name)) is not None:
+                holder.rename(f"{blueprint_name} (retiring {holder.id})")
+        entry.register_blueprint(recording_path.as_uri(), BLUEPRINT_NAME, set_default=True)
+        entry.register_table_blueprint(table_path.as_uri(), TABLE_BLUEPRINT_NAME, set_default=True)
         if previous is not None and retiring:
             previous.unregister(segments_to_drop=retiring, layers_to_drop=[]).wait()
             for path in retired_files:

@@ -16,7 +16,7 @@ from handtrack.data.catalog import CATALOG_URL, DatasetName, SplitName, list_seg
 from handtrack.data.echo import EchoStream, KeyNetProducer, Producer
 from handtrack.data.keynet_holdout import HoldoutSource, load_holdout
 from handtrack.data.keynet_rerun import CutStream, DrawAugment, keynet_finish, stream_cuts
-from handtrack.data.rerun_source import DATASET_SPECS, build_manifest, nvdec_producer, rerun_producer, source_spec, training_finish
+from handtrack.data.rerun_source import DATASET_SPECS, build_curation, nvdec_producer, rerun_producer, source_spec, training_finish
 from handtrack.data.stream import CatalogStream, KeyNetAugment, StreamConfig, sample_count
 from handtrack.train.loop import LoopSettings, Nets, OptimiserSettings, Trainer
 
@@ -65,7 +65,7 @@ class RerunStreamSettings:
     holdout: Path = Path("configs/detector_holdout.json")
     """Held-out episodes of the 2D-keypoint datasets (relative to the package directory)."""
     manifest_dir: Path = Path("/mnt/nas/ssd-8tb/scratch/hand-detector/manifests")
-    """Where each dataset's frozen sampling manifest is written once and reused."""
+    """Where each dataset's frozen sampling curation (its segments' frame ranges) is written once and reused."""
     catalog_url: str = CATALOG_URL
 
     def __post_init__(self) -> None:
@@ -267,8 +267,8 @@ def rerun_source(settings: StreamSettings, rerun: RerunStreamSettings, device: t
             producers.append(nvdec_producer(source_spec(name, index, settings.upright), segments, catalog_url=rerun.catalog_url, device=device, endless=True))
             continue
         digest: str = hashlib.sha256("\n".join(segments).encode()).hexdigest()[:10]
-        manifest: Path = build_manifest(source_spec(name, index), segments, rerun.catalog_url, rerun.manifest_dir / f"{name}-train-{digest}-w{workers}.parquet", workers)
-        producers.append(rerun_producer(source_spec(name, index, settings.upright), segments, catalog_url=rerun.catalog_url, manifest_path=manifest, workers=workers,
+        curation: Path = build_curation(source_spec(name, index), segments, rerun.catalog_url, rerun.manifest_dir / f"{name}-train-{digest}.curation.parquet")
+        producers.append(rerun_producer(source_spec(name, index, settings.upright), segments, catalog_url=rerun.catalog_url, curation_path=curation, workers=workers,
                                         device=device, endless=True))
     return EchoStream(producers, batch_size=settings.detnet_batch, pool_capacity=rerun.pool_capacity, min_fill=rerun.min_fill, max_echo=rerun.max_echo,
                       device=device, seed=settings.seed, finish=training_finish(settings.detnet_augment), epoch_steps=rerun.epoch_steps,

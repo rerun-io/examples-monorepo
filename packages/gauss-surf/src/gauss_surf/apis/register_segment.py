@@ -6,12 +6,14 @@ from typing import Literal
 
 import numpy as np
 from arkitscenes_download.ingest.blueprint import MeshFraming, make_blueprint
+from arkitscenes_download.ingest.catalog import ORIENTATIONS
 from arkitscenes_download.ingest.paths import PROMPTDA_MESH
 from arkitscenes_download.schema import ALL_LAYER_NAMES
 from jaxtyping import Float64
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
 from rerun.chunk import RrdReader
+from simplecv.catalog_layers import register_named_blueprint
 from simplecv.rerun_log_utils import mesh_bounding_geometry
 
 from gauss_surf.catalog import DEFAULT_CATALOG_URL, DEFAULT_DATASET_NAME, connect_catalog, register_layer
@@ -94,7 +96,7 @@ def write_extended_blueprints(output_dir: Path, dataset_name: str, framing: Mesh
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
-    for filename, portrait in zip(EXTENDED_BLUEPRINT_FILENAMES, (False, True), strict=True):
+    for filename, (_, portrait) in zip(EXTENDED_BLUEPRINT_FILENAMES, ORIENTATIONS, strict=True):
         path: Path = output_dir / filename.replace("arkitscenes-v2", dataset_name, 1)
         make_blueprint(portrait=portrait, framing=framing, include_promptda=True, include_gauss_surf=True).save("arkitscenes", path)
         path.chmod(0o644)
@@ -160,20 +162,10 @@ def main(config: Config) -> None:
         register_layer(dataset, rrd_path, layer_name)
         print(f"registered {layer_name}: {rrd_path}")
 
-    existing_blueprints: list[str] = dataset.blueprints()
-    if existing_blueprints and len(existing_blueprints) != len(blueprint_paths):
-        raise RuntimeError(
-            f"dataset already has {len(existing_blueprints)} blueprints; expected zero or {len(blueprint_paths)}, refusing to add duplicates"
-        )
-    if existing_blueprints:
-        blueprint_dataset: DatasetEntry | None = dataset.blueprint_dataset()
-        if blueprint_dataset is None:
-            raise RuntimeError("dataset reports blueprints but has no blueprint dataset")
-        print(f"replacing blueprint ids: {', '.join(existing_blueprints)}")
-        blueprint_dataset.unregister(segments_to_drop=existing_blueprints, layers_to_drop=[]).wait()
-    landscape_is_default: bool = config.default_orientation == "landscape"
-    dataset.register_blueprint(blueprint_paths[0].resolve().as_uri(), set_default=landscape_is_default)
-    dataset.register_blueprint(blueprint_paths[1].resolve().as_uri(), set_default=not landscape_is_default)
+    # One blueprint per name: the pair replaces whatever holds the ingest's orientation names (an earlier run, the ingest's pair).
+    portrait_is_default: bool = config.default_orientation == "portrait"
+    for (orientation, is_portrait), blueprint_path in zip(ORIENTATIONS, blueprint_paths, strict=True):
+        register_named_blueprint(dataset, blueprint_path.resolve().as_uri(), orientation, set_default=is_portrait == portrait_is_default)
     print(f"registered blueprints: {blueprint_paths[0].name}, {blueprint_paths[1].name} (default: {config.default_orientation})")
     print(
         f"segment {config.video_id}: cleanly replaced {len(standard_paths) + len(extra_layers)} layers "

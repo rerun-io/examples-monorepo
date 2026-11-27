@@ -170,7 +170,7 @@ def exoego_table_blueprint(scene: rrb.Spatial3DView, pane: rrb.Spatial2DView) ->
         pane: The one camera pane the card decodes.
 
     Returns:
-        The blueprint registered with ``segment_table=True``.
+        The blueprint registered with ``DatasetEntry.register_table_blueprint``.
     """
     return rrb.Blueprint(rrb.Horizontal(scene, pane), collapse_panels=True)
 
@@ -371,7 +371,7 @@ def table_blueprint(
         path_colors: Run source -> trajectory colour (a figure legend), overriding the layer's own.
 
     Returns:
-        The blueprint registered with ``segment_table=True``.
+        The blueprint registered with ``DatasetEntry.register_table_blueprint``.
     """
     return rrb.Blueprint(
         rrb.Horizontal(

@@ -1,5 +1,5 @@
 # Golden parity tests of staged items against third-party reference outputs stored as `.rrd` on the NAS.
-# A workspace of its own (excluded from ../Cargo.toml): the Rerun 0.42 decoder it needs would otherwise
+# A workspace of its own (excluded from ../Cargo.toml): the Rerun 0.44 decoder it needs would otherwise
 # re-resolve the staging lock (kiddo/fixed) and enter the gate's build. Run: pixi run -e kornia-staging-dev
 # --frozen kornia-staging-golden.
 [workspace]
@@ -15,9 +15,10 @@ description = "Golden tests of staged items against third-party reference output
 [dependencies]
 anyhow = "1"
 arrow = { version = "58.4", default-features = false }
-re_chunk = { version = "=0.42.0", default-features = false }
-re_log_encoding = { version = "=0.42.0", default-features = false, features = ["decoder"] }
-re_log_msg = { version = "=0.42.0", default-features = false }
+# Rerun 0.44.0 is not on crates.io: its release tag.
+re_chunk = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0", default-features = false }
+re_log_encoding = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0", default-features = false, features = ["decoder"] }
+re_log_msg = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0", default-features = false }
 
 [dev-dependencies]
 kornia-image = { version = "0.2", default-features = false }

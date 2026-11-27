@@ -9,7 +9,8 @@ use std::io::BufReader;
 use std::path::Path;
 
 use rerun::RecordingStream;
-use rerun::external::re_log_types::{LogMsg, StoreKind};
+use rerun::external::re_log_msg::LogMsg;
+use rerun::external::re_log_types::StoreKind;
 use rerun::log::Chunk;
 
 use super::scene::RIG_PATH;

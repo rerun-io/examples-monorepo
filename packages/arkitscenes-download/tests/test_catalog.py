@@ -139,3 +139,48 @@ class CatalogProgressTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_default_blueprints_keep_one_blueprint_per_name_across_reruns(tmp_path: Path) -> None:
+    """A re-run, or another tool's blueprint under the same name, is replaced: names stay unique and the defaults stay set."""
+    import rerun as rr
+
+    from arkitscenes_download.ingest.blueprint import make_blueprint
+
+    recording = rr.RecordingStream("arkitscenes", recording_id="100")
+    recording.save(str(tmp_path / "100.rrd"))
+    recording.log("world/points", rr.Points3D([[0.0, 0.0, 0.0]]))
+    recording.flush()
+    del recording
+    foreign: Path = tmp_path / "foreign-portrait.rbl"
+    make_blueprint(True).save("arkitscenes", foreign)
+    with rr.server.Server(datasets={"arkitscenes": [str(tmp_path / "100.rrd")]}) as server:
+        dataset: DatasetEntry = server.client().get_dataset("arkitscenes")
+        dataset.register_blueprint(foreign.as_uri(), "portrait")
+        for _ in range(2):
+            catalog.register_default_blueprints(dataset, "arkitscenes", tmp_path / "blueprints")
+        blueprints = dataset.blueprints()
+        assert sorted((blueprint.name, blueprint.kind) for blueprint in blueprints) == [
+            ("landscape", "recording"), ("portrait", "recording"), (catalog.TABLE_BLUEPRINT_NAME, "table")]
+        assert dataset.default_blueprint() == dataset.get_blueprint_by_name("portrait")
+        assert dataset.default_segment_table_blueprint() == dataset.get_blueprint_by_name(catalog.TABLE_BLUEPRINT_NAME)
+
+
+def test_a_failed_table_blueprint_keeps_the_old_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The guarded segment-table registration may fail; the table blueprint of the previous run then stays, under its name."""
+    import rerun as rr
+
+    recording = rr.RecordingStream("arkitscenes", recording_id="100")
+    recording.save(str(tmp_path / "100.rrd"))
+    recording.log("world/points", rr.Points3D([[0.0, 0.0, 0.0]]))
+    recording.flush()
+    del recording
+    with rr.server.Server(datasets={"arkitscenes": [str(tmp_path / "100.rrd")]}) as server:
+        dataset: DatasetEntry = server.client().get_dataset("arkitscenes")
+        catalog.register_default_blueprints(dataset, "arkitscenes", tmp_path / "first")
+        table = dataset.get_blueprint_by_name(catalog.TABLE_BLUEPRINT_NAME)
+        monkeypatch.setattr(DatasetEntry, "register_table_blueprint", MagicMock(side_effect=RuntimeError("server refused the table blueprint")))
+        catalog.register_default_blueprints(dataset, "arkitscenes", tmp_path / "second")
+        assert table is not None and dataset.get_blueprint_by_name(catalog.TABLE_BLUEPRINT_NAME) == table
+        assert dataset.default_segment_table_blueprint() == table
+        assert sorted(blueprint.name or "" for blueprint in dataset.blueprints()) == sorted([*(name for name, _ in catalog.ORIENTATIONS), catalog.TABLE_BLUEPRINT_NAME])

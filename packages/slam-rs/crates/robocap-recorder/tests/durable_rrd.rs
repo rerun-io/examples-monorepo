@@ -5,7 +5,7 @@ use std::io::BufReader;
 use std::time::Duration;
 
 use re_log_encoding::Decoder;
-use re_log_types::LogMsg;
+use rerun::log::LogMsg;
 use rerun::sink::LogSink;
 use robocap_recorder::{CaptureIdentity, DirectWriter, DurableRrdSink, MotionKind, MotionSample};
 

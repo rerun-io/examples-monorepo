@@ -19,6 +19,7 @@ from pathlib import Path
 
 import rerun.blueprint as rrb
 import tyro
+from simplecv.catalog_layers import register_named_blueprint
 
 from exo_calib.catalog_io import RigLayout, StageConfig, StageContext, stage_context
 from exo_calib.kp2d_layer import kp2d_raw_entity
@@ -26,6 +27,8 @@ from exo_calib.layer_io import pinhole_entity
 
 BLUEPRINT_FILENAME: str = "exocalib.rbl"
 """Written under ``output_dir``; a ``-N`` suffix is added if it exists (the server caches file descriptors, so registered files are never overwritten)."""
+BLUEPRINT_NAME: str = "exo-calib"
+"""Name of the registered blueprint in the viewer's blueprint menu."""
 
 
 @dataclass
@@ -83,5 +86,6 @@ def main(config: BlueprintConfig) -> None:
     blueprint.save(str(context.dataset.id), str(rbl_path))
     print(f"wrote {rbl_path} for application id {context.dataset.id}")
     if config.stage.register:
-        context.dataset.register_blueprint(rbl_path.resolve().as_uri(), set_default=True)
-        print(f"registered as default blueprint: {context.dataset.default_blueprint()}")
+        # The name is unique per dataset: this run's layout replaces the one an earlier run registered.
+        registered = register_named_blueprint(context.dataset, rbl_path.resolve().as_uri(), BLUEPRINT_NAME)
+        print(f"registered as default blueprint: {registered.name} ({registered.id})")

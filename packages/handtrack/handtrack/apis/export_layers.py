@@ -23,6 +23,7 @@ import rerun as rr
 from dataforge import schema, writing
 from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer
 from rerun.chunk import LazyChunkStream, RrdReader
+from simplecv.catalog_layers import register_named_blueprint
 
 from handtrack import rerun_layers
 from handtrack.blueprint import handtrack_blueprint
@@ -36,6 +37,8 @@ HANDTRACK_LAYER: str = "handtrack_v1"
 DETNET_LAYER: str = "detnet_v1"
 GT_LAYERS: tuple[str, ...] = ("base", "hand_pose", "hand_mesh", "projections")
 """The segment's layers a standalone clip carries beside ``handtrack_v1``."""
+BLUEPRINT_NAME: str = "handtrack"
+"""Name of the registered blueprint in the viewer's blueprint menu."""
 
 
 @dataclass(kw_only=True)
@@ -162,8 +165,9 @@ def register_layers(config: Config, segments: list[str]) -> None:
         blueprint_file: Path = config.layers_root / "blueprints" / f"{config.dataset}__handtrack__{stamp}.rbl"
         with writing.atomic_write(blueprint_file) as temp_path:
             handtrack_blueprint(config.dataset).save(writing.APPLICATION_ID, str(temp_path))
-        entry.register_blueprint(blueprint_file.resolve().as_uri(), set_default=True)
-        print(f"registered the handtrack blueprint as {config.dataset}'s default")
+        # One blueprint per name: this run's file replaces the one an earlier run registered.
+        register_named_blueprint(entry, blueprint_file.resolve().as_uri(), BLUEPRINT_NAME)
+        print(f"registered the {BLUEPRINT_NAME!r} blueprint as {config.dataset}'s default")
 
 
 def _run_files(directory: Path | None, segments: tuple[str, ...]) -> dict[str, Path]:

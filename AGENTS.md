@@ -299,12 +299,12 @@ chunks, and the 0.42 viewer walks the whole chunk list on every frame, so frame 
 falls with the chunk count, not the data size. Casa Loma 007: 117 k -> 13.5 k chunks,
 7.6-15 -> 45-56 fps on an M5 on every tab. Check the count with `rerun rrd stats`.
 
-### Rerun 0.42 names: old -> new
+### Rerun 0.44 names: old -> new
 
 Do not guess Rerun names from memory. Old spellings fail or emit a `DeprecationWarning`;
 treat that warning as a bug in new code.
 
-| Old (fails or warns in 0.42) | 0.42 form |
+| Old (fails or warns in 0.44) | 0.44 form |
 |---|---|
 | `rr.Transform3D(..., from_parent=True)` | `rr.Transform3D(..., relation=rr.TransformRelation.ChildFromParent)` |
 | `rr.Transform3D(..., from_parent=False)` | omit it (default `ParentFromChild`) |
@@ -316,9 +316,20 @@ treat that warning as a bug in new code.
 | `rr.recording.load_recording(path)` (removed) | `rerun.chunk.RrdReader(path).store()` (a `LazyStore`) or `.stream()` |
 | `rr.dataframe` (removed) | dataframe queries: `with rr.server.Server(datasets={"d": [path]}) as srv:` then `srv.client().get_dataset("d").reader(index=...)` |
 | `rr.flush()` (absent) | `rr.get_data_recording().flush()` or `rec.flush()` |
+| `dataset.register_blueprint(uri, segment_table=True)` (removed) | `dataset.register_table_blueprint(uri, name)` |
+| blueprint ID `str` from `register_blueprint`, `blueprints`, `default_blueprint`, `set_default_blueprint` | `rerun.catalog.RegisteredBlueprint` (`.id`, `.name`, `.kind`); pass a `name` (an unnamed one warns); `set_default=` is keyword-only |
+| `DatasetEntry.register(..., object_store_config=...)` | `storage_location=...` |
+| dataloader `Manifest` / `RerunIterableDataset.from_manifest()` (removed); `Field.max_staleness` (removed) | `rerun.experimental.spans.Curation.from_source(...)` + `DataSource(dataset, curation=...)` |
+| `UrdfTree.log_urdf_to_recording` | `UrdfTree.log_to_recording` |
+| `rerun viewer-mcp`; MCP `"args": ["viewer-mcp"]` | `rerun mcp`; `"args": ["mcp"]` |
+| MCP viewer tools `rerun_*` (`mcp__rerun__rerun_get_state`) | `viewer_*` (`mcp__rerun__viewer_get_state`) |
+| JS web viewer snake_case (`set_time({ play_state })`, `get_state().active_store_id`) | camelCase (`setTime({ playState })`, `getState().activeStoreId`) |
+
+The npm `@rerun-io/web-viewer` sends usage data by default since 0.44: pages we publish pass
+`{ analytics: "off" }` to `WebViewer.start` (iframes: `&analytics=off`).
 
 Check `rerun --version` first. Each release lists its breaking changes in the changeset at
-<https://rerun.io/docs/changelog> (for example `changeset-0-42`).
+<https://rerun.io/docs/changelog> (for example `changeset-0-44`).
 
 ### OSS catalog file-descriptor limits
 
@@ -366,7 +377,7 @@ re-registers from disk on start (then `Restart=on-failure` becomes safe).
 
 **The conda-forge `rerun-sdk` pin is the source of truth.** Every environment takes
 `rerun-sdk` from conda-forge as a conda dependency with a named channel,
-`rerun-sdk = { version = "==0.42.0", channel = "https://prefix.dev/conda-forge" }`: the
+`rerun-sdk = { version = "==0.44.0", channel = "https://prefix.dev/conda-forge" }`: the
 `ai-demos` channel carries its own rerun-sdk builds, and channel priority would pick
 those. pixi-build packages (the slam-rs recipe) declare it as a normal conda run
 dependency and resolve against the same package.
@@ -381,24 +392,24 @@ jupyter_client) would pull 4.x, and PyPI `s3fs` → `aiobotocore` needs <3. `gra
 (PyPI) pins an exact `rerun-sdk`; prefix.dev's conda-to-PyPI hash mapping gives the conda
 package the `rerun-sdk` purl, so uv treats it as installed and adds no second copy (check a
 re-lock for zero PyPI `rerun-sdk` entries). The same mapping covers its `gradio>=6` with the
-conda `gradio`. Until upstream loads streamed segments in order, `gradio-rerun` is the
-ai-demos `0.42.0.post1` wheel (the pin's comment says why; rebuild inputs in ai-demos
-`.github/gradio-rerun-source-build`).
+conda `gradio`. `gradio-rerun` comes from PyPI at the same version as `rerun-sdk`.
 
 To bump, in one change:
 1. every conda `rerun-sdk` pin in `pixi.toml` (`grep -n 'rerun-sdk = ' pixi.toml`) and the
    `rerun-sdk` run dependencies in `packages/slam-rs/recipe.yaml`, `packages/insta360-io/recipe.yaml` and
    `recipes/gradio-rerun-src/recipe.yaml`;
-2. `gradio-rerun` in `[feature.common.pypi-dependencies]` to the same version — never separately
-   (while it is the ai-demos wheel, rebuild that with the fix for the new version, or return to PyPI if upstream has it),
-   and `recipes/gradio-rerun-src` (the fdanyone envs' gradio-rerun with the gsplat web viewer) to the matching
-   gradio-rerun-viewer commit, regenerating its one patch (`package.json` + `pnpm-lock.yaml`);
+2. `gradio-rerun` in `[feature.common.pypi-dependencies]` to the same version — never separately —
+   and `recipes/gradio-rerun-src` (the fdanyone envs' gradio-rerun with the gsplat web viewer) to the
+   gradio-rerun-viewer release commit of that version and the matching `@rerun-io/web-viewer` npm
+   tarball, regenerating its one patch (`package.json` + `pnpm-lock.yaml`);
 3. the Rust `rerun`/`re_*` crates to match exactly (matching that release's egui family):
    `packages/robocap-live`, `packages/slam-rs`, the gsplat custom viewer
    (`packages/gsplat-rust-renderer/crates/*/Cargo.toml`) and the depth-video viewer
    (`packages/depth-video-viewer/Cargo.toml`); re-lock their Cargo with
    `cargo update -p <crate>@<old>` for the re_* family, not a blanket update, or the viewer
-   silently loses protocol/tooling parity;
+   silently loses protocol/tooling parity. 0.44.0 is not on crates.io (its egui is unreleased):
+   the crates are git dependencies on rerun-io/rerun tag `0.44.0`, with a `[patch.crates-io]` for
+   egui, the egui crates and re_mp4 at the revisions in that tag's `Cargo.lock`;
 4. re-lock Pixi on linux-64 and Cargo.
 
 The gsplat custom viewer pins its own lane: `[feature.gsplat-rust-renderer.dependencies]`

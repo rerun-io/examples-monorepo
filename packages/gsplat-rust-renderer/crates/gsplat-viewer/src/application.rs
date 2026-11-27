@@ -135,7 +135,7 @@ pub fn create_app(
     Ok(viewer)
 }
 
-// Copy of re_viewer::run_headless_app because 0.42.0 cannot accept our WgpuSetup.
+// Copy of re_viewer::run_headless_app because 0.44.0 cannot accept our WgpuSetup.
 fn run_headless(
     window_size: Option<egui::Vec2>,
     app_creator: impl FnOnce(&eframe::CreationContext<'_>) -> anyhow::Result<re_viewer::App>,

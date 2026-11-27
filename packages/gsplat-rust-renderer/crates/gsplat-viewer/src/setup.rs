@@ -33,6 +33,8 @@ pub fn compute_wgpu_setup() -> eframe::egui_wgpu::WgpuSetup {
                 re_renderer::device_caps::instance_descriptor(None).backends,
                 surface,
             )
+            // egui_wgpu's adapter selector returns `Result<_, String>`.
+            .map_err(|err| err.to_string())
         })),
         device_descriptor: compute_device_descriptor(gsplat_core::subgroups_allowed()),
         ..eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle()

@@ -1,6 +1,7 @@
 """Write a catalog layer atomically and register it: one writer and one registrar for every package.
 
 ``serve_local_segment`` serves a base recording and named layer files of its segment on a private in-process catalog.
+``register_named_blueprint`` registers a blueprint under a name and retires the blueprint that held it.
 
 A layer is a recording file with its segment's recording id; the catalog stacks a segment's layers by that id. A target
 file either exists complete or not at all: half-written files poison batch runs and the catalog server, and saving over
@@ -26,7 +27,7 @@ from pathlib import Path
 import rerun as rr
 import rerun.blueprint as rrb
 import rerun.chunk as rrc
-from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer
+from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer, RegisteredBlueprint
 
 DATASET_RETRY_DELAY_S: float = 1.0
 """Wait before the one retry of ``ensure_dataset`` (another worker may be creating the same dataset)."""
@@ -131,6 +132,46 @@ def register_layer(entry: DatasetEntry, paths: Sequence[Path], layer: str | None
         entry.register(uris, on_duplicate=on_duplicate).wait()
     else:
         entry.register(uris, layer_name=layer, on_duplicate=on_duplicate).wait()
+
+
+def register_named_blueprint(entry: DatasetEntry, uri: str, name: str, *, table: bool = False, set_default: bool = True) -> RegisteredBlueprint:
+    """Register a blueprint file as the blueprint ``name`` of ``entry``, retiring the one that held the name.
+
+    Names are unique per dataset, so the holder gives its name up first, and it is unregistered only once the new
+    blueprint is registered: a failed registration gives the holder its name back and leaves it registered.
+    Registering the holder's own file again replaces it in place under the same id, so nothing is unregistered then.
+
+    Args:
+        entry: The dataset to register on.
+        uri: The blueprint file, as a URI the server can read.
+        name: The blueprint's name.
+        table: Register a segment-table blueprint instead of a recording blueprint.
+        set_default: Also make it the default blueprint of its kind.
+
+    Returns:
+        The registered blueprint.
+
+    Raises:
+        LookupError: When a blueprint holds ``name`` but the dataset has no blueprint dataset to retire it from.
+    """
+    holder: RegisteredBlueprint | None = next((blueprint for blueprint in entry.blueprints() if blueprint.name == name), None)
+    blueprints: DatasetEntry | None = None if holder is None else entry.blueprint_dataset()
+    if holder is not None:
+        if blueprints is None:
+            raise LookupError(f"blueprint {holder.id} holds {name!r} on dataset {entry.name!r}, which has no blueprint dataset to retire it from")
+        holder.rename(f"{name} (retiring {holder.id})")
+    try:
+        if table:
+            registered: RegisteredBlueprint = entry.register_table_blueprint(uri, name, set_default=set_default)
+        else:
+            registered = entry.register_blueprint(uri, name, set_default=set_default)
+    except BaseException:
+        if holder is not None:
+            holder.rename(name)
+        raise
+    if holder is not None and blueprints is not None and holder.id != registered.id:
+        blueprints.unregister(segments_to_drop=[holder.id], layers_to_drop=[]).wait()
+    return registered
 
 
 @dataclass(frozen=True, slots=True)

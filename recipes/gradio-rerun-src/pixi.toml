@@ -1,6 +1,6 @@
 [package]
 name = "gradio-rerun-src"
-version = "0.43.0a1.c456457"
+version = "0.44.0.edaf177"
 
 [package.build]
 backend = { name = "pixi-build-rattler-build", version = "*" }

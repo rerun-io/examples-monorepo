@@ -45,7 +45,7 @@ requirements:
     - numpy
     - jaxtyping
     # InsvReader yields Rerun chunks; the pin moves with every other rerun-sdk pin (AGENTS.md, "Testing Rerun builds").
-    - rerun-sdk ==0.42.0
+    - rerun-sdk ==0.44.0
 
 tests:
   - python:

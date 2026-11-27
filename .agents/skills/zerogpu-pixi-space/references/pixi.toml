@@ -16,7 +16,7 @@ cuda-version = "13.0.*"
 pytorch-gpu = "==2.12.1"  # ZeroGPU supports torch 2.8 to 2.13
 # ... the app env's features, the whole `cuda` feature included (Triton needs cuda.h and libcuda) ...
 gradio = "==6.31.0"
-rerun-sdk = { version = "==0.42.0", channel = "https://prefix.dev/conda-forge" }
+rerun-sdk = { version = "==0.44.0", channel = "https://prefix.dev/conda-forge" }
 # Upstream recipes as pixi-build source deps at the pinned commit:
 # <name>-src = { git = "https://github.com/rerun-io/examples-monorepo.git", rev = "<sha>", subdirectory = "recipes/<name>-src" }
 

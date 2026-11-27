@@ -145,7 +145,7 @@ def _imu_axis() -> rrb.archetypes.TimeAxis:
 def make_table_blueprint() -> rrb.Blueprint:
     """3D-only preview layout for the dataset's segment table (experimental table cards).
 
-    Registered with ``DatasetEntry.register_blueprint(uri, segment_table=True)``; the
+    Registered with ``DatasetEntry.register_table_blueprint(uri, name)``; the
     viewer renders each segment-table row through this view when "Table cards and
     blueprints" is enabled under Settings > Experimental. Kept to a single 3D view
     showing only mesh, boxes, and camera frusta: with ~15 cards visible, the AV1

@@ -99,10 +99,11 @@ def test_catalog_register_skip_replace_and_missing_file(tmp_path: Path, rerun_bi
             entry = client.get_dataset("agent-traces-synthetic")
             external = tmp_path / "external.rbl"
             catalog_blueprint().save("external", external)
-            entry.register_blueprint(external.as_uri(), set_default=False)
+            entry.register_blueprint(external.as_uri(), "external", set_default=False)
             old_blueprints = set(entry.blueprints())
-            assert entry.default_blueprint() is not None
-            assert entry.default_segment_table_blueprint() is not None
+            assert entry.default_blueprint() == entry.get_blueprint_by_name(register.BLUEPRINT_NAME)
+            table_default = entry.default_segment_table_blueprint()
+            assert table_default is not None and table_default.kind == "table"
             assert register.main(replace(config, out=(second_out, out))) == register.Summary(0, 4, 0, 0)
             assert {str(entry.id) for entry in client.entries(include_hidden=True)} == initial_entries
             entry = client.get_dataset("agent-traces-synthetic")
@@ -113,6 +114,8 @@ def test_catalog_register_skip_replace_and_missing_file(tmp_path: Path, rerun_bi
             assert not old_blueprints & set(entry.blueprints())
             assert entry.default_blueprint() in entry.blueprints()
             assert entry.default_segment_table_blueprint() in entry.blueprints()
+            assert {(blueprint.name, blueprint.kind) for blueprint in entry.blueprints()} == {
+                (register.BLUEPRINT_NAME, "recording"), (register.TABLE_BLUEPRINT_NAME, "table")}
             assert register.main(replace(config, replace=True)) == register.Summary(3, 1, 0, 0)
             assert len(list(profile.glob("*.rbl"))) == 2
             assert not list(second_profile.glob("*.rbl"))

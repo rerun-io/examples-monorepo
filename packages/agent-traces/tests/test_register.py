@@ -48,6 +48,21 @@ class FakeBlueprintTable:
 
 
 @dataclass
+class FakeBlueprint:
+    """A registered blueprint as ``get_blueprint_by_name`` returns it."""
+
+    id: str
+    """Blueprint file URI, the fake's blueprint id."""
+    entry: "FakeEntry"
+    """Dataset that holds the blueprint."""
+
+    def rename(self, name: str) -> "FakeBlueprint":
+        assert name not in self.entry.names.values()
+        self.entry.names[self.id] = name
+        return self
+
+
+@dataclass
 class FakeEntry:
     """Catalog state and calls visible at the SDK boundary."""
     calls: list[tuple[list[str], str, OnDuplicateSegmentLayer]] = field(default_factory=list)
@@ -56,6 +71,8 @@ class FakeEntry:
     """Segments available in the catalog."""
     blueprints: list[str] = field(default_factory=list)
     """Registered default blueprints."""
+    names: dict[str, str] = field(default_factory=dict)
+    """Blueprint name by blueprint id; names are unique within the dataset."""
     omit: str | None = None
     """Successful segment hidden from listing to simulate a catalog fault."""
     fail: str | None = None
@@ -101,13 +118,24 @@ class FakeEntry:
 
         return Table()
 
-    def default_blueprint(self) -> str | None:
-        return self.blueprints[0] if self.blueprints else None
+    def get_blueprint_by_name(self, name: str) -> FakeBlueprint | None:
+        return next((FakeBlueprint(uri, self) for uri in self.blueprints if self.names.get(uri) == name), None)
 
-    def register_blueprint(self, uri: str, *, set_default: bool, segment_table: bool = False) -> None:
+    def register_blueprint(self, uri: str, name: str, *, set_default: bool) -> None:
         assert set_default
-        assert segment_table == ("table-" in uri)
+        assert "table-" not in uri
+        self._add(uri, name)
+
+    def register_table_blueprint(self, uri: str, name: str, *, set_default: bool) -> None:
+        assert set_default
+        assert "table-" in uri
+        self._add(uri, name)
+
+    def _add(self, uri: str, name: str) -> None:
+        if name in {self.names.get(registered) for registered in self.blueprints}:
+            raise AssertionError(f"blueprint name {name!r} is taken")  # rerun.catalog.AlreadyExistsError on a real catalog
         self.blueprints.append(uri)
+        self.names[uri] = name
 
 
 @dataclass
@@ -189,6 +217,7 @@ def test_selection_blueprint_and_duplicate_summary(converted: Path, catalog: dic
     register.main(config)
     assert len(entry.blueprints) == 2
     assert not set(entry.blueprints) & originals.keys()
+    assert sorted(entry.names[uri] for uri in entry.blueprints) == [register.BLUEPRINT_NAME, register.TABLE_BLUEPRINT_NAME]
     assert all(not Path(uri.removeprefix("file://")).exists() for uri in originals)
     assert "registered=0 skipped_duplicates=2 errors=0 missing=0" in capsys.readouterr().out
     register.main(register.Config(catalog_url=config.catalog_url, out=(converted,), profile="x", dataset="custom", replace=True))

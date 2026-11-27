@@ -13,12 +13,13 @@ The Cargo workspace has four crates:
 
 The Brush observer patch changes no training or renderer math.
 
-Rerun is pinned to 0.42.0, Burn to `faec3983`, CubeCL to `46752244`, and wgpu to
-registry 30.0.0. Rerun's wasm-bindgen pin prevents use of Brush's wgpu 30.0.1 fork.
+Rerun is pinned to the 0.44.0 git tag (its crates are not on crates.io; the egui family is
+patched to the revisions Rerun's 0.44.0 Cargo.lock uses), Burn to `faec3983`, CubeCL to `46752244`,
+and wgpu to registry 30.0.0. Rerun's wasm-bindgen pin prevents use of Brush's wgpu 30.0.1 fork.
 The web build (`crates/gsplat-viewer-web`, its own Cargo workspace) links the stock
-`re_viewer` web entry point through two patches applied to crates.io archives: a
-`re_viewer::web_hooks` hook that requests our device features and registers the renderer,
-and the WebGPU `subgroups` feature mapping that wgpu 30 lacks. On wasm32 the core prefixes
+`re_viewer` web entry point through two patches: a `re_viewer::web_hooks` hook, applied to a
+checkout of the Rerun tag, that requests our device features and registers the renderer,
+and the WebGPU `subgroups` feature mapping that wgpu 30 lacks, applied to its crates.io archive. On wasm32 the core prefixes
 subgroup shaders with `enable subgroups;`, which browsers require and naga rejects. Kernels stay within WebGPU workgroup, storage-buffer,
 and dispatch limits. The core rejects devices without subgroups; the custom viewer uses stock
 Gaussian quads when compute capabilities or buffer capacity are insufficient.
@@ -97,7 +98,7 @@ rule). The PickingLayer and OutlineMask draws are a full-view quad placed throug
 view space (`projection_from_view`, `tan_half_fov`), so it covers the same view
 pixels in the main pass and in the picking pass, whose projection is cropped to
 its rectangle; both write the composite's depth. Hover and selection therefore
-name one hexel or splat row, as stock `GaussianSplats3D` does. The public 0.42.0 view state supplies `last_eye`, which can lag
+name one hexel or splat row, as stock `GaussianSplats3D` does. The public 0.44.0 view state supplies `last_eye`, which can lag
 one UI frame. Upstream integration needs the current full pose, projection, and
 pixel resolution in `DrawableCollectionViewInfo`; camera position alone cannot
 replace those fields.

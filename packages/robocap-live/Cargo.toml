@@ -31,6 +31,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 slam-rs = { path = "../slam-rs/crates/slam-rs" }
 thiserror = "2"
+# Rerun 0.44.0 is not on crates.io: its release tag.
+rerun = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0", default-features = false }
+re_log_encoding = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0", default-features = false }
 
 # kornia-staging's patched cubecl-common (see packages/slam-rs/Cargo.toml); the tree is prepared by kornia-staging-patch-deps.
 [patch.crates-io]
@@ -39,6 +42,9 @@ cubecl-common = { path = "../kornia-staging/target/patch/cubecl-common-0.11.0-pr
 # The Mali shader-compiler fix (kornia-staging patches/cubecl-spirv-0.11.0-pre.3-shared-implicit-pointer.patch): without it the
 # GPU lane's first kernel crashes libmali's compiler on the caps. All three CubeCL patches are owned by kornia-staging (see its Cargo.toml).
 cubecl-spirv = { path = "../kornia-staging/target/patch/cubecl-spirv-0.11.0-pre.3" }
+# The egui crates in the Rerun SDK graph, at the revision in Rerun's 0.44.0 Cargo.lock (Rerun patches them to egui main).
+ecolor = { git = "https://github.com/emilk/egui.git", rev = "90431d979ab1faae2de6d9f736e9d33ca0d31956" }
+emath = { git = "https://github.com/emilk/egui.git", rev = "90431d979ab1faae2de6d9f736e9d33ca0d31956" }
 
 [profile.dev]
 opt-level = 2

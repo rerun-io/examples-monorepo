@@ -21,10 +21,10 @@ sha2 = "0.10"
 serde = { workspace = true }
 serde_json = { workspace = true }
 slam-rs = { workspace = true, optional = true }
-re_build_info = "=0.37.0"
-re_log_encoding = { version = "=0.37.0", features = ["encoder", "decoder"] }
-re_log_types = "=0.37.0"
-rerun = { version = "=0.37.0", default-features = false, features = ["sdk"] }
+re_build_info.workspace = true
+re_log_encoding = { workspace = true, features = ["encoder", "decoder"] }
+re_log_types.workspace = true
+rerun = { workspace = true, features = ["sdk"] }
 gstreamer = { version = "0.24", features = ["v1_24"], optional = true }
 gstreamer-app = { version = "0.24", features = ["v1_24"], optional = true }
 
@@ -35,7 +35,7 @@ required-features = ["gstreamer-capture"]
 
 [dev-dependencies]
 rusqlite = { version = "0.40", features = ["bundled"] }
-re_log_encoding = { version = "=0.37.0", features = ["decoder"] }
+re_log_encoding = { workspace = true, features = ["decoder"] }
 tempfile = "3"
 
 [[example]]

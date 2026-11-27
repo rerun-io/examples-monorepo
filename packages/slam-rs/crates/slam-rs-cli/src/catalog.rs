@@ -54,6 +54,10 @@ fn request<T>(body: T, dataset: &str) -> Result<tonic::Request<T>> {
     Ok(tonic::Request::new(body).with_entry_name(re_protos::EntryName::new(dataset)?))
 }
 
+#[expect(
+    deprecated,
+    reason = "Rerun 0.44 deprecates QueryDataset for FindChunks; the 0.44 server still serves it"
+)]
 async fn query(
     client: &mut Client,
     dataset: &str,
@@ -98,7 +102,7 @@ async fn fetch(
     while let Some(response) = stream.message().await? {
         for message in response.chunks {
             let message = message.to_application(())?;
-            consume(re_chunk::Chunk::from_chunk_record_batch(&message.batch)?)?;
+            consume(re_chunk::Chunk::from_arrow_msg(&message)?)?;
         }
     }
     Ok(())
@@ -517,6 +521,13 @@ fn numbers<const N: usize>(statics: &Statics, key: &str) -> Result<[f64; N]> {
     );
     Ok(std::array::from_fn(|i| values.value(i)))
 }
+/// An optional scalar static: absent -> `None`, present but malformed -> error.
+fn optional_number(statics: &Statics, key: &str) -> Result<Option<f64>> {
+    statics
+        .contains_key(key)
+        .then(|| numbers::<1>(statics, key).map(|v| v[0]))
+        .transpose()
+}
 fn string(statics: &Statics, key: &str) -> Result<String> {
     let array = flat(statics, key)?;
     let values = array
@@ -559,11 +570,8 @@ fn calibration(
             coeffs.values().iter().all(|v| v.is_finite()),
             "{entity}: non-finite distortion coefficient"
         );
-        let radius_key = format!("{entity}:distortion_valid_radius");
-        let radius = statics
-            .contains_key(&radius_key)
-            .then(|| numbers::<1>(statics, &radius_key).map(|v| v[0]))
-            .transpose()?;
+        let radius = optional_number(statics, &format!("{entity}:distortion_valid_radius"))?;
+        let readout = optional_number(statics, &format!("{entity}:rolling_shutter_readout_s"))?;
         parts.push(CameraParts::from_catalog_statics(
             index,
             &CameraStatics {
@@ -575,6 +583,7 @@ fn calibration(
                 distortion_model: model,
                 distortion_coefficients: coeffs.values().to_vec(),
                 distortion_valid_radius: radius,
+                rolling_shutter_readout_s: readout,
             },
             i64::from(downscale),
         )?);
@@ -598,6 +607,7 @@ fn calibration(
         gyro_bias_random_walk: scalar("gyro_bias_random_walk")?,
         accel_bias_random_walk: scalar("accel_bias_random_walk")?,
         applied_time_shift_ns: shift.value(0),
+        gravity_ms2: optional_number(statics, &format!("{IMU}:gravity_ms2"))?,
     })?;
     Ok(Calibration::from_catalog_parts(&parts, &imu)?)
 }
