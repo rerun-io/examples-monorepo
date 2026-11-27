@@ -658,7 +658,7 @@ input, not a corner case."""
 
 CASPAR_BUILD_FALLBACK_REASON: Final[str] = (
     "this pycolmap is built without CASPAR_ENABLED, so the GPU backend cannot solve "
-    "(the `colsfm` environment, recipes/colmap-src, has the build that can)"
+    "(the `colsfm` environment, ai-demos colmap-caspar, has the build that can)"
 )
 """Why a `caspar` request ends up on Ceres when the build has no CASPAR.
 

@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Cut the three rig-refinement patches from a colmap checkout, re-hash SHA256SUMS, and verify on a fresh checkout of
-# the pin that every patch listed in recipe.yaml applies in order and every hash matches.
+# the pin that every patch applies in order and every hash matches.
 #
 # usage: cut_patches.sh <checkout> <rcs-ref> <diag-ref> [<head-ref>]
 #   <checkout>  colmap clone whose history is the pin, one commit per earlier patch, then the rig commits
-#   <rcs-ref>   commit with the five earlier patches applied (recipe: caspar-reduced-camera-system)
+#   <rcs-ref>   commit with the five earlier patches applied (the last: caspar-reduced-camera-system)
 #   <diag-ref>  commit that adds caspar-diag-exit-no-convergence on top of <rcs-ref>
 #   <head-ref>  last rig-refinement commit (default HEAD)
 # The checkout is only read: the verification runs in a temporary shared clone. The new patches and SHA256SUMS are
-# written to a temporary directory and replace the recipe's files only after the check passes.
+# written to a temporary directory and replace patches/ only after the check passes.
 set -euo pipefail
 
 if [ $# -lt 3 ] || [ $# -gt 4 ]; then
@@ -22,10 +22,18 @@ HEAD_REF=${4:-HEAD}
 
 RECIPE=$(cd "$(dirname "$0")/.." && pwd)
 P=$RECIPE/patches
-PIN=$(sed -n 's/^ *colmap_rev: *\([0-9a-f]\{40\}\).*/\1/p' "$RECIPE/recipe.yaml")
-[ -n "$PIN" ] || { echo "no colmap_rev in $RECIPE/recipe.yaml" >&2; exit 1; }
-mapfile -t PATCHES < <(sed -n 's/^ *- patches\/\(.*\.patch\) *$/\1/p' "$RECIPE/recipe.yaml")
-[ ${#PATCHES[@]} -gt 0 ] || { echo "no patches listed in $RECIPE/recipe.yaml" >&2; exit 1; }
+# The pin and the apply order; ai-demos recipes/colmap-caspar applies the patches in this order.
+PIN=137f21680c79d3f2fffbb1d11deb367162aa6f83
+PATCHES=(
+  add-caspar-adapters.patch
+  add-caspar-adapters-generated-f32.patch
+  add-database-transaction-rollback.patch
+  caspar-pcg-beta-recurrence.patch
+  caspar-reduced-camera-system.patch
+  caspar-diag-exit-no-convergence.patch
+  caspar-rig-refine.patch
+  caspar-rig-refine-generated-f32.patch
+)
 
 GEN=src/thirdparty/Symforce-Caspar/generated/f32
 HAND=(

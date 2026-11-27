@@ -53,7 +53,7 @@ cached per machine by trtkit.
 
 | Part | From |
 |---|---|
-| pycolmap with CASPAR + `OPENCV_FISHEYE` and fixed-calibration `FULL_OPENCV` Caspar adapters | `recipes/colmap-src` (COLMAP 4.2.0, CUDA 13, sm_120 / sm_121) |
+| pycolmap with CASPAR + `OPENCV_FISHEYE` and fixed-calibration `FULL_OPENCV` Caspar adapters | ai-demos `colmap-caspar`: COLMAP main 137f216 with the patches in `recipes/colmap-src`, CUDA 13, sm_86/89/120 (linux-64) and sm_121 (linux-aarch64) |
 | RaCo-ALIKED / LightGlue+ torch modules (export only) | `recipes/lightglue-onnx-src` (fabio-sim/LightGlue-ONNX @ d12b4ba) |
 | TensorRT engine builds | `packages/trtkit` |
 | Catalog rig, calibration and video readers, Umeyama | `packages/simplecv` |

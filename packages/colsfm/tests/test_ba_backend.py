@@ -310,4 +310,4 @@ def test_a_fallback_plan_records_what_was_asked_for_and_why_it_was_refused() -> 
 
 def test_the_build_fallback_reason_names_the_environment_that_fixes_it() -> None:
     """A run that lands on Ceres for want of a build must say how to get one."""
-    assert "recipes/colmap-src" in CASPAR_BUILD_FALLBACK_REASON
+    assert "colmap-caspar" in CASPAR_BUILD_FALLBACK_REASON

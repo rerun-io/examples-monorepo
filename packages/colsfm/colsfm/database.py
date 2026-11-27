@@ -98,8 +98,8 @@ def database_transaction(database: pycolmap.Database) -> Iterator[None]:
     matches without its verified geometries). Inside this block the batch lands whole or not at all.
 
     `pycolmap.DatabaseTransaction` begins in `__enter__`, so it has to be entered; constructing one opens nothing. Its
-    `__exit__` rolls back on an exception through the hook the colmap-src recipe adds
-    (`patches/add-database-transaction-rollback.patch`); upstream at the pin commits either way. Rolling back costs
+    `__exit__` rolls back on an exception through the hook our COLMAP patch adds
+    (`recipes/colmap-src/patches/add-database-transaction-rollback.patch`); upstream at the pin commits either way. Rolling back costs
     nothing on disk, where a delete-based repair would make COLMAP `VACUUM` the whole file when it closes.
 
     Args:
