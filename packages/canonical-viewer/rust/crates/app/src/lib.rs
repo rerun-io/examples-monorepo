@@ -8,7 +8,10 @@
 use canonical_viewer_extension::{Extension, wgpu};
 
 /// Every extension in the canonical viewer. Adding one = its crate in Cargo.toml + one line here.
-pub const EXTENSIONS: &[Extension] = &[gsplat_viewer::setup::EXTENSION];
+pub const EXTENSIONS: &[Extension] = &[
+    gsplat_viewer::setup::EXTENSION,
+    depth_video_viewer::EXTENSION,
+];
 
 /// Point the patched `re_viewer`'s hooks at [`EXTENSIONS`]; call once, before the viewer starts.
 pub fn install_hooks() {

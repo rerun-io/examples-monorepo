@@ -1290,6 +1290,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "canonical-viewer-extension"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "re_viewer",
+]
+
+[[package]]
 name = "cargo-platform"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2633,6 +2641,7 @@ name = "depth-video-viewer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "canonical-viewer-extension",
  "clap",
  "glam",
  "re_build_info",

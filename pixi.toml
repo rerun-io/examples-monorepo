@@ -2152,6 +2152,8 @@ xorg-libxrandr = "*"
 
 [feature.depth-video-viewer.pypi-dependencies]
 depth-video-viewer = { path = "packages/depth-video-viewer", editable = true }
+# The golden tests spawn and capture rerun-canonical with its pixel helpers (canonical_viewer.pixels).
+canonical-viewer = { path = "packages/canonical-viewer", editable = true }
 
 [feature.depth-video-viewer.activation.env]
 PACKAGE_DIR = "packages/depth-video-viewer"
@@ -2176,6 +2178,12 @@ description = "Run the viewer; extra arguments (an .rrd path, --headless, --port
 cmd = "cargo-fmt -- --check && cargo-clippy clippy --locked --all-targets -- -D warnings && cargo test --locked"
 cwd = "packages/depth-video-viewer"
 description = "Check Rust formatting, run Clippy and the Rust unit tests"
+
+# The pixel goldens run the canonical viewer with this package's extension: build it from the current sources.
+[feature.depth-video-viewer.tasks.tests-golden]
+cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m golden \"$@\" || test $? -eq 5' _"
+depends-on = [{ task = "canonical-viewer-build", environment = "canonical-viewer" }]
+description = "Compare rerun-canonical's DepthVideoStream pixels with the PNG layer of the same codes"
 
 [feature.depth-video-viewer.tasks.gate]
 depends-on = ["lint", "typecheck", "deadcode", "tests", "tests-integration", "depth-video-viewer-rust-check"]

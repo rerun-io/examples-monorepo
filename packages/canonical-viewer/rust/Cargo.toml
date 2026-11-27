@@ -13,6 +13,7 @@ publish = false
 [workspace.dependencies]
 canonical-viewer-extension = { path = "crates/extension" }
 # Extension crates, beside their domain packages. Without default features: their own apps stay out of this build.
+depth-video-viewer = { path = "../../depth-video-viewer", default-features = false }
 gsplat-viewer = { path = "../../gsplat-rust-renderer/crates/gsplat-viewer", default-features = false }
 anyhow = "1.0"
 # Rerun 0.44.0 is not on crates.io: its release tag, redirected below to the patched checkout.

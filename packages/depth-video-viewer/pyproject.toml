@@ -4,7 +4,10 @@ version = "0.1.0"
 description = "Log depth as AV1 10-bit video (DepthVideoStream) for the depth-video-viewer custom Rerun viewer"
 authors = [{name = "Pablo Vela", email = "pablovela5620@gmail.com"}]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = ["canonical-viewer"]
+
+[tool.uv.sources]
+canonical-viewer = { path = "../canonical-viewer", editable = true }
 
 [build-system]
 requires = ["hatchling"]
