@@ -15,6 +15,8 @@ pub mod setup;
 mod sog;
 mod sog_lod;
 mod visualizer;
+#[cfg(target_arch = "wasm32")]
+pub mod web;
 
 pub use cache::{compute_gpu_bytes, compute_lod_selections};
 pub use renderer::{LodSelectionReport, compute_encoded_frames, fallback_drawn_frames};

@@ -3,7 +3,7 @@
 # never reach the extension crates' home workspaces.
 [workspace]
 resolver = "3"
-members = ["crates/app", "crates/extension"]
+members = ["crates/app", "crates/extension", "crates/web"]
 
 [workspace.package]
 version = "0.1.0"
@@ -182,6 +182,9 @@ self_named_module_files = "allow" # Disabled waiting on https://github.com/rust-
 significant_drop_tightening = "allow" # An update of parking_lot made this trigger in a lot of places. TODO(emilk): fix those places
 
 [patch.crates-io]
+# The web backend maps Features::SUBGROUP to WebGPU "subgroups" (patches/wgpu-30.0.0-webgpu-subgroups.patch; native
+# backends are unchanged). tools/prepare_rerun.py prepares the tree from the verified crates.io archive.
+wgpu = { path = "../target/patch/wgpu-30.0.0" }
 ecolor = { git = "https://github.com/emilk/egui.git", rev = "90431d979ab1faae2de6d9f736e9d33ca0d31956" }
 eframe = { git = "https://github.com/emilk/egui.git", rev = "90431d979ab1faae2de6d9f736e9d33ca0d31956" }
 egui = { git = "https://github.com/emilk/egui.git", rev = "90431d979ab1faae2de6d9f736e9d33ca0d31956" }

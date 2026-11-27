@@ -3985,6 +3985,7 @@ dependencies = [
  "re_video",
  "re_viewer",
  "tokio",
+ "web-sys",
  "web-time",
  "wgpu",
 ]
@@ -3998,7 +3999,6 @@ dependencies = [
  "re_log",
  "re_viewer",
  "wasm-bindgen",
- "web-sys",
  "wgpu",
 ]
 

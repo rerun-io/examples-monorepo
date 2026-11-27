@@ -14,20 +14,8 @@ pub fn install_gsplat_hooks() {
             if let re_viewer::external::eframe::egui_wgpu::WgpuSetup::CreateNew(setup) =
                 &mut options.wgpu_setup
             {
-                let force_no_subgroups = query_flag("force_no_subgroups");
-                if query_flag("profile") {
-                    let user_agent = web_sys::window()
-                        .and_then(|window| window.navigator().user_agent().ok())
-                        .unwrap_or_default();
-                    if gsplat_viewer::profile::timestamps_allowed(&user_agent) {
-                        gsplat_viewer::profile::ENABLED
-                            .store(true, std::sync::atomic::Ordering::Relaxed);
-                    } else {
-                        re_log::info!(
-                            "gsplat profile: GPU timestamps off on Apple GPUs (they fail the browser's Metal command buffer); load and decode lines only"
-                        );
-                    }
-                }
+                let force_no_subgroups = gsplat_viewer::web::query_flag("force_no_subgroups");
+                gsplat_viewer::web::enable_profile_from_page();
                 let compute =
                     gsplat_viewer::setup::compute_device_descriptor(!force_no_subgroups);
                 setup.device_descriptor = std::sync::Arc::new(move |adapter| {
@@ -61,18 +49,4 @@ pub fn install_gsplat_hooks() {
             },
         )
         .ok();
-}
-
-/// `<name>=1` in the page's query string: `force_no_subgroups` behaves as if the adapter lacked "subgroups";
-/// `profile` logs GPU timestamps of the splat frame and motion pass every few seconds.
-fn query_flag(name: &str) -> bool {
-    let wanted = format!("{name}=1");
-    web_sys::window()
-        .and_then(|window| window.location().search().ok())
-        .is_some_and(|search| {
-            search
-                .trim_start_matches('?')
-                .split('&')
-                .any(|pair| pair == wanted)
-        })
 }

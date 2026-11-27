@@ -1,8 +1,9 @@
-"""Prepare the patched checkout of the Rerun release tag that the canonical viewer's Cargo workspace builds against.
+"""Prepare the patched source trees that the canonical viewer's Cargo workspace builds against.
 
 The workspace's ``[patch."https://github.com/rerun-io/rerun"]`` points at ``target/patch/rerun-<tag>/``: the tag's
-source with every patch in ``RERUN_PATCHES`` applied, in order. The tree is rebuilt only when the commit or a patch
-changes (a fingerprint file records both).
+source with every patch in ``RERUN_PATCHES`` applied, in order. Its ``[patch.crates-io]`` points at
+``target/patch/<crate>-<version>/`` for each crate in ``PATCHED_CRATES``: the verified crates.io archive with its patch.
+A tree is rebuilt only when its source or a patch changes (a fingerprint file records both).
 """
 
 from __future__ import annotations
@@ -13,8 +14,10 @@ import os
 import subprocess
 import tarfile
 import tempfile
+import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 from canonical_viewer import PACKAGE_DIR
@@ -26,6 +29,24 @@ RERUN_COMMIT: str = "f346ba2728b9f55afdfd5afdb2b976fecb98dcdd"
 RERUN_PATCHES: tuple[str, ...] = ("patches/re_viewer-0.44.0-extension-hooks.patch",)
 """Patches relative to the package directory, applied in order with ``git apply -p1`` at the checkout's root."""
 FINGERPRINT_FILE: str = ".prepared-sha256"
+
+
+@dataclass(frozen=True, slots=True)
+class PatchedCrate:
+    """A pinned crates.io archive and the patch applied to it."""
+
+    name: str
+    version: str
+    sha256: str
+    """Archive digest, as in Cargo.lock."""
+    patch: str
+    """Patch path relative to the package directory, applied at the crate's root."""
+
+
+PATCHED_CRATES: tuple[PatchedCrate, ...] = (
+    # Maps Features::SUBGROUP to WebGPU "subgroups" (the web backend only), so the splat kernels can use subgroups in browsers.
+    PatchedCrate("wgpu", "30.0.0", "6d8f4bd44d92da5270f03409dba9f952dab24f128e05d6a554926101d1bf9114", "patches/wgpu-30.0.0-webgpu-subgroups.patch"),
+)
 
 
 def prepare_tree(destination: Path, archive: Callable[[], bytes], *, source_id: str, patches: list[Path]) -> bool:
@@ -92,18 +113,32 @@ def rerun_archive(cargo_home: Path) -> bytes:
         ).stdout
 
 
+def crate_archive(crate: PatchedCrate, cargo_home: Path) -> bytes:
+    """The crate's .crate archive (entries under ``<name>-<version>/``), from Cargo's cache or crates.io, digest checked."""
+    stem: str = f"{crate.name}-{crate.version}"
+    cached: Path | None = next((cargo_home / "registry/cache").glob(f"*/{stem}.crate"), None)
+    if cached is not None:
+        archive: bytes = cached.read_bytes()
+    else:
+        with urllib.request.urlopen(f"https://static.crates.io/crates/{crate.name}/{stem}.crate", timeout=60) as response:
+            archive = response.read()
+    if hashlib.sha256(archive).hexdigest() != crate.sha256:
+        raise ValueError(f"{stem}: archive SHA256 mismatch")
+    return archive
+
+
 @dataclass
 class PrepareRerunConfig:
-    """Prepare target/patch/rerun-<tag>/ for the canonical viewer's Cargo workspace."""
+    """Prepare target/patch/rerun-<tag>/ and the patched crates for the canonical viewer's Cargo workspace."""
 
     cargo_home: Path = Path(os.environ.get("CARGO_HOME", str(Path.home() / ".cargo")))
     """Cargo home whose git clones may already hold the tag's commit."""
     target_dir: Path = PACKAGE_DIR / "target"
-    """Directory that holds patch/rerun-<tag>/ (the path the workspace's [patch] section names)."""
+    """Directory that holds patch/ (the paths the workspace's [patch] sections name)."""
 
 
 def main(config: PrepareRerunConfig) -> None:
-    """Prepare the patched Rerun checkout, unless an identical one is already there."""
+    """Prepare the patched Rerun checkout and each patched crate, unless an identical tree is already there."""
     destination: Path = config.target_dir / "patch" / f"rerun-{RERUN_TAG}"
     built: bool = prepare_tree(
         destination,
@@ -112,3 +147,12 @@ def main(config: PrepareRerunConfig) -> None:
         patches=[PACKAGE_DIR / patch for patch in RERUN_PATCHES],
     )
     print(f"{destination}: {'prepared' if built else 'unchanged'}")
+    for crate in PATCHED_CRATES:
+        destination = config.target_dir / "patch" / f"{crate.name}-{crate.version}"
+        built = prepare_tree(
+            destination,
+            partial(crate_archive, crate, config.cargo_home),
+            source_id=crate.sha256,
+            patches=[PACKAGE_DIR / crate.patch],
+        )
+        print(f"{destination}: {'prepared' if built else 'unchanged'}")
