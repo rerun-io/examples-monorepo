@@ -1,0 +1,113 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 1685aea..3ba12f1 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -10737,9 +10737,8 @@ dependencies = [
+ 
+ [[package]]
+ name = "re_rav1d"
+-version = "0.1.3"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "e5eb64c43c68024d96d99d52ef0525030d17bdcc6a6b4ddba048ec8f713c91fc"
++version = "0.1.4"
++source = "git+https://github.com/pablo-rerun/re_rav1d.git?rev=dd03865f74aee68b90269ef3b4e33fbb494ffca3#dd03865f74aee68b90269ef3b4e33fbb494ffca3"
+ dependencies = [
+  "assert_matches",
+  "atomig",
+diff --git a/Cargo.toml b/Cargo.toml
+index ac21e5b..8ce686f 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -215,7 +215,7 @@ re_mp4 = "0.5.1"
+ # If this package fails to build, install `nasm` locally, or build through `pixi`.
+ # NOTE: we use `dav1d` as an alias for our own re_rav1d crate
+ # See https://github.com/rerun-io/re_rav1d/pull/2
+-dav1d = { package = "re_rav1d", version = "0.1.3", default-features = false }
++dav1d = { package = "re_rav1d", version = "0.1.4", git = "https://github.com/pablo-rerun/re_rav1d.git", rev = "dd03865f74aee68b90269ef3b4e33fbb494ffca3", default-features = false }
+ # dav1d = { version = "0.10.3" } # Requires separate install of `dav1d` library. Fast in debug builds. Useful for development.
+ 
+ # core egui-crates:
+diff --git a/crates/utils/re_video/Cargo.toml b/crates/utils/re_video/Cargo.toml
+index e15c97e..bc6d3f5 100644
+--- a/crates/utils/re_video/Cargo.toml
++++ b/crates/utils/re_video/Cargo.toml
+@@ -72,20 +72,15 @@ image = { workspace = true, default-features = false, features = ["png"] }
+ bytemuck.workspace = true
+ tiff.workspace = true
+ 
+-# We enable re_rav1d on native, UNLESS we're on Linux Arm64
+-# See https://github.com/rerun-io/rerun/issues/7755
+-[target.'cfg(all(not(target_arch = "wasm32"), not(all(target_os = "linux", target_arch = "aarch64"))))'.dependencies]
+-
+-
+ # If this package fails to build, install `nasm` locally, or build through `pixi`.
+ # NOTE: we use `dav1d` as an alias for our own re_rav1d crate
+ # See https://github.com/rerun-io/re_rav1d/pull/2
++[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ dav1d = { workspace = true, optional = true, default-features = false, features = [
+   # We opt-out of wasm features so we don't need `nasm` installed. It's still pretty fast.
+   "bitdepth_8",
+ ] }
+ 
+-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ image = { workspace = true, default-features = false, features = ["jpeg"] }
+ 
+ # web
+diff --git a/crates/utils/re_video/build.rs b/crates/utils/re_video/build.rs
+index c357f88..0853148 100644
+--- a/crates/utils/re_video/build.rs
++++ b/crates/utils/re_video/build.rs
+@@ -1,8 +1,7 @@
+ fn main() {
+     cfg_aliases::cfg_aliases! {
+         native: { not(target_arch = "wasm32") },
+-        linux_arm64: { all(target_os = "linux", target_arch = "aarch64") },
+-        with_dav1d: { all(feature = "av1", native, not(linux_arm64)) }, // https://github.com/rerun-io/rerun/issues/7755
++        with_dav1d: { all(feature = "av1", native) },
+         with_ffmpeg: { all(feature= "ffmpeg", native) }
+     }
+ }
+diff --git a/crates/utils/re_video/src/decode/mod.rs b/crates/utils/re_video/src/decode/mod.rs
+index 5bbdad6..8a03988 100644
+--- a/crates/utils/re_video/src/decode/mod.rs
++++ b/crates/utils/re_video/src/decode/mod.rs
+@@ -134,11 +134,6 @@ pub enum DecodeError {
+     #[error("To enabled native AV1 decoding, compile Rerun with the `nasm` feature enabled.")]
+     Dav1dWithoutNasm,
+ 
+-    #[error(
+-        "Rerun does not yet support native AV1 decoding on Linux ARM64. See https://github.com/rerun-io/rerun/issues/7755"
+-    )]
+-    NoDav1dOnLinuxArm64,
+-
+     #[error("Image decode error: {0}")]
+     ImageDecoder(#[size_bytes(ignore)] String),
+ 
+@@ -170,7 +165,6 @@ impl DecodeError {
+             Self::WaitingForCodecDetails
+             | Self::UnsupportedCodec(_)
+             | Self::Dav1dWithoutNasm
+-            | Self::NoDav1dOnLinuxArm64
+             | Self::RvlDecoder(_) => false,
+ 
+             // Issue with AV1 decoding.
+@@ -208,7 +202,6 @@ impl DecodeError {
+ 
+             Self::UnsupportedCodec(_)
+             | Self::Dav1dWithoutNasm
+-            | Self::NoDav1dOnLinuxArm64
+             | Self::BadBitsPerComponent(_)
+             | Self::RvlDecoder(_) => VideoPlaybackIssueSeverity::Error,
+         }
+@@ -318,11 +311,6 @@ pub fn new_decoder(
+             match &video.codec {
+                 #[cfg(feature = "av1")]
+                 crate::VideoCodec::AV1 => {
+-                    #[cfg(linux_arm64)]
+-                    {
+-                        return Err(DecodeError::NoDav1dOnLinuxArm64);
+-                    }
+-
+                     #[cfg(with_dav1d)]
+                     {
+                         re_log::trace!("Decoding AV1…");

@@ -2110,6 +2110,9 @@ description = "Run Python and Rust author checks"
 platforms = ["linux-64", "linux-aarch64"]
 
 [feature.canonical-viewer.dependencies]
+# gsplat-core (the gsplat extension) builds against the pinned Brush source; the activation below links it at
+# packages/gsplat-rust-renderer/target/brush-src, as the gsplat envs do, so this env builds rerun-canonical on its own.
+brush-src = { path = "recipes/brush-src" }
 python = "3.12.*"
 # Pinned Rerun crates share this Rust toolchain (Rerun 0.44 requires rustc 1.98).
 rust = "1.98.*"
@@ -2137,6 +2140,9 @@ xorg-libxrandr = "*"
 
 [feature.canonical-viewer.pypi-dependencies]
 canonical-viewer = { path = "packages/canonical-viewer", editable = true }
+
+[feature.canonical-viewer.activation]
+scripts = ["packages/gsplat-rust-renderer/activate.sh"]
 
 [feature.canonical-viewer.activation.env]
 PACKAGE_DIR = "packages/canonical-viewer"
