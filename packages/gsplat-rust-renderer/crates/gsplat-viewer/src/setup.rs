@@ -18,6 +18,11 @@ pub const EXTENSION: Extension = Extension {
             wanted,
         );
     }),
+    // Default framing on splat and hexel bounds (crate::bounds), which Rerun's spatial views cannot see.
+    replaces_fallbacks: &[
+        ("3D", "EyeControls3D:position"),
+        ("3D", "EyeControls3D:look_target"),
+    ],
     register: register_compute_splats,
 };
 
@@ -69,6 +74,7 @@ pub fn compute_device_descriptor(
             re_renderer::device_caps::DeviceCaps::from_adapter_without_validation(adapter)
                 .device_descriptor();
         descriptor.label = Some("Gaussian compute viewer");
+        descriptor.memory_hints = wgpu::MemoryHints::MemoryUsage;
         apply_compute_needs(
             &adapter.features(),
             &adapter.limits(),
@@ -96,7 +102,6 @@ fn apply_compute_needs(
         descriptor.required_limits =
             gsplat_core::compute_limits(offered_limits, descriptor.required_limits.clone());
     }
-    descriptor.memory_hints = wgpu::MemoryHints::MemoryUsage;
 }
 
 pub(crate) fn register_splat_system(
@@ -110,4 +115,25 @@ pub(crate) fn register_splat_system(
     registrator.register_context_system::<crate::selection::AutomaticComputeSelection>()?;
     registrator.register_visualizer::<visualizer::GaussianSplatVisualizer>()?;
     registrator.register_visualizer::<crate::hexels::HexelVisualizer>()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use re_sdk_types::blueprint::{archetypes::EyeControls3D, views::Spatial3DView};
+
+    #[test]
+    fn replaced_fallbacks_name_what_bounds_registers() {
+        let view = Spatial3DView::identifier();
+        let expected = [
+            EyeControls3D::descriptor_position().component,
+            EyeControls3D::descriptor_look_target().component,
+        ]
+        .map(|component| (view.as_str().to_owned(), component.as_str().to_owned()));
+        let declared = EXTENSION
+            .replaces_fallbacks
+            .iter()
+            .map(|(view, component)| ((*view).to_owned(), (*component).to_owned()));
+        assert!(declared.eq(expected));
+    }
 }

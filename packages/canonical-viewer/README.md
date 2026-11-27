@@ -37,6 +37,10 @@ pixi run -e canonical-viewer --frozen rerun-canonical -- recording.rrd       # a
 device descriptor) and the end of `App::with_commands` (every new `App`). `canonical_viewer::install_hooks` points them
 at `EXTENSIONS`, and `rerun-canonical` then runs the stock `rerun::run`.
 
+A third hook, in `re_viewer_context`, keeps Rerun from warning (a toast on every start) when an extension replaces a
+stock fallback that it declares in `replaces_fallbacks`. Each declared (view, component) pair has one owner across all
+extensions (unit test); any other replacement still warns.
+
 Each extension's device needs apply in list order to Rerun's device descriptor. A change is kept only when it keeps
 everything already requested and stays within the adapter's offer (`with_device_needs`). An extension that fails to
 register logs an error, and the other extensions still load.
@@ -48,7 +52,8 @@ re_renderer's embedded shader lookup breaks.
 
 ## Tests
 
-- Rust unit tests (`canonical-viewer-rust-check`): the device-needs merge and unique extension names.
+- Rust unit tests (`canonical-viewer-rust-check`): the device-needs merge (features and limits only), unique extension
+  names, one owner per replaced fallback.
 - `tests/test_prepare_rerun.py`: patches apply in order; the checkout is reused until the commit or a patch changes.
 - `tests/test_rerun_canonical.py` (integration): `--version` is the SDK's release; `mcp`, `rrd` and `--help` exist.
 - `tests/test_stock_parity.py` (golden): a 2D + 3D recording with no extension data renders pixel-identical in

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import os
 import socket
 import subprocess
 import sys
@@ -10,6 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+from unittest.mock import patch
 
 import numpy as np
 import rerun as rr
@@ -135,9 +137,13 @@ STOCK_VIEWER: str = str(Path(sys.executable).parent / "rerun")
 def spawn_viewer(binary: str) -> ViewerClient:
     """Start an owned headless viewer on a free port; the client is a context manager.
 
-    Every viewer must report the SDK's Rerun version, or its pixels prove nothing about this release.
+    Every viewer must report the SDK's Rerun version, or its pixels prove nothing about this release. As in
+    canonical_viewer/pixels.py, `re_viewer::headless=warn` keeps the startup toast "Headless viewer running at ..."
+    off the view, so a capture does not depend on timing.
     """
-    viewer = ViewerClient.spawn(headless=True, port=free_port(), executable_path=binary, hide_welcome_screen=True)
+    log_filter: str = f"{os.environ.get('RUST_LOG', 'info')},re_viewer::headless=warn"
+    with patch.dict(os.environ, {"RUST_LOG": log_filter}):
+        viewer = ViewerClient.spawn(headless=True, port=free_port(), executable_path=binary, hide_welcome_screen=True)
     version: str | None = viewer.get_state().viewer_version
     if version != rr.__version__:
         viewer.close()

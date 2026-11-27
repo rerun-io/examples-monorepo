@@ -1,8 +1,9 @@
 //! The canonical Rerun viewer: stock Rerun plus every extension in [`EXTENSIONS`].
 //!
 //! The patched `re_viewer` (`patches/re_viewer-0.44.0-extension-hooks.patch`) calls two hooks that every viewer goes
-//! through, native, headless and web: one adjusts the device request, one runs on each new `App`. [`install_hooks`]
-//! points them at [`EXTENSIONS`].
+//! through, native, headless and web: one adjusts the device request, one runs on each new `App`. A third one, in
+//! `re_viewer_context`, lets the fallbacks an extension declares in `replaces_fallbacks` be replaced without a warning.
+//! [`install_hooks`] points them at [`EXTENSIONS`].
 
 use canonical_viewer_extension::{Extension, wgpu};
 
@@ -17,24 +18,14 @@ pub fn install_hooks() {
     let setup_set = re_viewer::extension_hooks::SETUP_APP
         .set(register_extensions)
         .is_ok();
-    if !(device_set && setup_set) {
+    let fallbacks_set =
+        re_viewer::external::re_viewer_context::extension_hooks::INTENDED_FALLBACK_REPLACEMENT
+            .set(|view, component| declares_fallback(EXTENSIONS, view.as_str(), component.as_str()))
+            .is_ok();
+    if !(device_set && setup_set && fallbacks_set) {
         re_log::error!(
             "canonical viewer: the re_viewer extension hooks were already set; extensions may be missing"
         );
-    }
-}
-
-/// The log filter with Rerun's fallback-registration warnings held back, unless `filter` names their target already.
-///
-/// An extension may replace a stock fallback on purpose (gsplat frames the default 3D eye on splat and hexel bounds,
-/// which Rerun's spatial views cannot see). Rerun warns on every replacement, and in the viewer each warning becomes a
-/// toast on every start. The README's extension table names the one owner of each replaced fallback.
-pub fn quiet_fallback_warnings(filter: &str) -> String {
-    const TARGET: &str = "re_viewer_context::component_fallbacks";
-    if filter.contains(&format!("{TARGET}=")) {
-        filter.to_owned()
-    } else {
-        format!("{filter},{TARGET}=error")
     }
 }
 
@@ -48,6 +39,13 @@ fn request_device_needs(
         &adapter.limits(),
         rerun_descriptor,
     )
+}
+
+/// Whether an extension in `extensions` declares that it replaces the stock fallback for `component` in `view`.
+fn declares_fallback(extensions: &[Extension], view: &str, component: &str) -> bool {
+    extensions
+        .iter()
+        .any(|extension| extension.replaces_fallbacks.contains(&(view, component)))
 }
 
 fn register_extensions(app: &mut re_viewer::App) {
@@ -64,8 +62,9 @@ fn register_extensions(app: &mut re_viewer::App) {
 
 /// Apply each extension's device needs, in order, to Rerun's device descriptor.
 ///
-/// An extension's change is kept only when it keeps everything already requested and stays within the adapter's
-/// offer; otherwise it is logged and dropped, so one extension can never break the device for the others.
+/// Only an extension's features and limits are taken, and only when they keep everything already requested and stay
+/// within the adapter's offer; otherwise they are logged and dropped, so one extension can never break the device or
+/// set device-wide policy (memory hints, label) for the others.
 pub fn with_device_needs(
     extensions: &[Extension],
     offered_features: &wgpu::Features,
@@ -87,7 +86,8 @@ pub fn with_device_needs(
         let within_offer = offered_features.contains(wanted.required_features)
             && wanted.required_limits.check_limits(offered_limits);
         if keeps_requested && within_offer {
-            descriptor = wanted;
+            descriptor.required_features = wanted.required_features;
+            descriptor.required_limits = wanted.required_limits;
         } else {
             re_log::error!(
                 "canonical viewer: extension {} asked for device features or limits that {}; ignoring its device needs",
@@ -114,6 +114,7 @@ mod tests {
         Extension {
             name,
             device_needs: Some(device_needs),
+            replaces_fallbacks: &[],
             register: |_| Ok(()),
         }
     }
@@ -133,13 +134,53 @@ mod tests {
     }
 
     #[test]
-    fn fallback_warnings_are_quiet_unless_the_filter_names_them() {
+    fn each_replaced_fallback_has_one_owner() {
+        let mut claims: Vec<_> = EXTENSIONS
+            .iter()
+            .flat_map(|extension| extension.replaces_fallbacks.iter())
+            .collect();
+        let claimed = claims.len();
+        claims.sort_unstable();
+        claims.dedup();
         assert_eq!(
-            quiet_fallback_warnings("info"),
-            "info,re_viewer_context::component_fallbacks=error"
+            claims.len(),
+            claimed,
+            "two extensions replace the same stock fallback"
         );
-        let explicit = "info,re_viewer_context::component_fallbacks=warn";
-        assert_eq!(quiet_fallback_warnings(explicit), explicit);
+    }
+
+    #[test]
+    fn only_declared_fallbacks_are_intended() {
+        const OWNER: Extension = Extension {
+            name: "owner",
+            device_needs: None,
+            replaces_fallbacks: &[("3D", "EyeControls3D:position")],
+            register: |_| Ok(()),
+        };
+        assert!(declares_fallback(&[OWNER], "3D", "EyeControls3D:position"));
+        assert!(!declares_fallback(&[OWNER], "2D", "EyeControls3D:position"));
+        assert!(!declares_fallback(
+            &[OWNER],
+            "3D",
+            "EyeControls3D:look_target"
+        ));
+    }
+
+    #[test]
+    fn only_features_and_limits_are_taken() {
+        let (features, limits) = offer();
+        let policy = extension("policy", |offered, _, wanted| {
+            wanted.required_features |= *offered & wgpu::Features::SUBGROUP;
+            wanted.memory_hints = wgpu::MemoryHints::MemoryUsage;
+            wanted.label = Some("policy");
+        });
+        let merged = with_device_needs(&[policy], &features, &limits, rerun_descriptor());
+        assert_eq!(merged.required_features, wgpu::Features::SUBGROUP);
+        assert!(matches!(
+            merged.memory_hints,
+            wgpu::MemoryHints::Performance
+        ));
+        assert_eq!(merged.label, None);
     }
 
     #[test]

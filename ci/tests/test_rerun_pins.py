@@ -97,3 +97,10 @@ def test_rerun_patch_paths_name_the_conda_pin_tag() -> None:
     assert paths, f"no Cargo.toml patches {RERUN_GIT} to a prepared checkout"
     stale: dict[str, str] = {where: path for where, path in paths.items() if checkout not in path}
     assert not stale, f"[patch.{RERUN_GIT!r}] paths must point into a {checkout} checkout: {stale}"
+
+
+def test_canonical_viewer_builds_one_patched_rerun() -> None:
+    # A Rerun crate an extension names but the [patch] list misses comes from the unpatched tag: a second copy of Rerun.
+    lock: Path = REPO_ROOT / "packages/canonical-viewer/rust/Cargo.lock"
+    unpatched: list[str] = [package["name"] for package in tomllib.loads(lock.read_text())["package"] if package.get("source", "").startswith(f"git+{RERUN_GIT}")]
+    assert not unpatched, f"add these to [patch.{RERUN_GIT!r}] in packages/canonical-viewer/rust/Cargo.toml: {unpatched}"

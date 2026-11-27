@@ -54,3 +54,35 @@ diff --git a/crates/top/re_viewer/src/lib.rs b/crates/top/re_viewer/src/lib.rs
              }),
  
              ..egui_wgpu::WgpuSetupCreateNew::without_display_handle()
+diff --git a/crates/viewer_support/re_viewer_context/src/component_fallbacks.rs b/crates/viewer_support/re_viewer_context/src/component_fallbacks.rs
+--- a/crates/viewer_support/re_viewer_context/src/component_fallbacks.rs
++++ b/crates/viewer_support/re_viewer_context/src/component_fallbacks.rs
+@@ -156,6 +156,9 @@ impl FallbackProviderRegistry {
+             .view_component_fallback_providers
+             .insert((view, component), provider)
+             .is_some()
++            && !crate::extension_hooks::INTENDED_FALLBACK_REPLACEMENT
++                .get()
++                .is_some_and(|intended| intended(&view, &component))
+         {
+             re_log::warn!(
+                 "There was already a view component fallback provider registered for {component} in {view}"
+diff --git a/crates/viewer_support/re_viewer_context/src/lib.rs b/crates/viewer_support/re_viewer_context/src/lib.rs
+--- a/crates/viewer_support/re_viewer_context/src/lib.rs
++++ b/crates/viewer_support/re_viewer_context/src/lib.rs
+@@ -23,6 +23,15 @@ mod collapsed_id;
+ mod command;
+ mod command_sender;
+ mod component_fallbacks;
++
++/// Hooks for a viewer that adds extensions to `re_viewer` (see `re_viewer::extension_hooks`).
++pub mod extension_hooks {
++    /// Says whether replacing a view's fallback provider for a component is intended; an intended replacement is
++    /// not warned about.
++    pub static INTENDED_FALLBACK_REPLACEMENT: std::sync::OnceLock<
++        fn(&re_sdk_types::ViewClassIdentifier, &re_types_core::ComponentIdentifier) -> bool,
++    > = std::sync::OnceLock::new();
++}
+ mod component_ui_registry;
+ mod contents;
+ mod drag_and_drop;
