@@ -6,38 +6,53 @@ import torch
 from jaxtyping import Bool, Float, UInt8
 from numpy import ndarray
 from torch import Tensor
-from trtkit import OnnxBackendConfig, TensorRtBackendConfig
+from trtkit import OnnxBackendConfig, OrtDevice, TensorRtBackendConfig
 
-from mvs.depth_engine import DepthEngine, DepthInputs, preprocess_image, s1_intrinsics
+from mvs.depth_engine import DepthEngine, DepthInputs, DepthOutputs, preprocess_image, s1_intrinsics
 from tests.generate_golden import seeded_inputs  # pyrefly: ignore  # test helper is outside the configured source-only search path
 
 MODEL_PATH: Path = Path(__file__).parents[1] / "data" / "models" / "depth_model_dot.onnx"
 GOLDEN_PATH: Path = Path(__file__).parent / "data" / "depth_golden.npz"
 
 
-@pytest.mark.golden
-def test_onnx_depth_engine_matches_cpu_golden() -> None:
-    """CUDA depth max abs/rel: 0.001004/0.000753; confidence close pixels: 99.601%, max abs 4.725057."""
-
+def _golden_and_outputs(device: OrtDevice) -> tuple[dict[str, ndarray], DepthOutputs]:
+    """The stored golden, and ONNX Runtime's outputs on ``device`` for the golden's seeded inputs."""
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("the CUDA case needs a CUDA device")
     if not MODEL_PATH.exists():
         pytest.skip(f"depth model is absent: {MODEL_PATH}")
     if not GOLDEN_PATH.is_file():
         pytest.skip(f"depth golden is absent: {GOLDEN_PATH}")
-    with np.load(GOLDEN_PATH) as golden:
-        seed: int = int(golden["seed"])
-        inputs: dict[str, ndarray] = seeded_inputs(seed)
-        engine: DepthEngine = DepthEngine(MODEL_PATH, OnnxBackendConfig())
-        tensors: dict[str, Tensor] = {
-            name: torch.from_numpy(value).to(device="cuda", dtype=torch.float32) for name, value in inputs.items()
-        }
-        depth_b1hw: Float[Tensor, "1 1 192 256"]
-        lowest_cost_bhw: Float[Tensor, "1 96 128"]
-        depth_b1hw, lowest_cost_bhw = engine(DepthInputs(**tensors))
-        np.testing.assert_allclose(depth_b1hw.cpu().numpy(), golden["depth_pred_s0_b1hw"], rtol=1e-2, atol=1e-3)
-        confidence_close_bhw: Bool[ndarray, "1 96 128"] = np.isclose(
-            lowest_cost_bhw.cpu().numpy(), golden["lowest_cost_bhw"], rtol=1e-2, atol=1e-3
-        )
-        assert float(confidence_close_bhw.mean()) >= 0.995
+    with np.load(GOLDEN_PATH) as archive:
+        golden: dict[str, ndarray] = dict(archive)
+    inputs: dict[str, ndarray] = seeded_inputs(int(golden["seed"]))
+    engine: DepthEngine = DepthEngine(MODEL_PATH, OnnxBackendConfig(device=device))
+    tensors: dict[str, Tensor] = {name: torch.from_numpy(value).to(device=device, dtype=torch.float32) for name, value in inputs.items()}
+    return golden, engine(DepthInputs(**tensors))
+
+
+@pytest.mark.golden
+def test_onnx_depth_engine_matches_cpu_golden() -> None:
+    """CUDA depth max abs/rel: 0.001004/0.000753; confidence close pixels: 99.601%, max abs 4.725057."""
+    golden: dict[str, ndarray]
+    outputs: DepthOutputs
+    golden, outputs = _golden_and_outputs("cuda")
+    np.testing.assert_allclose(outputs.depth_b1hw.cpu().numpy(), golden["depth_pred_s0_b1hw"], rtol=1e-2, atol=1e-3)
+    confidence_close_bhw: Bool[ndarray, "1 96 128"] = np.isclose(
+        outputs.lowest_cost_bhw.cpu().numpy(), golden["lowest_cost_bhw"], rtol=1e-2, atol=1e-3
+    )
+    assert float(confidence_close_bhw.mean()) >= 0.995
+
+
+@pytest.mark.golden
+def test_cpu_depth_engine_reproduces_the_golden_it_was_generated_with() -> None:
+    """`generate_golden.py` writes the golden with ONNX Runtime's CPU provider, so the engine-free path reproduces it with
+    no GPU: measured max abs difference 0.0 on both outputs (2026-11-27)."""
+    golden: dict[str, ndarray]
+    outputs: DepthOutputs
+    golden, outputs = _golden_and_outputs("cpu")
+    np.testing.assert_allclose(outputs.depth_b1hw.numpy(), golden["depth_pred_s0_b1hw"], rtol=0.0, atol=1e-6)
+    np.testing.assert_allclose(outputs.lowest_cost_bhw.numpy(), golden["lowest_cost_bhw"], rtol=0.0, atol=1e-6)
 
 
 @pytest.mark.integration
