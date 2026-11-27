@@ -1,0 +1,7 @@
+# colsfm's own settings for the insta360-cube profile: the six cube faces of an Insta360 clip, starting from the
+# slam_rs prior. On Casa Loma clip 007's loop candidates (stack-e2e-007), true loops agreed with the raw-VIO prior by a
+# median 0.53 m / 1.6 deg, while aliased ceilings matched ~180 deg off: the prior bound keeps the first, drops the second.
+# Only the pose graph's loop gates differ from loop-closure-fixed.
+base = "loop-closure-fixed"
+loop_max_prior_translation_m = 1.5
+loop_max_prior_rotation_deg = 10.0

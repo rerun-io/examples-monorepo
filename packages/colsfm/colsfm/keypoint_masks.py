@@ -10,8 +10,8 @@ stamps as the video (`colsfm.frame_manifest.StreamKeyframes.mask_entity`), nonze
 layer contract, shared with slam-rs (`slam_rs.frame_masks`): the mask is stored at the resolution it was computed at,
 with a static `Transform3D(scale=[W_img / W_mask, H_img / H_mask, 1])` on the same entity (none = scale 1). Each image
 pixel takes the mask pixel that covers its centre, `(2c + 1) * W_mask // (2 * W_img)` per axis, which is how the viewer
-draws the scaled mask. `CatalogMasks` reads each stream's masks once, on first use, keeps them bit-packed (one bit per
-pixel) and hands each one out at its image's resolution.
+draws the scaled mask. `CatalogMasks` reads each stream's masks once, on first use, one time window at a time
+(`read_packed_masks`), keeps them bit-packed (one bit per pixel) and hands each one out at its image's resolution.
 
 Every input also gets a mask from its camera model, without a flag: `valid_angle_mask` drops the pixels whose ray the
 model cannot unproject back to itself (`valid_angle`), and `with_valid_angle_masks` joins it to the catalog's masks.
@@ -23,21 +23,29 @@ from __future__ import annotations
 
 import contextlib
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import Final, Protocol, runtime_checkable
 
 import numpy as np
 import pyarrow as pa
 import pycolmap
+from datafusion import DataFrame
 from jaxtyping import Bool, Float32, Float64, UInt8
 from numpy import ndarray
+from rerun.catalog import CatalogClient, DatasetEntry
+from simplecv.catalog_video_reader import time_window
+from simplecv.rrd_query_utils import first_valid_value
 from simplecv.sensors.camera.fisheye62 import kb_fold_angle
 
 from colsfm.frame_manifest import FrameSourceManifest
 
 KeypointMask = Bool[ndarray, "height width"]
 """True where a keypoint is dropped, at the image's own resolution."""
+
+MASK_READ_WINDOW_NS: Final[int] = 10_000_000_000
+"""The span of one catalog read of a mask stream. The catalog sends whole chunks, so only a time window bounds what one
+read holds unpacked (as slam-rs's mask reader does, `slam_rs.frame_masks.STAMP_WINDOW_NS`); only the bits are kept."""
 
 
 @runtime_checkable
@@ -79,14 +87,15 @@ def keypoints_outside_mask(keypoints_xy: Float32[ndarray, "n 2"], mask: Keypoint
     return ~mask[rows, columns]
 
 
-def pack_mask_table(table: pa.Table, timeline: str, entity: str) -> dict[int, tuple[int, int, UInt8[ndarray, " n"]]]:
+def pack_mask_batches(batches: Iterable[pa.RecordBatch], timeline: str, entity: str) -> dict[int, tuple[int, int, UInt8[ndarray, " n"]]]:
     """Bit-pack every mask of one `SegmentationImage` entity, keyed by its stamp; rows without a mask (null or cleared) are skipped.
 
-    Walks the table's record batches through the list offsets, so no mask byte is copied before `np.packbits`
-    (a `filter` first copies every mask in the segment).
+    Walks each record batch through the list offsets, so no mask byte is copied before `np.packbits` (a `filter` first
+    copies every mask in the segment). A generator of batches holds only the batches it has not yet yielded:
+    `read_packed_masks` feeds one time window at a time.
 
     Args:
-        table: The entity's rows on `timeline`, as the catalog reader returns them.
+        batches: The entity's rows on `timeline`, as the catalog reader returns them.
         timeline: The index column.
         entity: The mask entity path, without the leading slash.
 
@@ -97,7 +106,7 @@ def pack_mask_table(table: pa.Table, timeline: str, entity: str) -> dict[int, tu
         ValueError: When a row holds more than one mask, a mask has no format, or a mask does not hold one byte per pixel.
     """
     packed: dict[int, tuple[int, int, UInt8[ndarray, " n"]]] = {}
-    for batch in table.to_batches():
+    for batch in batches:
         buffers: pa.ListArray = batch.column(f"/{entity}:SegmentationImage:buffer")
         valid: Bool[ndarray, " rows"] = buffers.is_valid().to_numpy(zero_copy_only=False)
         if not valid.any():
@@ -129,6 +138,38 @@ def pack_mask_table(table: pa.Table, timeline: str, entity: str) -> dict[int, tu
     return packed
 
 
+def read_packed_masks(dataset: DatasetEntry, segment: str, entity: str, timeline: str) -> dict[int, tuple[int, int, UInt8[ndarray, " n"]]]:
+    """Bit-pack one mask stream of a segment (:func:`pack_mask_batches`), read :data:`MASK_READ_WINDOW_NS` at a time.
+
+    Args:
+        dataset: The dataset that holds the mask layer.
+        segment: The segment.
+        entity: The mask entity path, without the leading slash.
+        timeline: The index the masks are stamped on.
+
+    Returns:
+        Stamp (ns) -> (mask width, mask height, `np.packbits` of the flat `!= 0` mask).
+
+    Raises:
+        ValueError: When the entity holds no `SegmentationImage`.
+    """
+    selection = dataset.filter_segments(segment)
+    reader: DataFrame = selection.filter_contents([f"/{entity}"]).reader(index=timeline)
+    schema: pa.Schema = reader.schema()
+    if f"/{entity}:SegmentationImage:buffer" not in schema.names:
+        raise ValueError(f"{segment}: no SegmentationImage at /{entity}")
+    ranges: pa.Table = selection.get_index_ranges().to_arrow_table()
+    first_ns: int = int(ranges[f"{timeline}:start"].cast(pa.int64())[0].as_py())
+    last_ns: int = int(ranges[f"{timeline}:end"].cast(pa.int64())[0].as_py())
+    stamp_type: pa.DataType = schema.field(timeline).type
+    batches: Iterator[pa.RecordBatch] = (
+        batch
+        for start_ns in range(first_ns, last_ns + 1, MASK_READ_WINDOW_NS)
+        for batch in reader.filter(time_window(timeline, stamp_type, start_ns, start_ns + MASK_READ_WINDOW_NS - 1)).to_arrow_table().to_batches()
+    )
+    return pack_mask_batches(batches, timeline, entity)
+
+
 class CatalogMasks:
     """The masks a catalog manifest names, read from the catalog one stream at a time and held bit-packed."""
 
@@ -152,23 +193,14 @@ class CatalogMasks:
 
     def _load(self, stream_index: int) -> dict[int, tuple[int, int, UInt8[ndarray, " n"]]]:
         if stream_index not in self.packed:
-            # Imported here: only a masked catalog input needs the client.
-            from rerun.catalog import CatalogClient
-            from simplecv.rrd_query_utils import first_valid_value
-
             entity: str | None = self.manifest.streams[stream_index].mask_entity
             assert entity is not None
             dataset = CatalogClient(self.manifest.catalog_url).get_dataset(name=self.manifest.dataset)
-            layer = dataset.filter_segments(self.manifest.segment).filter_contents([f"/{entity}"])
-            statics: pa.Table = layer.reader(index=None).to_arrow_table()
+            statics: pa.Table = dataset.filter_segments(self.manifest.segment).filter_contents([f"/{entity}"]).reader(index=None).to_arrow_table()
             scale_column: str = f"/{entity}:Transform3D:scale"
             logged: list[float] | None = first_valid_value(statics[scale_column], allow_none=True) if scale_column in statics.column_names else None
             self.scales[stream_index] = (1.0, 1.0) if logged is None else (float(logged[0]), float(logged[1]))
-            table: pa.Table = layer.reader(index=self.manifest.timeline).to_arrow_table()
-            if f"/{entity}:SegmentationImage:buffer" not in table.column_names:
-                raise ValueError(f"{self.manifest.segment}: no SegmentationImage at /{entity}")
-            packed: dict[int, tuple[int, int, UInt8[ndarray, " n"]]] = pack_mask_table(table, self.manifest.timeline, entity)
-            self.packed[stream_index] = packed
+            self.packed[stream_index] = read_packed_masks(dataset, self.manifest.segment, entity, self.manifest.timeline)
             print(f"[colsfm.masks] /{entity}: {len(self.packed[stream_index])} masks")
         return self.packed[stream_index]
 

@@ -52,6 +52,8 @@ COLSFM_PROFILE_FILE: Final[str] = "colsfm.toml"
 class ColsfmProfileConfig:
     """A profile's `colsfm.toml`: the knobs colsfm adds that cuSFM's schema has no field for."""
 
+    base: str | None = None
+    """A sibling profile whose `.pb.txt` files this one reads for every stem it does not hold; None = it holds them all."""
     loop_candidates_per_frame: int = 3
     """`colsfm.loop_closure.LoopClosureConfig.loop_candidates_per_frame`."""
     loop_max_prior_translation_m: float | None = None
@@ -577,7 +579,7 @@ def read_config_directory(
     keyframe_selection: KeyframeSelectionConfig | None = None,
     schema: CusfmSchema | None = None,
 ) -> CusfmConfig:
-    """Parse a whole `pycusfm/configs/<profile>` directory.
+    """Parse a whole `pycusfm/configs/<profile>` directory, falling back to its `colsfm.toml` `base` for missing stems.
 
     Args:
         directory: The profile directory, e.g. `pycusfm/configs/isaac`.
@@ -593,10 +595,14 @@ def read_config_directory(
     """
     resolved_schema: CusfmSchema = load_schema() if schema is None else schema
 
+    profile: ColsfmProfileConfig = read_colsfm_profile(directory)
+
     def read(stem: str) -> Message:
         path: Path = directory / f"{stem}.pb.txt"
+        if not path.is_file() and profile.base is not None:
+            path = directory.parent / profile.base / f"{stem}.pb.txt"
         if not path.is_file():
-            raise FileNotFoundError(f"No {stem}.pb.txt in {directory}")
+            raise FileNotFoundError(f"No {stem}.pb.txt in {directory}" + ("" if profile.base is None else f" or its base {profile.base}"))
         return read_config_message(path, MESSAGE_BY_CONFIG_STEM[stem], resolved_schema)
 
     keypoint_creation_message: Message = read("keypoint_creation_config")
@@ -604,7 +610,6 @@ def read_config_directory(
     matching_message: Message = read("matching_config")
     worker_message: Message = read("matching_task_worker_config")
     pose_graph_message: Message = read("pose_graph_config")
-    profile: ColsfmProfileConfig = read_colsfm_profile(directory)
     mapping_message: Message = read("vision_mapping_config")
 
     return CusfmConfig(

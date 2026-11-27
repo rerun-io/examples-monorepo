@@ -25,7 +25,7 @@ from colsfm.keypoint_masks import (
     drop_masked_keypoints,
     keypoints_outside_mask,
     open_mask_source,
-    pack_mask_table,
+    pack_mask_batches,
     valid_angle,
     valid_angle_mask,
     with_valid_angle_masks,
@@ -133,6 +133,38 @@ def test_storing_a_masked_batch_drops_masked_keypoints_and_keeps_the_other_descr
     np.testing.assert_array_equal(stored[tasks[0].image_id][:, 0], np.asarray([0.0, 2.0], dtype=np.float32))
     assert read_keypoints(database_path, tasks[1].image_id).shape == (4, 2)
     np.testing.assert_array_equal(stored[tasks[1].image_id][:, 0], np.arange(4, dtype=np.float32))
+
+
+@pytest.mark.integration
+def test_a_mask_stream_is_read_window_by_window_and_each_mask_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Small windows, a stamp on every window's first nanosecond: no mask is lost between windows or read twice."""
+    import rerun as rr
+    from rerun.catalog import CatalogClient
+
+    from colsfm import keypoint_masks
+
+    entity: str = "world/rig_00/cam_02/pinhole/people_mask"
+    stamps: list[int] = list(range(1_000, 5_000, 100))
+    rrd: Path = tmp_path / "masks.rrd"
+    recording = rr.RecordingStream("colsfm-test", recording_id="seg")
+    recording.save(rrd)
+    for index, t_ns in enumerate(stamps):
+        mask: np.ndarray = np.zeros((8, 6), dtype=np.uint8)
+        mask.flat[index] = 1
+        recording.set_time("video_time", duration=np.timedelta64(t_ns, "ns"))
+        recording.log(f"/{entity}", rr.SegmentationImage(mask))
+    recording.flush()
+    recording.disconnect()
+    monkeypatch.setattr(keypoint_masks, "MASK_READ_WINDOW_NS", 300)
+
+    with rr.server.Server(host="127.0.0.1", port=0, datasets={"d": [str(rrd)]}) as server:
+        packed = keypoint_masks.read_packed_masks(CatalogClient(server.url()).get_dataset("d"), "seg", entity, "video_time")
+
+    assert sorted(packed) == stamps
+    for index, t_ns in enumerate(stamps):
+        width, height, bits = packed[t_ns]
+        assert (width, height) == (6, 8)
+        assert np.flatnonzero(np.unpackbits(bits, count=48)).tolist() == [index]
 
 
 @pytest.mark.integration
@@ -265,7 +297,7 @@ def test_packing_a_mask_table_skips_rows_without_a_mask_and_reads_every_batch() 
     )
     # Two batches, the second a slice, so offsets that do not start at zero are exercised.
     table = pa.Table.from_batches([whole.slice(0, 2).to_batches()[0], whole.slice(2, 1).to_batches()[0]])
-    packed = pack_mask_table(table, "video_time", entity)
+    packed = pack_mask_batches(table.to_batches(), "video_time", entity)
     assert sorted(packed) == [10, 30]
     for stamp, mask in ((10, masks[0]), (30, masks[2])):
         width, height, bits = packed[stamp]
@@ -289,7 +321,7 @@ def test_an_empty_mask_row_is_absent_and_borrows_nothing() -> None:
     entity: str = "world/cam/people_mask"
     one = [1, 0, 0, 0, 0, 1]
     size = [{"width": 3, "height": 2}]
-    packed = pack_mask_table(_mask_table(entity, [[], [one], []], [[], size, []]), "video_time", entity)
+    packed = pack_mask_batches(_mask_table(entity, [[], [one], []], [[], size, []]).to_batches(), "video_time", entity)
     assert sorted(packed) == [20]
     assert np.array_equal(np.unpackbits(packed[20][2], count=6), np.array(one, dtype=np.uint8))
 
@@ -307,7 +339,7 @@ def test_a_malformed_mask_row_names_its_entity_and_stamp(buffers: list, formats:
     """One mask per present row, with its format, one byte per pixel; anything else stops the load and says where."""
     entity: str = "world/cam/people_mask"
     with pytest.raises(ValueError, match=rf"/world/cam/people_mask at t_ns 10: .*{message}"):
-        pack_mask_table(_mask_table(entity, buffers, formats), "video_time", entity)
+        pack_mask_batches(_mask_table(entity, buffers, formats).to_batches(), "video_time", entity)
 
 
 # The valid-angle guard: no keypoint is stored where the camera model's unprojection folds its ray.
