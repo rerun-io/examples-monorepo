@@ -83,6 +83,21 @@ def test_sog_viewer_pixels(viewer: Path, binaries: Path, tmp_path: Path, subgrou
     assert "Gaussian compute fallback" not in result.stderr
 
 
+@pytest.mark.golden
+def test_sog_lod_viewer_pixels(viewer: Path, binaries: Path, tmp_path: Path) -> None:
+    """SogLodSplats3D on the canonical viewer: LOD off draws level 0 exactly as plain SogSplats3D; LOD on draws."""
+    result: subprocess.CompletedProcess[str] = run_check(binaries, viewer, tmp_path, "sog-lod", Path("/dev/null"))
+    assert "Streamed SOG decode: 380 rows in 2 levels" in result.stderr
+    assert "Gaussian compute fallback" not in result.stderr
+
+
+@pytest.mark.golden
+def test_asog_viewer_pixels(viewer: Path, binaries: Path, tmp_path: Path) -> None:
+    """AnimatedSogSplats3D on the canonical viewer at t = 2.42 s matches gsplat render of the reference evaluation."""
+    result: subprocess.CompletedProcess[str] = run_check(binaries, viewer, tmp_path, "asog", Path("/dev/null"))
+    assert "Gaussian compute fallback" not in result.stderr
+
+
 def run_check(binaries: Path, viewer: Path, out: Path, mode: str, ply: Path, *extra: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     environment: dict[str, str] = {**os.environ, "RUST_LOG": "info,gsplat_viewer::cache=debug", **(env or {})}
     result: subprocess.CompletedProcess[str] = subprocess.run(

@@ -12,9 +12,10 @@ import numpy as np
 import pyarrow as pa
 import pytest
 import rerun as rr
+from jaxtyping import Float64
 from rerun.chunk import RrdReader
 
-from gsplat_rust_renderer.asog_decode import AsogFile, AsogFrame, DecodedAsog, decode, evaluate, parse_asog
+from gsplat_rust_renderer.asog_decode import AsogFile, AsogFrame, DecodedAsog, decode, decode_sh, evaluate, parse_asog
 from gsplat_rust_renderer.sog3d import ANIMATED_ARCHETYPE, log_asog
 
 FIXTURE: Path = Path(__file__).resolve().parents[1] / "crates/gsplat-viewer/tests/fixtures/asog_reference.rrd"
@@ -48,6 +49,11 @@ def test_decode_and_evaluate_match_the_reference() -> None:
     np.testing.assert_allclose(decoded.means.ravel(), canonical["Expected:means"], rtol=1e-6, atol=1e-7)
     np.testing.assert_allclose(decoded.omega.transpose(1, 0, 2).ravel(), canonical["Expected:omega"], rtol=1e-6, atol=1e-7)
     np.testing.assert_allclose(decoded.g.T.ravel(), canonical["Expected:g"], rtol=1e-6, atol=1e-7)
+    # The fixture stores SH for its first rows only.
+    sh_rest: Float64[np.ndarray, "n c 3"] = decode_sh(asog)
+    np.testing.assert_allclose(
+        sh_rest[: len(canonical["Expected:sh_rest"]) // (3 * sh_rest.shape[1])].ravel(), canonical["Expected:sh_rest"], rtol=1e-6, atol=1e-7
+    )
     for k, t in enumerate(canonical["Expected:times"]):
         expected: dict[str, np.ndarray] = columns(FIXTURE, f"/expected/t{k}")
         frame: AsogFrame = evaluate(decoded, asog.manifest, float(t))

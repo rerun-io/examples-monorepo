@@ -218,6 +218,20 @@ class DecodedAsog:
     clip: Int64[ndarray, " n"]
 
 
+def decode_sh(asog: AsogFile) -> Float64[ndarray, "n c 3"]:
+    """AC SH coefficients per row, coefficient-major then RGB (c = 0 without SH), as `gsplat_core::asog` reads them.
+
+    Each row's `shlabels` entry picks a `shpalette` row of 3 x c codebook indices into the shN codebook.
+    """
+    m: AsogManifest = asog.manifest
+    if m.sh_n is None:
+        return np.zeros((m.count, 0, 3))
+    s: dict[str, Int64[ndarray, "_ _"]] = decode_streams(asog)
+    labels: Int64[ndarray, " n"] = s["shlabels"][:, 0]
+    if (labels >= m.sh_n.count).any():
+        raise ValueError(f"shlabels: label {int(labels.max())} beyond the {m.sh_n.count}-entry palette")
+    return np.array(m.sh_n.codebook)[s["shpalette"][labels]].reshape(m.count, m.sh_n.coeffs, 3)
+
 def bezier2(tau: Float64[ndarray, " n"], c: Float64[ndarray, "3 n 3"]) -> Float64[ndarray, "n 3"]:
     t: Float64[ndarray, "n 1"] = tau[:, None]
     u: Float64[ndarray, "n 1"] = 1 - t
@@ -225,7 +239,7 @@ def bezier2(tau: Float64[ndarray, " n"], c: Float64[ndarray, "3 n 3"]) -> Float6
 
 
 def decode(asog: AsogFile) -> DecodedAsog:
-    """Reference `asog.decode.read`, static and motion parts (SH is not needed for a preview and is not decoded)."""
+    """Reference `asog.decode.read`, static and motion parts (the preview needs no SH; `decode_sh` decodes it)."""
     m: AsogManifest = asog.manifest
     s: dict[str, Int64[ndarray, "_ _"]] = decode_streams(asog)
     n: int = m.count
