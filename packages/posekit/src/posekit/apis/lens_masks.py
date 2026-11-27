@@ -21,6 +21,7 @@ scene at infinity, as in a stitched panorama).
 
 import time
 from collections.abc import Iterator
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -34,14 +35,14 @@ from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
 from simplecv.camera_parameters import MeiParameters
 from simplecv.catalog_calibration import CatalogCameraCalibration, read_camera_models
-from simplecv.catalog_layers import atomic_recording, register_layer
+from simplecv.catalog_layers import LocalSegment, atomic_recording, register_layer, serve_local_segment
 from simplecv.catalog_video_decode import PrefetchedChunks
 from simplecv.catalog_video_reader import CatalogVideoReader, StreamIndex, read_video_index
 from simplecv.run_record import RunStart, start_run, write_run_record
 from torch import Tensor
 
 from posekit.apis.people_masks import MaskOptions
-from posekit.apis.people_tracks import PeopleTracker, TrackOptions, pool_cells, with_lookahead
+from posekit.apis.people_tracks import PeopleTracker, TrackOptions
 from posekit.cube_layer import CubeSampling, cube_sampling, sampled_framesets
 from posekit.mask_layer import LENS_MASK_LAYER, MASK_ANNOTATION, MASK_NAME, MASKED_CLASS_ID
 from posekit.models.fullcircle import (
@@ -58,7 +59,8 @@ from posekit.models.fullcircle import (
     view_up,
 )
 from posekit.models.fullcircle_people import FacePeople, FacePeopleConfig, FacePeopleMasks
-from posekit.ops.people_masks import dilate_masks
+from posekit.ops.people_masks import dilate_masks, pool_cells
+from posekit.ops.people_tracks import with_lookahead
 from posekit.ops.sphere import MeiCamera
 
 DETECT_FRAMESETS: int = 8
@@ -212,12 +214,9 @@ def main(config: LensMasksConfig) -> None:
         register_layer(dataset, [output], LENS_MASK_LAYER)
         print(f"registered {output} as layer {LENS_MASK_LAYER} of {config.segment}")
         return
-    with rr.server.Server(datasets={"base": [str(config.rrd)]}) as server:
-        local: DatasetEntry = server.client().get_dataset("base")
-        segments: list[str] = list(local.segment_ids())
-        if len(segments) != 1:
-            raise ValueError(f"{config.rrd} holds {len(segments)} recordings; expected one")
-        write_masks(config, local, segments[0], run)
+    local: LocalSegment
+    with serve_local_segment(config.rrd, {}, dataset="base") as local:
+        write_masks(config, local.dataset, local.segment, run)
 
 
 def write_masks(config: LensMasksConfig, dataset: DatasetEntry, segment_id: str, run: RunStart) -> Path:
@@ -315,8 +314,7 @@ def write_masks(config: LensMasksConfig, dataset: DatasetEntry, segment_id: str,
 
     targets: list[str] = [f"{camera}/pinhole/{MASK_NAME}" for camera in config.cameras]
     people: FacePeople | None = FacePeople(config.people, masker) if config.people.enabled else None
-    tracker: PeopleTracker | None = PeopleTracker(config.track, config.mask, str(device)) if config.people_tracks else None
-    if tracker is not None and any(s.mask_scale != (config.mask_downscale, config.mask_downscale) for s in sources):
+    if config.people_tracks and any(s.mask_scale != (config.mask_downscale, config.mask_downscale) for s in sources):
         raise ValueError(f"mask_downscale {config.mask_downscale} does not divide the lenses {[s.image_hw for s in sources]}")
     if debug is not None:
         debug.log("synthetic/mask", rr.AnnotationContext([(0, "keep", (0, 0, 0, 0)), (MASKED_CLASS_ID, "operator", (255, 0, 0, 160))]), static=True)
@@ -330,7 +328,9 @@ def write_masks(config: LensMasksConfig, dataset: DatasetEntry, segment_id: str,
     )
     track_start: float = time.perf_counter()
     with (
-        atomic_recording(output, application_id=LAYER_APPLICATION_ID, recording_id=segment_id, send_properties=False) as recording,
+        # A layer of a minutes-long clip fits in memory (480 px masks), and per-frameset logging leaves many small chunks.
+        atomic_recording(output, application_id=LAYER_APPLICATION_ID, recording_id=segment_id, send_properties=False, optimize=True) as recording,
+        PeopleTracker(config.track, config.mask, str(device)) if config.people_tracks else nullcontext(None) as tracker,
         torch.cuda.stream(tracker.track_stream if tracker is not None else torch.cuda.current_stream()),
     ):
         for target, source in zip(targets, sources, strict=True):
@@ -338,7 +338,8 @@ def write_masks(config: LensMasksConfig, dataset: DatasetEntry, segment_id: str,
             recording.log(target, rr.Transform3D(scale=[*source.mask_scale, 1.0]), static=True)
         chunk_masks: list[list[Tensor]] = [[] for _ in targets]
         chunk_indices: list[int] = []
-        for (position, index, lens_frames, chunk_end), upcoming in with_lookahead(framesets_iter, config.track.redetect_every):
+        ahead: int = config.track.redetect_every if config.people_tracks and config.track.lookahead else 0
+        for (position, index, lens_frames, chunk_end), upcoming in with_lookahead(framesets_iter, ahead):
             result: OperatorMasks = masker.track(lens_frames, filled[position], levels[position] @ up_level)
             masks: list[Tensor] = result.source_masks
             bystanders: FacePeopleMasks | None = None
@@ -347,7 +348,8 @@ def write_masks(config: LensMasksConfig, dataset: DatasetEntry, segment_id: str,
                 masks = [operator | other for operator, other in zip(masks, bystanders.source_masks, strict=True)]
                 bystander_framesets += bool(bystanders.face_masks.any())
             if tracker is not None:
-                persons: Bool[Tensor, "s h w"] = tracker.step(torch.stack(lens_frames), None if upcoming is None else torch.stack(upcoming[2]))
+                upcoming_frames: UInt8[Tensor, "s h w 3"] | None = torch.stack(upcoming[2]) if upcoming is not None and tracker.wants_upcoming else None
+                persons: Bool[Tensor, "s h w"] = tracker.step(torch.stack(lens_frames), upcoming_frames)
                 cells: Bool[Tensor, "s hm wm"] = pool_cells(dilate_masks(persons, config.mask.dilate_px), config.mask_downscale)
                 masks = [mask | lens_cells for mask, lens_cells in zip(masks, cells, strict=True)]
             for lens_masks, mask in zip(chunk_masks, masks, strict=True):
@@ -380,8 +382,6 @@ def write_masks(config: LensMasksConfig, dataset: DatasetEntry, segment_id: str,
             if (position + 1) % (config.decode_chunk * 25) < config.decode_chunk:
                 print(f"frameset {index}: {position + 1} tracked, {(position + 1) / elapsed:.1f} framesets/s")
         write_run_record(recording, run.finish(LENS_MASK_LAYER, segment_id))
-    if tracker is not None:
-        tracker.close()
     if debug is not None:
         debug.flush()
     track_wall: float = time.perf_counter() - track_start

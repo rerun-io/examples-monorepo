@@ -97,9 +97,10 @@ def test_count_misses_resets_counts_and_drops_after_max() -> None:
 
 def test_each_step_comes_with_the_step_redetect_every_later_and_none_at_the_end() -> None:
     """SAM 3's lookahead starts on the step ``ahead`` later; the last ``ahead`` steps have none, and no step is lost."""
-    from posekit.apis.people_tracks import with_lookahead
+    from posekit.ops.people_tracks import with_lookahead
 
     assert list(with_lookahead(iter(range(5)), 2)) == [(0, 2), (1, 3), (2, 4), (3, None), (4, None)]
+    assert list(with_lookahead(iter(range(3)), 0)) == [(0, None), (1, None), (2, None)], "no lookahead: every step, none held"
     assert list(with_lookahead(iter(range(1)), 2)) == [(0, None)]
     assert list(with_lookahead(iter([]), 2)) == []
 
@@ -107,10 +108,20 @@ def test_each_step_comes_with_the_step_redetect_every_later_and_none_at_the_end(
 def test_a_mask_cell_is_set_when_any_of_its_pixels_is() -> None:
     import torch
 
-    from posekit.apis.people_tracks import pool_cells
+    from posekit.ops.people_masks import pool_cells
 
     masks = torch.zeros((2, 8, 12), dtype=torch.bool)
     masks[0, 5, 11] = True
     cells = pool_cells(masks, 4)
     assert cells.shape == (2, 2, 3)
     assert cells.nonzero().tolist() == [[0, 1, 2]]
+
+
+def test_a_tracker_that_never_redetects_is_refused() -> None:
+    """``redetect_every`` 0 would re-detect on no step; it used to make the lookahead window yield nothing at all."""
+    import pytest
+
+    from posekit.apis.people_tracks import TrackOptions
+
+    with pytest.raises(ValueError, match="redetect_every"):
+        TrackOptions(redetect_every=0)
