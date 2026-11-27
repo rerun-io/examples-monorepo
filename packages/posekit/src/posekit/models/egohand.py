@@ -270,28 +270,10 @@ class SomaMeshLod:
 
 
 @functools.cache
-def soma_lod_tables(soma: Path, detail: MeshDetail) -> dict[HandSide, tuple[Int64[Tensor, "f 3"], Int64[Tensor, "v"] | torch.nn.Module]]:
-    """Per side, SOMA level of detail ``detail`` on the CPU: its triangles, and its vertices of the mid mesh as a subset
-    (``low``: vertex indices) or as SOMA's transfer (``xlo``: a module); SOMA gives each level exactly one of the two.
-
-    Built from the SOMA directory on first use (~1-2 s for both sides) and kept, so a process that forks GPU workers builds it once for all of them.
-    """
-    from soma.hand import SOMAHandLayer
-
-    tables: dict[HandSide, tuple[Int64[Tensor, "f 3"], Int64[Tensor, "v"] | torch.nn.Module]] = {}
-    for side in ("left", "right"):
-        layer = SOMAHandLayer(
-            data_root=str(soma), hand_type=side, device="cpu", identity_model_type="soma", mode="torch", lod=detail, load_correctives_model=False
-        )
-        mid_to_lod = layer.identity_lod_mid_ids if layer.identity_lod_transfer is None else layer.identity_lod_transfer
-        assert mid_to_lod is not None  # SOMA sets one of the two for every level below mid
-        tables[side] = (layer.faces.to(torch.int64), mid_to_lod)
-    return tables
-
-
-@functools.cache
 def soma_mesh_lod(soma: Path, detail: MeshDetail) -> dict[HandSide, SomaMeshLod]:
     """Both sides at SOMA level of detail ``detail`` (``low`` or ``xlo``), on CUDA, moved there from ``soma_lod_tables`` on first use."""
+    from posekit.models.egohand_soma import soma_lod_tables
+
     meshes: dict[HandSide, SomaMeshLod] = {}
     for side, (faces, mid_to_lod) in soma_lod_tables(soma, detail).items():
         from_mid: Callable[[Float32[Tensor, "n 2859 3"]], Float32[Tensor, "n v 3"]] = (

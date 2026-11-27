@@ -3,10 +3,6 @@
 import cv2
 import numpy as np
 import pytest
-
-pytest.importorskip("trtkit", reason="posekit.models.wilor needs the posekit-hands Pixi environment (posekit-wilor feature)")
-pytest.importorskip("skimage", reason="the reference blur needs scikit-image (posekit-wilor feature); posekit-dev has trtkit but not skimage")
-
 from jaxtyping import UInt8
 from numpy import ndarray
 from skimage.filters import gaussian

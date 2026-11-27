@@ -1030,6 +1030,9 @@ dinov3-src = { path = "recipes/dinov3-src" }
 sapiens2-src = { path = "recipes/sapiens2-src" }
 python = "3.12.*"
 tyro = ">=0.9.1,<0.10"
+# posekit.models.wilor blurs hand crops with it (reference_hand_patch); its other imports (trtkit, cv2,
+# torch) are in every posekit env, so the WiLoR window test runs and typechecks in each of them.
+scikit-image = "*"
 
 [feature.posekit.pypi-dependencies]
 posekit = { path = "packages/posekit", editable = true }
@@ -1054,9 +1057,6 @@ warp-lang = "==1.11.1"
 # WiLoR (YOLO hand detector + ViT/RefineNet/MANO) dependencies, outside the base posekit lane.
 [feature.posekit-wilor]
 platforms = ["linux-64", "linux-aarch64"]
-
-[feature.posekit-wilor.dependencies]
-scikit-image = "*"
 
 [feature.posekit-wilor.pypi-dependencies]
 roma = "*"
@@ -1237,7 +1237,7 @@ PACKAGE_DIR = "packages/posekit"
 PYREFLY_TARGET = "src/posekit tests tools"
 # Each posekit env typechecks only the modules whose imports it installs, so the check never leans on
 # another env's site-packages. Three lanes: SAM 3D Body (sam_3d_body, open3d, warp: posekit-sam3d-body +
-# posekit-body), WiLoR (roma, skimage, timm, ultralytics: posekit-wilor) and EgoHand on SOMA (soma, warp:
+# posekit-body), WiLoR (roma, timm, ultralytics: posekit-wilor) and EgoHand on SOMA (soma, warp:
 # soma-runtime + posekit-egohand). The base lane excludes all three; posekit-body and posekit-hands come
 # before posekit in their envs (the first feature's value wins) and exclude only what they lack.
 # `--project-excludes=<glob>`: with a space the task shell would expand the glob into files to check.
