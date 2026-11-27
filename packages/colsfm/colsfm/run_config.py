@@ -233,7 +233,7 @@ class PipelineOptions:
     raco_batch_pixels: int | None = None
     """On `raco` only: pixels (batch x height x width) one shape-dynamic RaCo execution may hold, which sets each size
     group's batch ceiling and so its execution context's memory (about 1.2 GB per million pixels on the 5090). None keeps
-    `colsfm.features_raco.DYNAMIC_BATCH_PIXEL_BUDGET` (2 x 1216 x 1920). Lower it on a shared GPU: 1920000 runs 800x800
+    `colsfm.features_raco.BATCH_PIXEL_BUDGET` (2 x 1216 x 1920). Lower it on a shared GPU: 1920000 runs 800x800
     cube faces three at a time in a 2.3 GB context instead of seven in 5.3 GB."""
     features_backend: FeatureBackend = "raco"
     """Which ALIKED runs: RaCo-ALIKED on its own TensorRT engine (`colsfm.features_raco`) or COLMAP's

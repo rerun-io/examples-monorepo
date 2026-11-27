@@ -139,7 +139,7 @@ class FeatureOptions:
     §9 measured. `pycolmap` ignores it: it is already native."""
     raco_batch_pixels: int | None = None
     """On `raco` only: the shape-dynamic engines' pixel budget per execution (`PipelineOptions.raco_batch_pixels`);
-    None keeps `colsfm.features_raco.DYNAMIC_BATCH_PIXEL_BUDGET`."""
+    None keeps `colsfm.features_raco.BATCH_PIXEL_BUDGET`."""
     raco_engine: RacoEngineChoice = "auto"
     """On `raco` with `native_resolution` only: which engine runs each size.
 
