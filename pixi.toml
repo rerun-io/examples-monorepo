@@ -394,6 +394,9 @@ jupyterlab = ">=4.2.0,<4.3"
 tyro = ">=0.9.1,<0.10"
 open3d = ">=0.19.0,<0.20"
 imageio = ">=2.37.0,<3"
+# monopriors.gpu_image reproduces cv2.remap's OpenCV 5 rule (exact float coordinates); OpenCV 4 snaps
+# float maps to 1/32 px and rounds half up.
+py-opencv = ">=5"
 imageio-ffmpeg = ">=0.6.0,<0.7"
 natsort = ">=8.4.0,<9"
 pyyaml = ">=6.0"
