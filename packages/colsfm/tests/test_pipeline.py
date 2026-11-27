@@ -24,7 +24,7 @@ import pycolmap
 import pytest
 from serde.json import from_json, to_json
 
-from colsfm.ba_backend import CASPAR_BUILD_FALLBACK_REASON, EXTRINSICS_FALLBACK_REASON
+from colsfm.ba_backend import CASPAR_BUILD_FALLBACK_REASON, EXTRINSICS_FALLBACK_REASON, CasparCapability, detect_caspar_capability
 from colsfm.benchmark import read_run, rig_rigidity_spread_millimeters
 from colsfm.config import CusfmConfig, read_config_directory
 from colsfm.export import KEYFRAME_METADATA_SUBPATH, RUNTIME_CSV_NAME, RuntimeRecord, read_runtime_records
@@ -501,14 +501,15 @@ def test_the_default_maps_on_caspar_and_refines_the_extrinsics_afterwards(
     assert resolved.ba_plan.ceres_polish is False, "CASPAR alone by default; --caspar-ceres-polish turns it on"
 
 
-def test_the_unregularised_refinement_is_the_one_that_takes_caspar_off_the_gpu(
+def test_the_unregularised_refinement_stays_on_caspar_only_where_the_rig_probe_says(
     galileo_input_dir: Path, tmp_path: Path
 ) -> None:
-    """`--no-regularised-extrinsics` is the path CASPAR cannot honour, and it says so.
+    """`--no-regularised-extrinsics` needs CASPAR's rig factor, and the plan says whether this build has it.
 
     That path is `run_mapping(..., optimize_extrinsics=True)`, i.e. pycolmap's own rig
-    bundle adjustment, which CASPAR throws on. The regularised default never asks the
-    GPU solver for that, so the fallback belongs to the ablation alone.
+    bundle adjustment, which stock CASPAR throws on and recipes/colmap-src's rig factor
+    solves. The regularised default never asks the GPU solver for that, so the
+    fallback belongs to the ablation alone.
     """
     plan: ResolvedRun = resolve_run(
         replace(
@@ -520,13 +521,16 @@ def test_the_unregularised_refinement_is_the_one_that_takes_caspar_off_the_gpu(
             regularised_extrinsics=False,
         )
     )
-    assert plan.ba_plan.backend == "ceres"
-    assert plan.ba_plan.fallback_reason == EXTRINSICS_FALLBACK_REASON
+    capability: CasparCapability = detect_caspar_capability()
+    if capability.availability != "available":
+        pytest.skip(f"CASPAR is {capability.availability} in this pycolmap, so the plan falls back for the build, not the rig")
+    expected: tuple[str, str | None] = ("caspar", None) if capability.refines_sensor_from_rig else ("ceres", EXTRINSICS_FALLBACK_REASON)
+    assert (plan.ba_plan.backend, plan.ba_plan.fallback_reason) == expected
     assert plan.ba_plan.ceres_polish is False
 
 
 def test_refining_the_camera_model_frees_focals_and_the_rig_in_the_mapper(galileo_input_dir: Path, tmp_path: Path) -> None:
-    """`--refine-camera-model` frees fx, fy and `sensor_from_rig` in every mapping round, on Ceres, and drops stage 7b.
+    """`--refine-camera-model` frees fx, fy and `sensor_from_rig` in every mapping round, on CASPAR where the rig probe says, and drops stage 7b.
 
     Measured on Mission office with Spirula's own matches: colsfm's mapper with the nominal cube model held ends 0.2645
     deg from Spirula's poses; with these freedoms 0.034 deg, the per-face focals within 0.5 px of Spirula's.
@@ -536,8 +540,11 @@ def test_refining_the_camera_model_frees_focals_and_the_rig_in_the_mapper(galile
     )
     assert plan.mapping.refine_focal_length is True
     assert plan.mapping.optimize_extrinsics is True
-    assert plan.ba_plan.backend == "ceres"
-    assert plan.ba_plan.fallback_reason == EXTRINSICS_FALLBACK_REASON
+    capability: CasparCapability = detect_caspar_capability()
+    if capability.availability != "available":
+        pytest.skip(f"CASPAR is {capability.availability} in this pycolmap, so the plan falls back for the build, not the rig")
+    expected: tuple[str, str | None] = ("caspar", None) if capability.refines_sensor_from_rig else ("ceres", EXTRINSICS_FALLBACK_REASON)
+    assert (plan.ba_plan.backend, plan.ba_plan.fallback_reason) == expected
     assert stage_names(optimize_extrinsics=plan_runs_extrinsic_stage(replace(PYCOLMAP_ABLATION, refine_camera_model=True))) == STAGE_NAMES
 
 
