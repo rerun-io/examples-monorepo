@@ -43,6 +43,9 @@ class Config:
     detail: LayerDetail = "full"
     """``full``: the layer also holds what the run saw frameset by frameset (keypoints, window, landmarks, map, counters),
     from the same single run; ``poses``: both runs' paths alone."""
+    mask_entity: str | None = None
+    """Each fed camera's mask entity under its ``pinhole`` (e.g. ``people_mask``), read from a layer of the segment:
+    keypoints on nonzero mask pixels are dropped (``slam_rs.frame_masks``). None tracks every pixel."""
 
 
 def main(config: Config) -> None:
@@ -64,7 +67,7 @@ def main(config: Config) -> None:
     print(f"Loading {config.segment}: video index, then chunked reads, decode={decode_device}", flush=True)
     started: float = perf_counter()
     feed: SegmentFeed
-    with open_segment(segment, profile=rig_profile, decode_device=decode_device, include_ground_truth=False) as feed:
+    with open_segment(segment, profile=rig_profile, decode_device=decode_device, include_ground_truth=False, mask_entity=config.mask_entity) as feed:
         load_s: float = perf_counter() - started
         config_text: str = settings.robocap_config_text(config.profile) if is_robocap else settings.vio_config_text(dataset_name, config.profile)
         calibration: _core.Calibration = _core.Calibration.from_catalog(feed.cameras, feed.imu)

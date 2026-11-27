@@ -2,7 +2,8 @@
 
 The run and its layer are the catalog layer's (:func:`slam_rs.catalog_layer.track_layer`): one driver, one writer of
 every entity. What this tool adds is where the layer goes (``RerunTyroConfig``: a viewer, a file, both), the knobs of an
-experiment, the trajectory CSVs and the ATE against the ground truth.
+experiment and the ATE against the ground truth. The trajectories are in the layer (``/world/runs/slam_rs``,
+``/world/runs/slam_rs_vio``); nothing is written beside it.
 """
 
 import dataclasses
@@ -28,10 +29,9 @@ from slam_rs.catalog_feed import (
 )
 from slam_rs.catalog_layer import LayerDetail, LayerRun, track_layer
 from slam_rs.config import SlamConfig, load_slam_config, overlay_config_text
-from slam_rs.gba_log import keyframe_trajectory
 from slam_rs.reference import SMOKE_SEGMENTS, Benchmarks, ReferenceSegment, load_benchmarks, resolved_flow_config
 from slam_rs.tracking import SegmentRun
-from slam_rs.trajectory import Trajectory, ate, coverage, shift_clock, write_trajectory
+from slam_rs.trajectory import Trajectory, ate, coverage
 from slam_rs.vio_log import BootstrapLog, VioStage, vio_blueprint
 
 SMOKE_SEGMENT: str = SMOKE_SEGMENTS[1]
@@ -65,8 +65,6 @@ class Config:
     """Replay every n-th frameset. Every frame is still decoded: decimated AV1 decode is unreliable."""
     window_s: float = DEFAULT_WINDOW_S
     """Longest time window fetched from the catalog in one round trip."""
-    output_csv: Path | None = None
-    """Where the final trajectory is written; defaults to ``data/<segment>/slam_rs.csv``. The raw VIO goes beside it as ``<stem>_vio.csv``."""
     profile: Literal["reference", "fast"] = "fast"
     """Config overlay applied before tracking."""
     backend: BackendRequest = "auto"
@@ -97,8 +95,7 @@ class Config:
     """
     gba: bool = True
     """With the map on: run the global BA on the map after loops and PGO (``Vio.finish_map``) and re-anchor the final
-    trajectory on its keyframes; draw them under ``/world/runs/slam_rs/gba`` and write them to ``<output-csv
-    stem>_gba_keyframes.csv``. ``--no-gba`` re-anchors on the map as loops and PGO left it. The raw VIO is unchanged."""
+    trajectory on its keyframes, drawn under ``/world/runs/slam_rs/gba``. ``--no-gba`` re-anchors on the map as loops and PGO left it. The raw VIO is unchanged."""
     ba_backend: GbaRequest = "follow"
     """Where the global BA's PCG runs: ``follow`` takes the frontend's lane (the GPU when the back-end probe passes);
     ``cpu`` or ``gpu`` choose it outright, for benches and A/B runs."""
@@ -151,7 +148,6 @@ def main(config: Config) -> None:
             raise ValueError("--gt-rrd and --mask-rrd require --rrd")
         origin = config.catalog or settings.catalog_url
         source = CatalogSegment(origin, dataset_name, config.segment)
-    output_csv: Path = config.output_csv if config.output_csv is not None else Path("data") / config.segment / "slam_rs.csv"
     print(
         f"replaying {config.segment} ({f'{listed.tier} tier' if listed is not None else 'not in the reference set: ground truth only'}) from {origin}"
     )
@@ -194,8 +190,6 @@ def main(config: Config) -> None:
             profile=config.profile, animate_base_rig=config.animate_base_rig, strict=False,
             max_framesets=config.max_framesets,
         )
-        export_offset_ns: int = feed.export_offset_ns
-        video_time_offset_ns: int = feed.video_time_offset_ns
         first_t_ns: int = int(feed.frame_t_ns[0])
 
     run: SegmentRun = layer.run
@@ -218,22 +212,14 @@ def main(config: Config) -> None:
         raise SystemExit(f"{run.uncovered()} framesets never got the inertial samples that cover them")
 
     estimate: Trajectory = run.estimate
-    # The raw VIO first, beside the final run with ``_vio`` added to the stem (the names the scorer's
-    # ``--est slam_rs=... --est slam_rs_vio=...`` reads), both on the dataset's clock: nothing after it can lose a
-    # tracked run.
-    vio_csv: Path = output_csv.with_stem(f"{output_csv.stem}_vio")
-    write_trajectory(vio_csv, estimate, video_time_offset_ns=video_time_offset_ns)
     # The final run: the GBA on the map after loops and PGO, then the raw VIO re-anchored on its keyframes (the raw
     # VIO itself with the back end off). A failed GBA falls back to the map after loops and PGO.
     final: Trajectory = estimate if run.final is None else run.final
     if run.gba_failure is not None:
         print(f"global BA: failed: {run.gba_failure}")
-    write_trajectory(output_csv, final, video_time_offset_ns=video_time_offset_ns)
-    print(f"{len(estimate)} tracked poses -> {output_csv} (final), {vio_csv} (raw VIO) (absolute ns)")
+    print(f"{len(estimate)} tracked poses")
     if run.map_result is not None and run.map_result.gba is not None:
-        gba_csv: Path = output_csv.with_name(f"{output_csv.stem}_gba_keyframes.csv")
-        write_trajectory(gba_csv, shift_clock(keyframe_trajectory(run.map_result, after_gba=True), export_offset_ns), video_time_offset_ns=video_time_offset_ns)
-        print(f"global BA: {run.map_result.gba!r}; keyframes -> {gba_csv} (absolute ns)")
+        print(f"global BA: {run.map_result.gba!r}")
     if len(estimate) == 0:
         print("no ATE: the estimator reported no tracked pose")
         return

@@ -135,7 +135,8 @@ def test_the_shipped_tool_moves_the_base_rig_only_without_ground_truth(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, run: SegmentRun, segment_id: str, ground_truth_uri: str | None, writes_base_rig: bool,
 ) -> None:
     """``slam-rs-catalog-layer`` decides the clash from the catalog: an MSD segment with a ``gt`` layer keeps
-    ``/world/rig_00`` for the ground truth; a RoboCap session (no ``gt``) still has its rig animated by the final run."""
+    ``/world/rig_00`` for the ground truth; a RoboCap session (no ``gt``) still has its rig animated by the final run.
+    The masks are read from the segment's layers, by the entity name the tool is given."""
     dataset: MagicMock = MagicMock(spec=DatasetEntry)
     resolved: CatalogSegment = CatalogSegment("rerun+http://catalog", segment_id.split("__")[0], segment_id, dataset, ground_truth_uri)
     feed: SimpleNamespace = SimpleNamespace(
@@ -143,7 +144,13 @@ def test_the_shipped_tool_moves_the_base_rig_only_without_ground_truth(
     )
     monkeypatch.setattr(catalog_layer_api, "resolve_catalog_segments", lambda _sources: (resolved,))
     monkeypatch.setattr(catalog_layer_api, "select_decode_device", lambda _request: "cpu")
-    monkeypatch.setattr(catalog_layer_api, "open_segment", lambda *_args, **_kwargs: nullcontext(feed))
+    opened: dict[str, object] = {}
+
+    def open_segment(*_args: object, **kwargs: object) -> nullcontext[SimpleNamespace]:
+        opened.update(kwargs)
+        return nullcontext(feed)
+
+    monkeypatch.setattr(catalog_layer_api, "open_segment", open_segment)
     monkeypatch.setattr(catalog_layer_api, "_core", SimpleNamespace(Calibration=_FakeCalibration, VioConfig=_FakeVioConfig, Vio=_FakeVio))
 
     def tracked(rec: object, _feed: object, _vio: object, *, animate_base_rig: bool, **_kwargs: object) -> catalog_layer.LayerRun:
@@ -153,7 +160,10 @@ def test_the_shipped_tool_moves_the_base_rig_only_without_ground_truth(
 
     monkeypatch.setattr(catalog_layer_api, "track_layer", tracked)
 
-    catalog_layer_api.main(catalog_layer_api.Config(segment=segment_id, output_dir=tmp_path, catalog="rerun+http://catalog", detail="poses"))
+    catalog_layer_api.main(
+        catalog_layer_api.Config(segment=segment_id, output_dir=tmp_path, catalog="rerun+http://catalog", detail="poses", mask_entity="people_mask")
+    )
+    assert opened["mask_entity"] == "people_mask"
 
     output: Path = tmp_path / f"{segment_id}.rrd"
     entities: set[str] = {chunk.entity_path for chunk in rrc.RrdReader(output).stream().collect().stream()}
