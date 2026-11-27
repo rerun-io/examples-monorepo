@@ -23,8 +23,6 @@ MIN_ASSOCIATED_POSES: int = 10
 """Fewest associations the gate accepts before it calls the comparison meaningless."""
 CSV_HEADER: str = "#timestamp [ns], p_x, p_y, p_z, q_w, q_x, q_y, q_z"
 """CSV header emitted by :func:`write_trajectory`."""
-VIDEO_TIME_OFFSET_PREFIX: str = "#video_time_offset_ns="
-"""Second header line of a catalog export: ``t_ns`` minus this value is the segment's ``video_time``."""
 
 
 @dataclass(slots=True, frozen=True)
@@ -188,33 +186,20 @@ def read_trajectory(path: Path) -> Trajectory:
     return Trajectory(t_ns=t_ns, position_m=values[:, 0:3], quaternion_wxyz=values[:, 3:7])
 
 
-def write_trajectory(path: Path, trajectory: Trajectory, *, video_time_offset_ns: int | None = None) -> None:
+def write_trajectory(path: Path, trajectory: Trajectory) -> None:
     """Write a trajectory in the trajectory CSV format, timestamps as exact integers.
 
     Args:
         path: Destination CSV; parent directories are created.
         trajectory: Poses to write, w-first.
-        video_time_offset_ns: For a catalog segment's export, what ``t_ns`` minus gives the segment's ``video_time``
-            (``SegmentFeed.video_time_offset_ns``), written as a second header line; None writes none.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    lines: list[str] = [CSV_HEADER] + ([] if video_time_offset_ns is None else [f"{VIDEO_TIME_OFFSET_PREFIX}{video_time_offset_ns}"])
+    lines: list[str] = [CSV_HEADER]
     # ``tolist()`` gives Python floats, whose repr round-trips exactly; formatting a
     # numpy scalar with ``!r`` would write "np.float64(0.0)" under numpy 2.
     for t_ns, pose in zip(trajectory.t_ns.tolist(), np.hstack([trajectory.position_m, trajectory.quaternion_wxyz]).tolist(), strict=True):
         lines.append(f"{t_ns}," + ",".join(repr(value) for value in pose))
     path.write_text("\n".join(lines) + "\n")
-
-
-def read_video_time_offset(path: Path) -> int | None:
-    """The ``video_time`` offset a trajectory CSV states in its header, or None when it states none."""
-    with path.open() as lines:
-        for line in lines:
-            if not line.startswith("#"):
-                return None
-            if line.startswith(VIDEO_TIME_OFFSET_PREFIX):
-                return int(line[len(VIDEO_TIME_OFFSET_PREFIX) :])
-    return None
 
 
 def shift_clock(trajectory: Trajectory, offset_ns: int) -> Trajectory:

@@ -21,6 +21,7 @@ from slam_rs import BackendRequest, _core
 from slam_rs.catalog_calibration import ImuCalib
 from slam_rs.catalog_feed import DEFAULT_WINDOW_S, ROBOCAP_RIG, CameraCalib, CatalogSegment, Frameset, SegmentFeed, dataset_rig, open_segment
 from slam_rs.config import SlamConfig, config_text_sha256
+from slam_rs.gba_log import gba_keyframes
 from slam_rs.reference import ReferenceSegment, RobocapSession, resolved_flow_config
 from slam_rs.trajectory import PoseLog, Trajectory, shift_clock
 
@@ -233,6 +234,8 @@ class SegmentRun:
     """The final trajectory (:func:`final_trajectory`: the global BA, then re-anchoring), at the estimate's timestamps; None with the back end off, where it is the estimate."""
     map_result: _core.MapResult | None = None
     """What :meth:`slam_rs._core.Vio.finish_map` returned (the GBA's keyframes, on the estimator's clock); None with the back end off."""
+    gba_keyframes: Trajectory | None = None
+    """The map keyframes after the global BA (:func:`slam_rs.gba_log.gba_keyframes`), on the exported device clock; None when the GBA did not run."""
 
 
     def uncovered(self) -> int:
@@ -368,11 +371,13 @@ def drive(
     wall_s: float = time.monotonic() - started
     estimate: Trajectory = poses.trajectory()
     finished: FinalRun = final_trajectory(lockstep.vio, estimate, run_gba=run_gba)
+    keyframes: Trajectory | None = None if finished.map_result is None else gba_keyframes(finished.map_result)
     # Both an uncovered input and a consumed pre-initialization input lack a pose.
     return SegmentRun(
         estimate=shift_clock(estimate, feed.export_offset_ns),
         final=None if finished.map_result is None else shift_clock(finished.final, feed.export_offset_ns),
         map_result=finished.map_result,
+        gba_keyframes=None if keyframes is None else shift_clock(keyframes, feed.export_offset_ns),
         gba_failure=finished.gba_failure,
         framesets=lockstep.framesets,
         lost=lockstep.framesets - len(estimate),

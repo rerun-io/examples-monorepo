@@ -13,11 +13,14 @@ from numpy import ndarray
 from slam_rs import _core
 from slam_rs.columns import ColumnLog
 from slam_rs.map_loops import RUN_ENTITY
+from slam_rs.trajectory import Trajectory
 
 GBA_KEYFRAMES_ENTITY: str = f"{RUN_ENTITY}/gba/keyframes"
 """The map keyframes after the global BA, one point each."""
 GBA_PATH_ENTITY: str = f"{RUN_ENTITY}/gba/path"
 """The same keyframes as one line, in time order."""
+GBA_RIG_ENTITY: str = f"{RUN_ENTITY}/gba/rig"
+"""The rig at each GBA-corrected keyframe, a Transform3D on ``video_time`` (:func:`slam_rs.catalog_layer.log_layer`)."""
 GBA_STATS_ENTITY: str = "/stats/gba"
 """The global BA's per-attempt scalars and its summary."""
 GBA_TIMELINE: str = "gba_attempt"
@@ -28,6 +31,20 @@ GBA_KEYFRAME_RADIUS_M: float = 0.012
 """Radius of a GBA-corrected keyframe, metres."""
 GBA_PATH_RADIUS_M: float = 0.004
 """Stroke of the GBA keyframes' path, metres."""
+
+
+def gba_keyframes(result: _core.MapResult) -> Trajectory | None:
+    """The map keyframes after the global BA, on the estimator's clock; None when the GBA did not run.
+
+    Args:
+        result: What :meth:`slam_rs._core.Vio.finish_map` returned.
+
+    Returns:
+        One pose per map keyframe, oldest first, or None.
+    """
+    if result.gba is None:
+        return None
+    return Trajectory.from_xyzw(result.keyframe_t_ns, result.keyframe_poses)
 
 
 def log_map_result(result: _core.MapResult, columns: ColumnLog, t_ns: int) -> None:

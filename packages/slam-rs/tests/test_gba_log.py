@@ -13,7 +13,8 @@ from numpy import ndarray
 from slam_rs import _core
 from slam_rs.catalog_feed import TIMELINE
 from slam_rs.columns import ColumnLog
-from slam_rs.gba_log import GBA_KEYFRAMES_ENTITY, GBA_PATH_ENTITY, GBA_STATS_ENTITY, GBA_TIMELINE, log_map_result
+from slam_rs.gba_log import GBA_KEYFRAMES_ENTITY, GBA_PATH_ENTITY, GBA_STATS_ENTITY, GBA_TIMELINE, gba_keyframes, log_map_result
+from slam_rs.trajectory import Trajectory
 from slam_rs.vio_log import RUN_ENTITY
 
 
@@ -66,3 +67,13 @@ def test_nothing_is_drawn_without_the_gba(rig: RigFactory, texture: TextureFacto
         recording.log("/marker", rr.Points3D([[0.0, 0.0, 0.0]]))
     rows: Rows = read_rows(output)
     assert GBA_KEYFRAMES_ENTITY not in rows and GBA_PATH_ENTITY not in rows
+
+
+def test_the_gba_keyframes_are_a_timed_trajectory_only_after_the_gba(rig: RigFactory, texture: TextureFactory) -> None:
+    """The keyframe poses the replay's ``_gba_keyframes.csv`` held: after the GBA, on the estimator's clock; none without it."""
+    result: _core.MapResult = _finished(rig, texture, run_gba=True)
+    keyframes: Trajectory | None = gba_keyframes(result)
+    assert keyframes is not None and len(keyframes) == result.keyframe_t_ns.shape[0] > 0
+    np.testing.assert_array_equal(keyframes.t_ns, result.keyframe_t_ns)
+    np.testing.assert_array_equal(keyframes.xyzw(), result.keyframe_poses)
+    assert gba_keyframes(_finished(rig, texture, run_gba=False)) is None

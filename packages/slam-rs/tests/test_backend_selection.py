@@ -87,7 +87,7 @@ def test_the_robocap_probe_routes_its_decoder_through_the_shared_policy(monkeypa
     monkeypatch.setattr(robocap_probe, "select_decode_device", select)
     monkeypatch.setattr(robocap_probe, "open_segment", open_segment)
     with pytest.raises(Opened):
-        robocap_probe.main(robocap_probe.Config(rr_config=RerunTyroConfig(save=tmp_path / "probe.rrd"), output_csv=tmp_path / "probe.csv"))
+        robocap_probe.main(robocap_probe.Config(rr_config=RerunTyroConfig(save=tmp_path / "probe.rrd")))
     assert requests == ["auto"]
     assert opened["decode_device"] == "cuda"
 
@@ -119,8 +119,3 @@ except ValueError as error:
     assert "['cpu', 'cpu', 'cpu'] cpu" in result.stdout
     assert "gpu refused: frontend: wgpu found no" in result.stdout
     assert result.stderr.count("tracking on the CPU because the GPU frontend cannot run here") == 1, result.stderr
-
-
-def test_the_robocap_probe_names_its_raw_vio_output_as_the_layer_does() -> None:
-    """The probe writes the raw causal VIO (it is compared with a raw-VIO regression reference), so its file is ``slam_rs_vio.csv``; the Rust ``slam-rs-cli`` writes the final run as ``slam_rs.csv``."""
-    assert robocap_probe.OUTPUT_NAME == "slam_rs_vio.csv"
