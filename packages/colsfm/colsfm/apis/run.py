@@ -15,12 +15,11 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, TypeAlias
 
 import tyro
-from simplecv.run_record import capture_run_record
+from simplecv.run_record import RunStart, start_run
 
 from colsfm import DATA_DIR
 from colsfm.catalog import CatalogInputConfig, PreparedInput, prepare_catalog_input, serve_catalog_input
@@ -63,11 +62,11 @@ class CatalogCommand:
 
     def execute(self) -> None:
         """Prepare the input, run the pipeline and write the layer (a local input is served for the whole run)."""
-        started: datetime = datetime.now(UTC)
+        run: RunStart = start_run(self)
         with serve_catalog_input(self.source) as source:
-            self._run(source, started)
+            self._run(source, run)
 
-    def _run(self, source: CatalogInputConfig, started: datetime) -> None:
+    def _run(self, source: CatalogInputConfig, run: RunStart) -> None:
         prepared: PreparedInput = prepare_catalog_input(source, view_rig=self.view_rig)
         output_dir: Path = (
             DATA_DIR / "runs" / prepared.input_dir.name if self.options.output_dir == UNSET_DIR else self.options.output_dir
@@ -83,7 +82,7 @@ class CatalogCommand:
             timeline=source.timeline,
             frames=read_manifest(prepared.input_dir / FRAME_SOURCE_FILE),
             view=prepared.view,
-            record=capture_run_record(DEFAULT_SOURCE, source.segment, config=self, started=started),
+            record=dataclasses.replace(run, config=repr(dataclasses.replace(self, source=source, options=options))).finish(DEFAULT_SOURCE, source.segment),
         )
         print(
             f"[colsfm] layer {layer.path}: {layer.num_rig_poses} rig poses, {layer.num_points} points, "

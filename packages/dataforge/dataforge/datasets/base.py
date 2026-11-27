@@ -17,7 +17,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import ClassVar, Generic, TypeVar
@@ -26,7 +26,7 @@ import rerun as rr
 import rerun.blueprint as rrb
 from rerun.catalog import DatasetEntry
 from serde import serde
-from simplecv.run_record import capture_run_record, write_run_record
+from simplecv.run_record import RunStart, start_run, write_run_record
 
 from dataforge import paths, writing
 from dataforge.identity import SequenceIdentity
@@ -101,6 +101,9 @@ class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
     def __init__(self, config: ConfigT) -> None:
         self.config: ConfigT = config
         self.timer: SequenceTimer = SequenceTimer()
+        self.run: RunStart | None = None
+        """This process's run identity (``simplecv.run_record.start_run``): the convert command sets it before any
+        work; a dataset used outside it starts one at its first layer."""
         """Stage clock of the sequence being converted.
 
         dataforge-convert installs a fresh one before every sequence; converters
@@ -181,8 +184,10 @@ class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
             optimize=layer in self.optimized_layers,
         ) as recording:
             yield recording
-            started: datetime = datetime.fromisoformat(self.timer.started_at)
-            write_run_record(recording, capture_run_record(layer, identity.recording_id, config=self.config, started=started))
+            if self.run is None:
+                self.run = start_run(self.config)
+            sequence: RunStart = replace(self.run, started=datetime.fromisoformat(self.timer.started_at))
+            write_run_record(recording, sequence.finish(layer, identity.recording_id))
 
     @abstractmethod
     def download(self) -> None:

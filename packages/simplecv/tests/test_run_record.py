@@ -2,7 +2,7 @@
 
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -12,7 +12,7 @@ rr = pytest.importorskip("rerun", reason="rerun-sdk is required by this test mod
 pytest.importorskip("rerun.catalog", reason="rerun.catalog is required by this test module")
 
 from simplecv.catalog_layers import atomic_recording, ensure_dataset, register_layer  # noqa: E402
-from simplecv.run_record import RunRecord, capture_run_record, read_run_record, write_run_record  # noqa: E402
+from simplecv.run_record import RunRecord, RunStart, read_run_record, start_run, write_run_record  # noqa: E402
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,10 +39,8 @@ def _repo(tmp_path: Path) -> Path:
 def test_each_layer_keeps_its_own_record_on_the_catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A segment's layers merge their property columns, so each record is its own group: both read back whole."""
     monkeypatch.setattr(sys, "argv", ["tools/apps/stage.py", "--segment", "seg", "--note", "two words"])
-    started: datetime = datetime.now(UTC) - timedelta(seconds=2)
-    records: dict[str, RunRecord] = {
-        layer: capture_run_record(layer, "seg", config=_Config(segment="seg"), started=started) for layer in ("base", "masks")
-    }
+    run: RunStart = replace(start_run(_Config(segment="seg")), started=datetime.now(UTC) - timedelta(seconds=2))
+    records: dict[str, RunRecord] = {layer: run.finish(layer, "seg") for layer in ("base", "masks")}
     paths: list[Path] = []
     for layer, record in records.items():
         path: Path = tmp_path / f"{layer}.rrd"
@@ -61,19 +59,18 @@ def test_each_layer_keeps_its_own_record_on_the_catalog(tmp_path: Path, monkeypa
     record: RunRecord = records["masks"]
     assert record.command == "python tools/apps/stage.py --segment seg --note 'two words'"
     assert record.config == "_Config(segment='seg', stride=10)"
-    assert record.wall_s >= 2.0 and record.started_at == started.isoformat()
-    assert len(record.git_commit) == 40 and record.peak_rss_mb > 0.0
+    assert record.wall_s >= 2.0 and record.started_at == run.started.isoformat()
+    assert len(record.git_commit) == 40 and record.process_peak_rss_mb > 0.0
 
 
 def test_the_record_names_the_code_by_commit_and_a_hash_of_what_is_not_committed(tmp_path: Path) -> None:
     repo: Path = _repo(tmp_path)
     stage: Path = repo / "packages" / "stage"
-    started: datetime = datetime.now(UTC)
 
-    def capture() -> RunRecord:
-        return capture_run_record("layer", "seg", config=None, started=started, cwd=stage)
+    def capture() -> RunStart:
+        return start_run(None, cwd=stage)
 
-    clean: RunRecord = capture()
+    clean: RunStart = capture()
     assert clean.git_commit == _git(repo, "rev-parse", "HEAD") and clean.git_dirty_sha256 == ""
     assert clean.cwd == "packages/stage" and len(clean.pixi_lock_sha256) == 64
     (stage / "code.py").write_text("x = 2\n")
@@ -82,3 +79,13 @@ def test_the_record_names_the_code_by_commit_and_a_hash_of_what_is_not_committed
     added: str = capture().git_dirty_sha256
     (stage / "new.py").write_text("y = 2\n")
     assert len({edited, added, capture().git_dirty_sha256}) == 3 and edited != ""
+
+
+def test_the_identity_is_the_code_the_run_started_with_not_the_checkout_at_the_end(tmp_path: Path) -> None:
+    """A checkout edited or moved on during a long run must not be named as the code that produced the layer."""
+    repo: Path = _repo(tmp_path)
+    run: RunStart = start_run(None, cwd=repo / "packages" / "stage")
+    (repo / "packages" / "stage" / "code.py").write_text("x = 3\n")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "later")
+    record: RunRecord = run.finish("layer", "seg")
+    assert (record.git_commit, record.git_dirty_sha256) == (run.git_commit, "") and record.git_commit != _git(repo, "rev-parse", "HEAD")

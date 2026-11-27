@@ -11,6 +11,8 @@ from pathlib import Path
 from socket import gethostname
 from threading import Lock, local
 
+from simplecv.run_record import RunStart, start_run
+
 from dataforge import paths
 from dataforge.datasets import AnnotatedDatasetUnion, RobocapConfig
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
@@ -140,6 +142,8 @@ def main(config: Config) -> None:
     """
     dataset_config: DataforgeDatasetConfig = config.dataset
     dataset: DataforgeDataset = dataset_config.setup()
+    run: RunStart = start_run(config)
+    dataset.run = run
     selected: list[tuple[SequenceIdentity, object]] = select(dataset.discover(), config.sequence)[: config.max_sequences]
     print(f"converting {len(selected)} sequence(s), {config.jobs} at once")
     failed: list[str] = []
@@ -152,6 +156,7 @@ def main(config: Config) -> None:
         def run(pair: tuple[SequenceIdentity, object]) -> None:
             if not hasattr(workers, "dataset"):
                 workers.dataset = dataset_config.setup()
+                workers.dataset.run = run
             record: ConvertRecord = convert_one(workers.dataset, pair[0], pair[1], force=config.force, version=source_version)
             with records:
                 append_record(root / "timing/convert.jsonl", record)

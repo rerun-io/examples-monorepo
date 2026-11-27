@@ -57,15 +57,73 @@ class RunRecord:
     host: str
     """The machine's host name."""
     gpu: str
-    """The GPUs ``nvidia-smi`` reports, with their driver, ``; ``-separated; empty without one."""
+    """The GPUs ``nvidia-smi`` reports, with their driver, ``; ``-separated; empty without one, ``unavailable: <why>``
+    when the probe failed."""
     started_at: str
     """When the run started, ISO 8601 UTC."""
     wall_s: float
-    """Seconds from ``started_at`` to when the record was taken."""
-    peak_rss_mb: float
-    """The process's peak resident memory."""
-    peak_gpu_mb: float | None = None
-    """Peak memory torch reserved on the GPU; None when the process used no torch CUDA."""
+    """Seconds from ``started_at`` to when the layer's record was taken."""
+    process_peak_rss_mb: float
+    """The process's peak resident memory since it started: a batch process's earlier work counts, so it bounds this
+    layer's need from above."""
+    peak_torch_gpu_mb: float | None = None
+    """Peak GPU memory torch's allocator reserved in the process; None when it used no torch CUDA. Native GPU backends
+    (wgpu, TensorRT) allocate outside it, so this is not the process's GPU memory."""
+
+
+GPU_PROBE_TIMEOUT_S: float = 10.0
+"""Longest wait for ``nvidia-smi``: a stalled driver must not hold a finished layer back from being published."""
+HASH_BLOCK_BYTES: int = 1 << 20
+"""Read size when hashing uncommitted files: a large untracked file is hashed without being held in memory."""
+
+
+@dataclass(frozen=True, slots=True)
+class RunStart:
+    """What a run is, taken when it starts: the code it loaded, not the checkout as it is when a layer is finished."""
+
+    command: str
+    """:attr:`RunRecord.command`."""
+    cwd: str
+    """:attr:`RunRecord.cwd`."""
+    pixi_environment: str
+    """:attr:`RunRecord.pixi_environment`."""
+    config: str
+    """:attr:`RunRecord.config`: replace it (``dataclasses.replace``) once the stage has resolved what it was given."""
+    git_commit: str
+    """:attr:`RunRecord.git_commit`."""
+    git_dirty_sha256: str
+    """:attr:`RunRecord.git_dirty_sha256`."""
+    pixi_lock_sha256: str
+    """:attr:`RunRecord.pixi_lock_sha256`."""
+    host: str
+    """:attr:`RunRecord.host`."""
+    gpu: str
+    """:attr:`RunRecord.gpu`."""
+    started: datetime
+    """When the run started, timezone-aware; a batch process replaces it per item it converts."""
+
+    def finish(self, layer: str, segment: str) -> RunRecord:
+        """The record of ``layer``, now: call it when the layer's content is complete."""
+        rss_kb: float = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+        torch = sys.modules.get("torch")
+        return RunRecord(
+            layer=layer,
+            segment=segment,
+            command=self.command,
+            cwd=self.cwd,
+            pixi_environment=self.pixi_environment,
+            config=self.config,
+            git_commit=self.git_commit,
+            git_dirty_sha256=self.git_dirty_sha256,
+            pixi_lock_sha256=self.pixi_lock_sha256,
+            host=self.host,
+            gpu=self.gpu,
+            started_at=self.started.isoformat(),
+            wall_s=(datetime.now(UTC) - self.started).total_seconds(),
+            # ru_maxrss is KiB on Linux, bytes on macOS.
+            process_peak_rss_mb=rss_kb / 2**20 if sys.platform == "darwin" else rss_kb / 2**10,
+            peak_torch_gpu_mb=float(torch.cuda.max_memory_reserved()) / 2**20 if torch is not None and torch.cuda.is_initialized() else None,
+        )
 
 
 def _git(repo: Path, *args: str) -> bytes:
@@ -76,40 +134,47 @@ def _dirty_sha256(root: Path) -> str:
     status: bytes = _git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
     if not status:
         return ""
-    digest = hashlib.sha256(_git(root, "diff", "HEAD", "--binary"))
+    digest = hashlib.sha256()
+    with subprocess.Popen(["git", "-C", str(root), "diff", "HEAD", "--binary"], stdout=subprocess.PIPE) as diff:
+        assert diff.stdout is not None
+        while block := diff.stdout.read(HASH_BLOCK_BYTES):
+            digest.update(block)
+    if diff.returncode != 0:
+        raise subprocess.CalledProcessError(diff.returncode, diff.args)
     for entry in status.split(b"\0"):
         if entry.startswith(b"?? "):
             path: bytes = entry[3:]
-            digest.update(path + b"\0" + (root / path.decode()).read_bytes())
+            digest.update(path + b"\0")
+            with (root / path.decode()).open("rb") as untracked:
+                while block := untracked.read(HASH_BLOCK_BYTES):
+                    digest.update(block)
     return digest.hexdigest()
 
 
 def _gpus() -> str:
     if shutil.which("nvidia-smi") is None:
         return ""
-    result = subprocess.run(["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"], capture_output=True, text=True, check=False)
-    return "; ".join(line.strip() for line in result.stdout.splitlines() if line.strip()) if result.returncode == 0 else ""
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"], capture_output=True, text=True, check=False, timeout=GPU_PROBE_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        return f"unavailable: nvidia-smi gave no answer in {GPU_PROBE_TIMEOUT_S:.0f} s"
+    if result.returncode != 0:
+        return f"unavailable: nvidia-smi exited {result.returncode}: {result.stderr.strip()[:200]}"
+    return "; ".join(line.strip() for line in result.stdout.splitlines() if line.strip())
 
 
-def _peak_gpu_mb() -> float | None:
-    torch = sys.modules.get("torch")
-    if torch is None or not torch.cuda.is_initialized():
-        return None
-    return float(torch.cuda.max_memory_reserved()) / 2**20
-
-
-def capture_run_record(layer: str, segment: str, *, config: object, started: datetime, cwd: Path | None = None) -> RunRecord:
-    """Take this process's record for ``layer``, now: call it when the layer's content is complete.
+def start_run(config: object, *, cwd: Path | None = None) -> RunStart:
+    """Take this process's run identity, now: call it before the stage starts its work.
 
     Args:
-        layer: The catalog layer being written.
-        segment: Its segment.
-        config: The stage's parsed configuration; its ``repr`` is recorded.
-        started: When the run started (timezone-aware).
+        config: The stage's configuration; its ``repr`` is recorded. Pass it resolved where the stage resolves it
+            (defaults from the environment, a catalog URL from a settings file), or replace it later.
         cwd: The working directory; the process's own by default.
 
     Returns:
-        The record.
+        The identity, started now.
     """
     directory: Path = (Path.cwd() if cwd is None else cwd).resolve()
     root: Path | None = None
@@ -117,24 +182,22 @@ def capture_run_record(layer: str, segment: str, *, config: object, started: dat
         found = subprocess.run(["git", "-C", str(directory), "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=False)
         root = Path(found.stdout.strip()).resolve() if found.returncode == 0 else None
     lock: Path | None = None if root is None else root / "pixi.lock"
-    rss_kb: float = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
-    return RunRecord(
-        layer=layer,
-        segment=segment,
+    lock_digest = hashlib.sha256()
+    if lock is not None and lock.is_file():
+        with lock.open("rb") as stream:
+            while block := stream.read(HASH_BLOCK_BYTES):
+                lock_digest.update(block)
+    return RunStart(
         command=shlex.join(["python", *sys.argv]),
         cwd=str(directory.relative_to(root)) if root is not None and directory.is_relative_to(root) else str(directory),
         pixi_environment=os.environ.get("PIXI_ENVIRONMENT_NAME", ""),
         config=repr(config),
         git_commit="" if root is None else _git(root, "rev-parse", "HEAD").decode().strip(),
         git_dirty_sha256="" if root is None else _dirty_sha256(root),
-        pixi_lock_sha256=hashlib.sha256(lock.read_bytes()).hexdigest() if lock is not None and lock.is_file() else "",
+        pixi_lock_sha256=lock_digest.hexdigest() if lock is not None and lock.is_file() else "",
         host=socket.gethostname(),
         gpu=_gpus(),
-        started_at=started.isoformat(),
-        wall_s=(datetime.now(UTC) - started).total_seconds(),
-        # ru_maxrss is KiB on Linux, bytes on macOS.
-        peak_rss_mb=rss_kb / 2**20 if sys.platform == "darwin" else rss_kb / 2**10,
-        peak_gpu_mb=_peak_gpu_mb(),
+        started=datetime.now(UTC),
     )
 
 

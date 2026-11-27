@@ -1,7 +1,7 @@
 """Run one catalog segment and replace its single slam_rs results layer."""
 
+import dataclasses
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
 from typing import Literal
@@ -9,7 +9,7 @@ from typing import Literal
 from dataforge.writing import atomic_recording
 from rerun.catalog import DatasetEntry, OnDuplicateSegmentLayer
 from simplecv.catalog_video_reader import DecodeDevice, DecodeRequest, select_decode_device
-from simplecv.run_record import capture_run_record, write_run_record
+from simplecv.run_record import RunStart, start_run, write_run_record
 
 from slam_rs import BackendRequest, _core
 from slam_rs.catalog_feed import (
@@ -53,7 +53,6 @@ class Config:
 
 def main(config: Config) -> None:
     """Track the complete segment before publishing any replacement."""
-    started_at: datetime = datetime.now(UTC)
     if Path(config.segment).name != config.segment:
         raise ValueError("segment ID must not contain path separators")
     settings: SlamConfig = load_slam_config()
@@ -61,6 +60,7 @@ def main(config: Config) -> None:
     is_robocap: bool = dataset_name == "robocap"
     rig_profile: RigProfile = ROBOCAP_RIG if is_robocap else dataset_rig(settings.dataset(dataset_name))
     catalog_url: str = config.catalog or settings.catalog_url
+    run: RunStart = start_run(dataclasses.replace(config, catalog=catalog_url))
     # One manifest query resolves the dataset handle that open_segment and the final register share.
     segment: CatalogSegment = resolve_catalog_segments((CatalogSegment(catalog_url, dataset_name, config.segment),))[0]
     dataset: DatasetEntry | None = segment.dataset
@@ -86,7 +86,7 @@ def main(config: Config) -> None:
             layer: LayerRun = track_layer(rec, feed, vio, config_text=config_text, calibration=calibration, run_gba=True,
                                           detail=config.detail, profile=config.profile,
                                           animate_base_rig=not segment.has_ground_truth, strict=True)
-            write_run_record(rec, capture_run_record(POSE_SOURCE, config.segment, config=config, started=started_at))
+            write_run_record(rec, run.finish(POSE_SOURCE, config.segment))
         run: SegmentRun = layer.run
         if run.gba_failure is not None:
             print(f"global BA: failed: {run.gba_failure}; the final run is re-anchored on the map after loops and PGO", flush=True)
