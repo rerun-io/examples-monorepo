@@ -12,6 +12,8 @@ publish = false
 
 [workspace.dependencies]
 canonical-viewer-extension = { path = "crates/extension" }
+# Extension crates, beside their domain packages. Without default features: their own apps stay out of this build.
+gsplat-viewer = { path = "../../gsplat-rust-renderer/crates/gsplat-viewer", default-features = false }
 anyhow = "1.0"
 # Rerun 0.44.0 is not on crates.io: its release tag, redirected below to the patched checkout.
 re_build_info = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
@@ -196,15 +198,18 @@ egui_table = { git = "https://github.com/rerun-io/egui_crates.git", rev = "54b45
 egui_tiles = { git = "https://github.com/rerun-io/egui_crates.git", rev = "54b452e2b09e748511132d7be179c5d5b2ae566d" }
 re_mp4 = { git = "https://github.com/rerun-io/re_mp4.git", rev = "dd10225b0bcd192e0acaa4efa7d6e41682481d72" }
 
-# Every Rerun crate this workspace names, from the checkout that tools/prepare_rerun.py patches with ../patches. The
+# Every Rerun crate this workspace or an extension crate's library names, from the checkout that tools/prepare_rerun.py patches with ../patches. The
 # checkout's crates reach each other through path dependencies, so no Rerun crate builds twice. It sits outside this
 # directory: inside it, cargo would pass re_renderer's sources as workspace-relative paths, and re_renderer's embedded
 # shader lookup only strips absolute ones.
 [patch."https://github.com/rerun-io/rerun"]
 re_build_info = { path = "../target/patch/rerun-0.44.0/crates/utils/re_build_info" }
+re_byte_size = { path = "../target/patch/rerun-0.44.0/crates/utils/re_byte_size" }
 re_error = { path = "../target/patch/rerun-0.44.0/crates/utils/re_error" }
+re_format = { path = "../target/patch/rerun-0.44.0/crates/utils/re_format" }
 re_log = { path = "../target/patch/rerun-0.44.0/crates/utils/re_log" }
 re_memory = { path = "../target/patch/rerun-0.44.0/crates/utils/re_memory" }
+re_tracing = { path = "../target/patch/rerun-0.44.0/crates/utils/re_tracing" }
 re_video = { path = "../target/patch/rerun-0.44.0/crates/utils/re_video" }
 re_viewer = { path = "../target/patch/rerun-0.44.0/crates/top/re_viewer" }
 rerun = { path = "../target/patch/rerun-0.44.0/crates/top/rerun" }

@@ -11,7 +11,9 @@ static GLOBAL: AccountingAllocator<mimalloc::MiMalloc> =
 
 fn main() -> ExitCode {
     let main_thread_token = rerun::MainThreadToken::i_promise_i_am_on_the_main_thread();
-    re_log::setup_logging();
+    re_log::setup_logging_with_filter(&canonical_viewer::quiet_fallback_warnings(
+        &re_log::default_log_filter(),
+    ));
     canonical_viewer::install_hooks();
     match rerun::run(
         main_thread_token,

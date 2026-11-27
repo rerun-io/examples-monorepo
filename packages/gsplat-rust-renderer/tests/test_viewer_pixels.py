@@ -11,36 +11,45 @@ from PIL import Image
 from gsplat_rust_renderer.nerfbaselines import scene_ply_path
 
 ROOT: Path = Path(__file__).resolve().parents[1]
+# The canonical viewer (packages/canonical-viewer), whose gsplat extension these tests check.
+CANONICAL_VIEWER: Path = ROOT.parent / "canonical-viewer/target/release/rerun-canonical"
 
 
 @pytest.fixture(scope="module")
 def binaries() -> Path:
     subprocess.run(
-        ["cargo", "build", "--locked", "-p", "gsplat-viewer", "-p", "gsplat-cli", "--features", "gsplat-cli/probe"],
+        ["cargo", "build", "--locked", "-p", "gsplat-cli", "--features", "gsplat-cli/probe"],
         cwd=ROOT, env=os.environ, check=True, timeout=1200,
     )
     return ROOT / "target/debug"
 
 
+@pytest.fixture(scope="module")
+def viewer() -> Path:
+    if not CANONICAL_VIEWER.is_file():
+        pytest.skip(f"{CANONICAL_VIEWER} is missing: run `pixi run -e canonical-viewer canonical-viewer-build`")
+    return CANONICAL_VIEWER
+
+
 @pytest.mark.integration
 @pytest.mark.parametrize("mode", ["relog", "views", "portable", "depth"])
-def test_viewer_pixels(binaries: Path, tmp_path: Path, mode: str) -> None:
+def test_viewer_pixels(binaries: Path, viewer: Path, tmp_path: Path, mode: str) -> None:
     """Check upload replacement, per-view modes, stock compatibility and opaque depth."""
-    run_capture(binaries, tmp_path, mode)
+    run_capture(binaries, viewer, tmp_path, mode)
 
 
 @pytest.mark.golden
 @pytest.mark.parametrize("mode", ["pair", "pair-white"])
-def test_viewer_pair_pixels(binaries: Path, tmp_path: Path, mode: str) -> None:
+def test_viewer_pair_pixels(binaries: Path, viewer: Path, tmp_path: Path, mode: str) -> None:
     """Compare black and white composition with the standalone fixed-eye render."""
-    run_capture(binaries, tmp_path, mode)
+    run_capture(binaries, viewer, tmp_path, mode)
 
 
 @pytest.mark.integration
 @pytest.mark.parametrize("mode", ["hexels", "hexels-tracked", "hexels-portable"])
-def test_hexel_viewer_pixels(binaries: Path, tmp_path: Path, mode: str) -> None:
+def test_hexel_viewer_pixels(binaries: Path, viewer: Path, tmp_path: Path, mode: str) -> None:
     """Synthetic V3 Hexels3D: compute pixels match gsplat render (explicit and tracked eye); stock Rerun draws the fallback."""
-    result: subprocess.CompletedProcess[str] = run_check(binaries, tmp_path, mode, Path("/dev/null"))
+    result: subprocess.CompletedProcess[str] = run_check(binaries, viewer, tmp_path, mode, Path("/dev/null"))
     assert result.stderr.count("Uploaded 25 hexels") == 1, "One upload per viewer process; the Points3D fallback must not draw"
     assert "Hexel compute fallback" not in result.stderr
     names: list[str] = {"hexels": ["hexels.png"], "hexels-tracked": ["tracked-0.png", "tracked-1.png"],
@@ -52,7 +61,7 @@ def test_hexel_viewer_pixels(binaries: Path, tmp_path: Path, mode: str) -> None:
 
 @pytest.mark.integration
 @pytest.mark.parametrize("subgroups", [True, False], ids=["subgroups", "no-subgroups"])
-def test_sog_viewer_pixels(binaries: Path, tmp_path: Path, subgroups: bool) -> None:
+def test_sog_viewer_pixels(binaries: Path, viewer: Path, tmp_path: Path, subgroups: bool) -> None:
     """skull.sog (v2, SH 3): the SogSplats3D payload, de-quantised on the GPU, matches gsplat render of the decode; stock draws the preview.
 
     `no-subgroups` runs the viewer and `gsplat render` with `GSPLAT_NO_SUBGROUPS=1` (the workgroup-memory scan and sort).
@@ -64,7 +73,7 @@ def test_sog_viewer_pixels(binaries: Path, tmp_path: Path, subgroups: bool) -> N
     except OSError as error:
         pytest.skip(f"PlayCanvas skull.sog sample unavailable: {error}")
     env: dict[str, str] = {} if subgroups else {"GSPLAT_NO_SUBGROUPS": "1"}
-    result: subprocess.CompletedProcess[str] = run_check(binaries, tmp_path, "sog", Path("/dev/null"), "--sog", str(sog), env=env)
+    result: subprocess.CompletedProcess[str] = run_check(binaries, viewer, tmp_path, "sog", Path("/dev/null"), "--sog", str(sog), env=env)
     if not subgroups:
         assert "gsplat compute kernels: workgroup memory" in result.stderr, "GSPLAT_NO_SUBGROUPS=1 did not reach the viewer device"
     # re_format groups thousands with a thin space.
@@ -72,10 +81,10 @@ def test_sog_viewer_pixels(binaries: Path, tmp_path: Path, subgroups: bool) -> N
     assert "Gaussian compute fallback" not in result.stderr
 
 
-def run_check(binaries: Path, out: Path, mode: str, ply: Path, *extra: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    environment: dict[str, str] = {**os.environ, "RUST_LOG": "info,gsplat_viewer::cache=debug", **(env or {})}
+def run_check(binaries: Path, viewer: Path, out: Path, mode: str, ply: Path, *extra: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    environment: dict[str, str] = {**os.environ, "RUST_LOG": "info,gsplat_viewer::cache=debug,re_viewer::headless=warn", **(env or {})}
     result: subprocess.CompletedProcess[str] = subprocess.run(
-        [sys.executable, str(Path(__file__).with_name("viewer_check.py")), "--binaries", str(binaries), "--ply", str(ply), "--out", str(out), "--mode", mode, *extra],
+        [sys.executable, str(Path(__file__).with_name("viewer_check.py")), "--binaries", str(binaries), "--viewer", str(viewer), "--ply", str(ply), "--out", str(out), "--mode", mode, *extra],
         check=False, timeout=180, capture_output=True, text=True, env=environment,
     )
     print(result.stdout, result.stderr, sep="\n")
@@ -83,11 +92,11 @@ def run_check(binaries: Path, out: Path, mode: str, ply: Path, *extra: str, env:
     return result
 
 
-def run_capture(binaries: Path, out: Path, mode: str) -> None:
+def run_capture(binaries: Path, viewer: Path, out: Path, mode: str) -> None:
     ply: Path = Path(os.environ.get("GSPLAT_TEST_PLY", str(scene_ply_path("lego"))))
     if not ply.exists():
         pytest.skip(f"Required Lego native viewer asset missing: {ply}")
-    result: subprocess.CompletedProcess[str] = run_check(binaries, out, mode, ply)
+    result: subprocess.CompletedProcess[str] = run_check(binaries, viewer, out, mode, ply)
     names: list[str] = {
         "depth": ["framing.png", "depth.png", "bad-entity.png"],
         "portable": [f"{choice}-{viewer}.png" for choice in ("portable", "explicit-native", "explicit-compute") for viewer in ("compute", "stock")],

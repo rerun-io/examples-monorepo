@@ -336,7 +336,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "parking_lot",
  "percent-encoding",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
  "wl-clipboard-rs",
  "x11rb",
 ]
@@ -1279,6 +1279,7 @@ name = "canonical-viewer"
 version = "0.1.0"
 dependencies = [
  "canonical-viewer-extension",
+ "gsplat-viewer",
  "mimalloc",
  "re_build_info",
  "re_error",
@@ -2793,7 +2794,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3344,7 +3345,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3852,6 +3853,12 @@ dependencies = [
 
 [[package]]
 name = "glam"
+version = "0.30.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19fc433e8437a212d1b6f1e68c7824af3aed907da60afa994e7f542d18d12aa9"
+
+[[package]]
+name = "glam"
 version = "0.33.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "35b4e837a1d133645d1dcf283e146a4b9901e390a1c13545f959cfed3a72f24f"
@@ -3867,7 +3874,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28d74079318e3a077bd3d15faa90fde24fa37bb9f157f92f853e6019a15fd413"
 dependencies = [
  "approx",
- "glam",
+ "glam 0.33.11",
  "num-traits",
  "simba",
 ]
@@ -4039,6 +4046,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "gsplat-core"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "glam 0.30.10",
+ "half",
+ "image-webp",
+ "miniz_oxide",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "wgpu",
+]
+
+[[package]]
+name = "gsplat-viewer"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "canonical-viewer-extension",
+ "glam 0.33.11",
+ "gsplat-core",
+ "half",
+ "re_build_info",
+ "re_byte_size",
+ "re_format",
+ "re_math",
+ "re_tracing",
+ "re_viewer",
+ "web-time",
+ "wgpu",
+]
+
+[[package]]
 name = "guillotiere"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4189,7 +4231,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "163385eff5a0cf606ebe2c10b3a44ab02f4306e83fbd068a64f5e1d72a3049ac"
 dependencies = [
  "constgebra",
- "glam",
+ "glam 0.33.11",
  "tinyvec",
 ]
 
@@ -4546,6 +4588,16 @@ dependencies = [
  "tiff",
  "zune-core",
  "zune-jpeg",
+]
+
+[[package]]
+name = "image-webp"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "525e9ff3e1a4be2fbea1fdf0e98686a6d98b4d8f937e1bf7402245af1909e8c3"
+dependencies = [
+ "byteorder-lite",
+ "quick-error",
 ]
 
 [[package]]
@@ -6223,7 +6275,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6935,7 +6987,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7438,7 +7490,7 @@ dependencies = [
  "egui",
  "egui_plot",
  "emath",
- "glam",
+ "glam 0.33.11",
  "half",
  "parking_lot",
  "re_byte_size_derive",
@@ -8030,7 +8082,7 @@ name = "re_gamepad"
 version = "0.44.0"
 dependencies = [
  "gilrs",
- "glam",
+ "glam 0.33.11",
  "parking_lot",
  "re_async",
  "re_log",
@@ -8363,7 +8415,7 @@ version = "0.33.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "609679e93d655cdb9aed706a98319a3e3fc65eafff0862fa1f56e1be0474a439"
 dependencies = [
- "glam",
+ "glam 0.33.11",
  "num-traits",
  "serde",
 ]
@@ -8778,7 +8830,7 @@ dependencies = [
  "ecolor",
  "enumset",
  "getrandom 0.3.4",
- "glam",
+ "glam 0.33.11",
  "gltf",
  "half",
  "itertools 0.15.0",
@@ -8923,7 +8975,7 @@ dependencies = [
  "ecolor",
  "egui_plot",
  "emath",
- "glam",
+ "glam 0.33.11",
  "half",
  "image",
  "infer",
@@ -9098,7 +9150,7 @@ dependencies = [
  "ahash",
  "arrow",
  "bitflags 2.13.1",
- "glam",
+ "glam 0.33.11",
  "itertools 0.15.0",
  "nohash-hasher",
  "parking_lot",
@@ -9321,7 +9373,7 @@ dependencies = [
  "ahash",
  "arrow",
  "egui",
- "glam",
+ "glam 0.33.11",
  "itertools 0.15.0",
  "nohash-hasher",
  "rayon",
@@ -9453,7 +9505,7 @@ version = "0.44.0"
 dependencies = [
  "bytemuck",
  "egui",
- "glam",
+ "glam 0.33.11",
  "itertools 0.15.0",
  "re_byte_size",
  "re_data_ui",
@@ -9506,7 +9558,7 @@ dependencies = [
  "bitflags 2.13.1",
  "bytemuck",
  "egui",
- "glam",
+ "glam 0.33.11",
  "half",
  "hexasphere",
  "image",
@@ -9639,7 +9691,7 @@ dependencies = [
  "arrayvec",
  "egui",
  "egui_plot",
- "glam",
+ "glam 0.33.11",
  "itertools 0.15.0",
  "nohash-hasher",
  "rayon",
@@ -9686,7 +9738,7 @@ dependencies = [
  "ehttp",
  "emath",
  "futures",
- "glam",
+ "glam 0.33.11",
  "image",
  "itertools 0.15.0",
  "jiff",
@@ -9809,7 +9861,7 @@ dependencies = [
  "egui-wgpu",
  "egui_tiles",
  "emath",
- "glam",
+ "glam 0.33.11",
  "half",
  "image",
  "indexmap 2.14.0",
@@ -10573,7 +10625,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10631,7 +10683,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -11255,7 +11307,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -11659,7 +11711,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.6",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -13046,7 +13098,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

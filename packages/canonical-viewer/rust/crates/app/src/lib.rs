@@ -7,7 +7,7 @@
 use canonical_viewer_extension::{Extension, wgpu};
 
 /// Every extension in the canonical viewer. Adding one = its crate in Cargo.toml + one line here.
-pub const EXTENSIONS: &[Extension] = &[];
+pub const EXTENSIONS: &[Extension] = &[gsplat_viewer::setup::EXTENSION];
 
 /// Point the patched `re_viewer`'s hooks at [`EXTENSIONS`]; call once, before the viewer starts.
 pub fn install_hooks() {
@@ -21,6 +21,20 @@ pub fn install_hooks() {
         re_log::error!(
             "canonical viewer: the re_viewer extension hooks were already set; extensions may be missing"
         );
+    }
+}
+
+/// The log filter with Rerun's fallback-registration warnings held back, unless `filter` names their target already.
+///
+/// An extension may replace a stock fallback on purpose (gsplat frames the default 3D eye on splat and hexel bounds,
+/// which Rerun's spatial views cannot see). Rerun warns on every replacement, and in the viewer each warning becomes a
+/// toast on every start. The README's extension table names the one owner of each replaced fallback.
+pub fn quiet_fallback_warnings(filter: &str) -> String {
+    const TARGET: &str = "re_viewer_context::component_fallbacks";
+    if filter.contains(&format!("{TARGET}=")) {
+        filter.to_owned()
+    } else {
+        format!("{filter},{TARGET}=error")
     }
 }
 
@@ -116,6 +130,16 @@ mod tests {
             wgpu::Features::SUBGROUP | wgpu::Features::TIMESTAMP_QUERY,
             wgpu::Limits::default(),
         )
+    }
+
+    #[test]
+    fn fallback_warnings_are_quiet_unless_the_filter_names_them() {
+        assert_eq!(
+            quiet_fallback_warnings("info"),
+            "info,re_viewer_context::component_fallbacks=error"
+        );
+        let explicit = "info,re_viewer_context::component_fallbacks=warn";
+        assert_eq!(quiet_fallback_warnings(explicit), explicit);
     }
 
     #[test]

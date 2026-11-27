@@ -16,6 +16,12 @@ pixi run -e canonical-viewer --frozen canonical-viewer-build                 # p
 pixi run -e canonical-viewer --frozen rerun-canonical -- recording.rrd       # any `rerun` arguments follow
 ```
 
+## Extensions
+
+| Extension | Crate | Adds | Goldens |
+|---|---|---|---|
+| `gsplat` | `packages/gsplat-rust-renderer/crates/gsplat-viewer` (`setup::EXTENSION`) | compute Gaussian-splat renderer; `Spatial3DView` visualizers for `GaussianSplats3D` (compute), `Hexels3D`, SOG, SOG LOD and animated SOG; device needs: `SUBGROUP` when offered (not with `GSPLAT_NO_SUBGROUPS=1`), raised compute limits; replaces the stock 3D view's `EyeControls3D` position and look-target fallbacks (default framing on splat and hexel bounds) | `packages/gsplat-rust-renderer/tests/test_viewer_pixels.py` on `rerun-canonical` |
+
 ## Kinds of viewer change
 
 | Kind | Where | Rule |

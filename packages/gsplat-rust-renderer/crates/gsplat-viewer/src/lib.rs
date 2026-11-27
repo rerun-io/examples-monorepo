@@ -1,5 +1,5 @@
 //! Native `GaussianSplats3D` and `Hexels3D` conversion and custom Rerun viewer.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "app", not(target_arch = "wasm32")))]
 pub mod application;
 mod asog;
 mod bounds;

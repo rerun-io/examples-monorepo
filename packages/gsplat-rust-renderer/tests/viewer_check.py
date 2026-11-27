@@ -32,6 +32,9 @@ from gsplat_rust_renderer.sog_decode import CoreSplats, core_layout, decode, rea
 @dataclass(frozen=True)
 class Config:
     binaries: Path
+    """Directory with the `gsplat` CLI (reference renders)."""
+    viewer: Path
+    """The viewer under test: rerun-canonical, the canonical viewer with the gsplat extension."""
     ply: Path
     out: Path
     mode: Literal["relog", "pair", "views", "portable", "pair-white", "depth", "hexels", "hexels-tracked", "hexels-portable", "sog"] = "relog"
@@ -167,7 +170,7 @@ def check_portable_recording(config: Config) -> None:
         assert recording is not None
         recording.flush(timeout_sec=30.0)
         rr.disconnect()
-        for name, executable in (("compute", str(config.binaries / "gsplat-rust-renderer")), ("stock", STOCK_VIEWER)):
+        for name, executable in (("compute", str(config.viewer)), ("stock", STOCK_VIEWER)):
             print(f"PORTABLE_VIEWER {label} {name}", flush=True)
             with spawn_viewer(executable) as viewer:
                 viewer.open_url(str(recording_path.resolve()))
@@ -186,7 +189,7 @@ def check_portable_recording(config: Config) -> None:
 
 def check_depth_and_framing(config: Config) -> None:
     """Exercise a white scene with opaque meshes, image planes, and frustums."""
-    with spawn_viewer(str(config.binaries / "gsplat-rust-renderer")) as viewer:
+    with spawn_viewer(str(config.viewer)) as viewer:
         rr.init("depth-and-framing", strict=True)
         rr.connect_grpc(viewer.url)
         rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Y_UP, static=True)
@@ -359,7 +362,7 @@ DEFAULT_FOV_Y: float = float(np.float32(55.0) * np.float32(math.tau) / np.float3
 def check_hexels(config: Config, ply: Path) -> None:
     """Hexels3D with an explicit eye: the compute hexels draw (parity with gsplat render), not the Points3D fallback."""
     position, target, up = (np.array(v, dtype=np.float64) for v in HEXEL_EYE)
-    with spawn_viewer(str(config.binaries / "gsplat-rust-renderer")) as viewer:
+    with spawn_viewer(str(config.viewer)) as viewer:
         rr.init("hexels-viewer-check", strict=True)
         rr.connect_grpc(viewer.url)
         log_hexels(synthetic_hexels())
@@ -375,7 +378,7 @@ def check_hexels_tracked(config: Config, ply: Path) -> None:
     """A view tracking a logged pinhole renders the compute hexels from that pose and field of view."""
     fov_y: float = 0.8
     poses: list[Float64[np.ndarray, "4 4"]] = [look_at(np.array([np.cos(a) * 2.5, np.sin(a) * 2.5, 2.0]), np.zeros(3), np.array([0.0, 0.0, 1.0])) for a in (-1.2, -0.4)]
-    with spawn_viewer(str(config.binaries / "gsplat-rust-renderer")) as viewer:
+    with spawn_viewer(str(config.viewer)) as viewer:
         rr.init("hexels-tracked-check", strict=True)
         rr.connect_grpc(viewer.url)
         log_hexels(synthetic_hexels())
@@ -419,7 +422,7 @@ def check_hexels_portable(config: Config, ply: Path) -> None:
     assert recording is not None
     recording.flush(timeout_sec=30.0)
     rr.disconnect()
-    for name, executable in (("compute", str(config.binaries / "gsplat-rust-renderer")), ("stock", STOCK_VIEWER)):
+    for name, executable in (("compute", str(config.viewer)), ("stock", STOCK_VIEWER)):
         with spawn_viewer(executable) as viewer:
             viewer.open_url(str(recording_path.resolve()))
             image: UInt8[np.ndarray, "h w 3"] = capture(viewer, view, config.out / f"hexels-portable-{name}.png")
@@ -480,7 +483,7 @@ def check_sog(config: Config) -> None:
     assert recording is not None
     recording.flush(timeout_sec=30.0)
     rr.disconnect()
-    with spawn_viewer(str(config.binaries / "gsplat-rust-renderer")) as viewer:
+    with spawn_viewer(str(config.viewer)) as viewer:
         viewer.open_url(str(recording_path.resolve()))
         image: UInt8[np.ndarray, "h w 3"] = capture(viewer, view, config.out / "sog-gpu.png")
         reports = [report.summary for item in viewer.get_state().views for report in item.reports]
@@ -511,7 +514,7 @@ def main(config: Config) -> None:
     position: Float64[np.ndarray, "3"] = np.array([2.0, -2.0, 1.2])
     target: Float64[np.ndarray, "3"] = np.array([0.0, 0.0, 0.25])
     up: Float64[np.ndarray, "3"] = np.array([0.0, 0.0, 1.0])
-    with spawn_viewer(str(config.binaries / "gsplat-rust-renderer")) as viewer:
+    with spawn_viewer(str(config.viewer)) as viewer:
         rr.init("native-viewer-check", strict=True)
         rr.connect_grpc(viewer.url)
         try:

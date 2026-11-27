@@ -105,7 +105,9 @@ pixi run -e gsplat-rust-renderer-dev --frozen gate
 pixi run -e gsplat-rust-renderer-dev --frozen tests-golden
 ```
 
-The gate includes Rust GPU contracts and headless viewer pixels. Golden tests
+The gate includes Rust GPU contracts and headless viewer pixels. The viewer pixels come from `rerun-canonical`,
+the canonical viewer with this package's extension (`gsplat_viewer::setup::EXTENSION`); build it first with
+`pixi run -e canonical-viewer canonical-viewer-build`, or those tests skip. Golden tests
 cover all camera models, native archetype conversion, and published checkpoints.
 Missing datasets produce explicit skips. Run `gsplat-download all all` to obtain
 the eight Blender datasets and checkpoints.
