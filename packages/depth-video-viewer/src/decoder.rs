@@ -6,7 +6,8 @@
 //! rav1d decodes 10-bit streams in every build; stock `re_video` then right-shifts the samples to 8 bits
 //! (`decode/av1.rs:295-297`, TODO #7594). Here the Y plane is copied as is, so every 10-bit code comes back exact.
 //! Decoding is synchronous: a seek decodes from the nearest keyframe, and playing forward continues from the last
-//! decoded sample.
+//! decoded sample. The canonical web viewer runs the same decoder in wasm32 (one thread, no asm), so depth codes are
+//! exact there too.
 
 use re_rav1d::dav1d;
 use re_viewer::external::re_sdk_types::encodings::Blob;
@@ -53,6 +54,9 @@ impl LumaDecoder {
         // Like re_video: prefer frames over error messages, and output each picture right away.
         settings.set_strict_std_compliance(false);
         settings.set_max_frame_delay(1);
+        // wasm32 has no threads (spawning one panics); natively rav1d picks its own count.
+        #[cfg(target_arch = "wasm32")]
+        settings.set_n_threads(1);
         Ok(Self {
             decoder: dav1d::Decoder::with_settings(&settings)?,
         })

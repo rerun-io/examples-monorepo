@@ -1,0 +1,69 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 7b63647..7232e75 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -23,7 +23,6 @@ atomig = { version = "0.4.0", features = ["derive"] }
+ av-data = "0.4.2"
+ bitflags = "2.4.0"
+ cfg-if = "1.0.0"
+-libc = "0.2"
+ parking_lot = "0.12.2"
+ paste = "1.0.14"
+ raw-cpuid = "11.0.1"
+@@ -73,3 +72,9 @@ debug = "line-tables-only"
+ inherits = "dev"
+ opt-level = 2
+ codegen-units = 16
++
++[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
++libc = "0.2"
++
++[target.'cfg(target_arch = "wasm32")'.dependencies]
++rav1d-wasm-libc = { path = "wasm-libc" }
+diff --git a/lib.rs b/lib.rs
+index 7be1104..60b77ec 100644
+--- a/lib.rs
++++ b/lib.rs
+@@ -12,6 +12,10 @@
+ #[cfg(not(any(feature = "bitdepth_8", feature = "bitdepth_16")))]
+ compile_error!("No bitdepths enabled. Enable one or more of the following features: `bitdepth_8`, `bitdepth_16`");
+ 
++// libc has none of the C types and errno values rav1d names on wasm32-unknown-unknown.
++#[cfg(target_arch = "wasm32")]
++extern crate rav1d_wasm_libc as libc;
++
+ pub mod include {
+     pub mod common {
+         pub(crate) mod attributes;
+diff --git a/wasm-libc/Cargo.toml b/wasm-libc/Cargo.toml
+new file mode 100644
+index 0000000..35be56f
+--- /dev/null
++++ b/wasm-libc/Cargo.toml
+@@ -0,0 +1,5 @@
++[package]
++name = "rav1d-wasm-libc"
++version = "0.1.0"
++edition = "2021"
++publish = false
+diff --git a/wasm-libc/src/lib.rs b/wasm-libc/src/lib.rs
+new file mode 100644
+index 0000000..a07cee2
+--- /dev/null
++++ b/wasm-libc/src/lib.rs
+@@ -0,0 +1,15 @@
++//! The few C types and errno values rav1d's library names from `libc`, which has none of them on
++//! wasm32-unknown-unknown (no C library there). Values as on Linux; rav1d only passes them through its C API.
++#![no_std]
++#![allow(non_camel_case_types)]
++pub type ptrdiff_t = isize;
++pub type intptr_t = isize;
++pub type uintptr_t = usize;
++pub type off_t = i64;
++pub const EAGAIN: i32 = 11;
++pub const EINVAL: i32 = 22;
++pub const EIO: i32 = 5;
++pub const ENOENT: i32 = 2;
++pub const ENOMEM: i32 = 12;
++pub const ENOPROTOOPT: i32 = 92;
++pub const ERANGE: i32 = 34;

@@ -20,14 +20,14 @@ pixi run -e canonical-viewer-web --frozen canonical-viewer-web-build <stock-0.44
 
 `rust/crates/web` is the web entry point: it installs the same hooks before JavaScript constructs the stock `WebHandle`,
 so pages keep the stock `@rerun-io/web-viewer` API. gsplat's page flags still work: `force_no_subgroups=1`,
-`profile=1`. The web build is 17.5 MB brotli (stock 0.44.0: 10.6 MB).
+`profile=1`. The web build is 17.8 MB brotli (stock 0.44.0: 10.6 MB); depth video adds 0.3 MB of it.
 
 ## Extensions
 
 | Extension | Crate | Adds | Goldens |
 |---|---|---|---|
 | `gsplat` | `packages/gsplat-rust-renderer/crates/gsplat-viewer` (`setup::EXTENSION`) | compute Gaussian-splat renderer; `Spatial3DView` visualizers for `GaussianSplats3D` (compute), `Hexels3D`, SOG, SOG LOD and animated SOG; device needs: `SUBGROUP` when offered (not with `GSPLAT_NO_SUBGROUPS=1`), raised compute limits; replaces the stock 3D view's `EyeControls3D` position and look-target fallbacks (default framing on splat and hexel bounds) | `packages/gsplat-rust-renderer/tests/test_viewer_pixels.py` on `rerun-canonical` |
-| `depth-video` | `packages/depth-video-viewer` (`EXTENSION`) | `DepthVideoStream` (depth as AV1 10-bit monochrome lossless video, exact 10-bit codes) in `Spatial2DView` (colormapped image) and `Spatial3DView` (depth cloud under a `Pinhole`); no device needs; native only: its decoder (`re_rav1d` 0.1.3) does not build for wasm32 | `packages/depth-video-viewer/tests/test_viewer_pixels.py` on `rerun-canonical`, including the scene with gsplat splats |
+| `depth-video` | `packages/depth-video-viewer` (`EXTENSION`) | `DepthVideoStream` (depth as AV1 10-bit monochrome lossless video, exact 10-bit codes) in `Spatial2DView` (colormapped image) and `Spatial3DView` (depth cloud under a `Pinhole`); no device needs; on the web the same decoder (`re_rav1d`, no asm, one thread, on the viewer's thread) gives the same exact codes | `packages/depth-video-viewer/tests/test_viewer_pixels.py` on `rerun-canonical`, including the scene with gsplat splats |
 
 ## Kinds of viewer change
 
@@ -67,6 +67,10 @@ Applied in order by `tools/prepare_rerun.py` (`RERUN_PATCHES`) to the Rerun tag'
 |---|---|---|
 | `re_viewer-0.44.0-extension-hooks.patch` | the device and `App::new` hooks (native, headless, web) and the declared-fallback hook | upstream has extension hooks (Pablo wants no upstream PRs, issues or proposal drafts) |
 | `rerun-0.44.0-av1-arm64.patch` | native AV1 decoding on Linux arm64 (rerun-io/rerun#7755): `re_rav1d` 0.1.4 from a pinned git revision, whose arm64 assembly tables are hidden (the workspace's `[patch.crates-io]` gives depth-video-viewer the same `re_rav1d`) | a Rerun release fixes #7755 and `re_rav1d` 0.1.4 is on crates.io |
+
+`tools/prepare_rerun.py` also applies `re_rav1d-0.1.4-wasm-libc.patch` to the AV1 patch's `re_rav1d` revision
+(`PATCHED_GIT_CRATES`): `libc` has none of the C types and errno values rav1d names on wasm32-unknown-unknown, so a
+15-line shim crate stands in for it there. Drop it when rav1d builds for wasm32 upstream.
 
 The AV1 patch comes byte-identical from ai-demos `.github/rerun-source-build/` (main `acaa65f`), which builds the same fix
 into its `rerun-sdk` wheels. The stalled-proxy-reader patch from the same place is not in this set while a test decides it

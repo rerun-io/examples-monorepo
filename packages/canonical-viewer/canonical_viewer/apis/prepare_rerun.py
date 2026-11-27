@@ -48,6 +48,32 @@ class PatchedCrate:
     """Patch path relative to the package directory, applied at the crate's root."""
 
 
+@dataclass(frozen=True, slots=True)
+class PatchedGitCrate:
+    """A crate pinned to a git commit and the patch applied to it; prepared as ``<name>-<commit[:8]>``."""
+
+    name: str
+    url: str
+    commit: str
+    patch: str
+    """Patch path relative to the package directory, applied at the crate's root."""
+
+    @property
+    def stem(self) -> str:
+        return f"{self.name}-{self.commit[:8]}"
+
+
+PATCHED_GIT_CRATES: tuple[PatchedGitCrate, ...] = (
+    # The AV1 patch's re_rav1d (rerun-io/rerun#7755), made to build for wasm32 so the web viewer decodes depth video with
+    # the same decoder as native: libc has none of the C types and errno values rav1d names there.
+    PatchedGitCrate(
+        "re_rav1d",
+        "https://github.com/pablo-rerun/re_rav1d.git",
+        "dd03865f74aee68b90269ef3b4e33fbb494ffca3",
+        "patches/re_rav1d-0.1.4-wasm-libc.patch",
+    ),
+)
+
 PATCHED_CRATES: tuple[PatchedCrate, ...] = (
     # Maps Features::SUBGROUP to WebGPU "subgroups" (the web backend only), so the splat kernels can use subgroups in browsers.
     PatchedCrate("wgpu", "30.0.0", "6d8f4bd44d92da5270f03409dba9f952dab24f128e05d6a554926101d1bf9114", "patches/wgpu-30.0.0-webgpu-subgroups.patch"),
@@ -88,34 +114,40 @@ def prepare_tree(destination: Path, archive: Callable[[], bytes], *, source_id: 
     return True
 
 
-def rerun_archive(cargo_home: Path) -> bytes:
-    """A tar of the Rerun tag's commit with entries under ``rerun-<tag>/``, from Cargo's clone when it has the commit."""
-    with tempfile.TemporaryDirectory(prefix="rerun-fetch-") as temporary:
+def git_archive(url: str, commit: str, ref: str, prefix: str, cargo_home: Path, cargo_db: str) -> bytes:
+    """A tar of `commit` with entries under ``<prefix>/``, from Cargo's clone (`cargo_db`, a glob under git/db) when it
+    has the commit, else from a shallow fetch of `ref` from `url`, checked to be `commit`."""
+    with tempfile.TemporaryDirectory(prefix="git-fetch-") as temporary:
         # Rerun keeps test snapshots in LFS; git archive would download them through the smudge filter.
         git_env: dict[str, str] = dict(os.environ, GIT_CEILING_DIRECTORIES=temporary, GIT_LFS_SKIP_SMUDGE="1")
         repository: Path | None = next(
             (
                 database
-                for database in sorted((cargo_home / "git/db").glob("rerun-*"))
-                if subprocess.run(["git", f"--git-dir={database}", "cat-file", "-e", f"{RERUN_COMMIT}^{{commit}}"], capture_output=True).returncode == 0
+                for database in sorted((cargo_home / "git/db").glob(cargo_db))
+                if subprocess.run(["git", f"--git-dir={database}", "cat-file", "-e", f"{commit}^{{commit}}"], capture_output=True).returncode == 0
             ),
             None,
         )
         if repository is None:
             repository = Path(temporary) / "repository.git"
             subprocess.run(["git", "init", "-q", "--bare", str(repository)], env=git_env, check=True)
-            subprocess.run(["git", f"--git-dir={repository}", "fetch", "-q", "--depth", "1", RERUN_URL, f"refs/tags/{RERUN_TAG}"], env=git_env, check=True)
+            subprocess.run(["git", f"--git-dir={repository}", "fetch", "-q", "--depth", "1", url, ref], env=git_env, check=True)
             fetched: str = subprocess.run(
                 ["git", f"--git-dir={repository}", "rev-parse", "FETCH_HEAD^{commit}"], env=git_env, check=True, capture_output=True, text=True
             ).stdout.strip()
-            if fetched != RERUN_COMMIT:
-                raise ValueError(f"Rerun tag {RERUN_TAG} is {fetched}, expected {RERUN_COMMIT}")
+            if fetched != commit:
+                raise ValueError(f"{url} {ref} is {fetched}, expected {commit}")
         return subprocess.run(
-            ["git", f"--git-dir={repository}", "archive", "--format=tar", f"--prefix=rerun-{RERUN_TAG}/", RERUN_COMMIT],
+            ["git", f"--git-dir={repository}", "archive", "--format=tar", f"--prefix={prefix}/", commit],
             env=git_env,
             check=True,
             capture_output=True,
         ).stdout
+
+
+def rerun_archive(cargo_home: Path) -> bytes:
+    """A tar of the Rerun tag's commit with entries under ``rerun-<tag>/``."""
+    return git_archive(RERUN_URL, RERUN_COMMIT, f"refs/tags/{RERUN_TAG}", f"rerun-{RERUN_TAG}", cargo_home, "rerun-*")
 
 
 def crate_archive(crate: PatchedCrate, cargo_home: Path) -> bytes:
@@ -158,6 +190,15 @@ def main(config: PrepareRerunConfig) -> None:
             destination,
             partial(crate_archive, crate, config.cargo_home),
             source_id=crate.sha256,
+            patches=[PACKAGE_DIR / crate.patch],
+        )
+        print(f"{destination}: {'prepared' if built else 'unchanged'}")
+    for crate in PATCHED_GIT_CRATES:
+        destination = config.target_dir / "patch" / crate.stem
+        built = prepare_tree(
+            destination,
+            partial(git_archive, crate.url, crate.commit, crate.commit, crate.stem, config.cargo_home, f"{crate.name}-*"),
+            source_id=crate.commit,
             patches=[PACKAGE_DIR / crate.patch],
         )
         print(f"{destination}: {'prepared' if built else 'unchanged'}")

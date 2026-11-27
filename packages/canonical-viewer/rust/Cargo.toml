@@ -185,9 +185,11 @@ significant_drop_tightening = "allow" # An update of parking_lot made this trigg
 # The web backend maps Features::SUBGROUP to WebGPU "subgroups" (patches/wgpu-30.0.0-webgpu-subgroups.patch; native
 # backends are unchanged). tools/prepare_rerun.py prepares the tree from the verified crates.io archive.
 wgpu = { path = "../target/patch/wgpu-30.0.0" }
-# The AV1 patch's re_rav1d 0.1.4 (patches/rerun-0.44.0-av1-arm64.patch; not on crates.io yet), also for depth-video-viewer's
-# direct re_rav1d dependency, so one copy of rav1d's assembly links.
-re_rav1d = { git = "https://github.com/pablo-rerun/re_rav1d.git", rev = "dd03865f74aee68b90269ef3b4e33fbb494ffca3" }
+# The AV1 patch's re_rav1d 0.1.4 (patches/rerun-0.44.0-av1-arm64.patch; not on crates.io yet), prepared with
+# patches/re_rav1d-0.1.4-wasm-libc.patch so it also builds for wasm32; also for depth-video-viewer's direct re_rav1d
+# dependency, so one copy of rav1d's assembly links.
+re_rav1d = { path = "../target/patch/re_rav1d-dd03865f" }
+
 ecolor = { git = "https://github.com/emilk/egui.git", rev = "90431d979ab1faae2de6d9f736e9d33ca0d31956" }
 eframe = { git = "https://github.com/emilk/egui.git", rev = "90431d979ab1faae2de6d9f736e9d33ca0d31956" }
 egui = { git = "https://github.com/emilk/egui.git", rev = "90431d979ab1faae2de6d9f736e9d33ca0d31956" }
@@ -204,6 +206,10 @@ egui_inspection_tools = { git = "https://github.com/rerun-io/egui_crates.git", r
 egui_table = { git = "https://github.com/rerun-io/egui_crates.git", rev = "54b452e2b09e748511132d7be179c5d5b2ae566d" }
 egui_tiles = { git = "https://github.com/rerun-io/egui_crates.git", rev = "54b452e2b09e748511132d7be179c5d5b2ae566d" }
 re_mp4 = { git = "https://github.com/rerun-io/re_mp4.git", rev = "dd10225b0bcd192e0acaa4efa7d6e41682481d72" }
+
+# Rerun's workspace takes re_rav1d from this git revision (the AV1 patch): the same prepared tree.
+[patch."https://github.com/pablo-rerun/re_rav1d.git"]
+re_rav1d = { path = "../target/patch/re_rav1d-dd03865f" }
 
 # Every Rerun crate this workspace or an extension crate's library names, from the checkout that tools/prepare_rerun.py patches with ../patches. The
 # checkout's crates reach each other through path dependencies, so no Rerun crate builds twice. It sits outside this
