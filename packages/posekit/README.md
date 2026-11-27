@@ -52,7 +52,7 @@ flowchart LR
     end
     Z --> O["ONNX artifact<br/>the interchange format"]
     E --> O
-    O --> ORT["OnnxCudaRuntime<br/>CUDA EP + IOBinding on torch data_ptrs"]
+    O --> ORT["OnnxRuntime<br/>CUDA or CPU EP + IOBinding on torch data_ptrs"]
     O -->|"engine build, cached per GPU<br/>~/.cache/posekit/trt"| TRT["TensorRtRuntime<br/>static batch · optional CUDA graph"]
     H --> TCH["TorchRuntime<br/>nn.Module + autocast"]
     L --> TCH
@@ -60,6 +60,14 @@ flowchart LR
     TRT --> RT
     TCH --> RT
 ```
+
+The ONNX-artifact models (YOLOX, RTMPose/RTMW, DetNet, the EgoHand detector) default to the `auto` backend: TensorRT
+where a CUDA device and the TensorRT bindings are present, ONNX Runtime on CUDA where only torch has CUDA, ONNX Runtime
+on the CPU elsewhere (`trtkit.resolve_backend`). The first TensorRT run on a machine builds each engine;
+`pixi run -e posekit posekit-warm-engines` builds them ahead for every YOLOX and RTMPose/RTMW variant, at each one's
+default config (not DetNet or the EgoHand detector, whose weights are not on every machine). On the GB10 ONNX Runtime
+has no CUDA kernels, so ONNX Runtime there runs on the CPU, for example
+`posekit-video-pose --video-path video.mp4 yolox onnx --device cpu rtmpose onnx --device cpu`.
 
 transformers is a **weights source, never a fourth backend**: posekit loads the
 `nn.Module` and keeps its own GPU pre/post (the HF image processors are

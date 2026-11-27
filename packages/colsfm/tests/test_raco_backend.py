@@ -379,7 +379,7 @@ def test_the_whole_pipeline_runs_on_the_raco_backend(galileo_input_dir: Path, tm
         matching_backend="raco",
         # The backend is what this module measures; the rest of the default
         # configuration is not, so the mapper stays on Ceres with the rig fixed
-        # (`tests/colsfm/test_pipeline.py` PYCOLMAP_ABLATION).
+        # (`tests/test_pipeline.py` ENGINE_FREE_RUN).
         ba_backend="ceres",
         optimize_extrinsics=False,
     )

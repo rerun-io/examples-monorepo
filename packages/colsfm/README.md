@@ -42,6 +42,7 @@ framesets are every `cube_stride`-th video frame, every second frameset): half t
 | `--ba-backend` | `caspar` (COLMAP's GPU bundle adjuster; reduced camera system, no closing Ceres solve) | `ceres`; `--caspar-ceres-polish` adds one Ceres global bundle adjustment after CASPAR; `--caspar-option reduced_camera_system=false` runs CASPAR's full-system PCG |
 | `--optimize-extrinsics` | on (regularised, cuSFM's priors) | `--no-optimize-extrinsics`, `--no-regularised-extrinsics` |
 | `--loop-closure` | on | `--no-loop-closure` |
+| `--inference-runtime` | `tensorrt` (engines for RaCo, LightGlue+ and FlexGlue, on the GPU) | `onnxruntime`: the same graphs (FlexGlue: COLMAP's own fp32 ones) on ONNX Runtime's CPU provider, frames decoded on the CPU; no GPU and no engine, much slower |
 
 The RaCo graphs are exported, not shipped: a run that cannot find them **stops** and names `colsfm-raco-export` (a silent
 change of extractor would be a different experiment under the same name). TensorRT 11 builds strongly typed engines; both

@@ -20,15 +20,16 @@ Several modules read shipped cuSFM runs under `data/`. Each skips with the missi
 named rather than failing, so a checkout without the data is still green — and a run that
 reports more skips than usual is telling you which datasets are absent.
 
-**The suite does not run the default configuration, on purpose.** Since 2026-09-06 a run
-with no flags asks for RaCo, FlexGlue and CASPAR, which need the
-gitignored graphs under `data/cusfm_models/` and a `CASPAR_ENABLED` pycolmap — neither of
-which a fresh clone has. `test_pipeline.py` therefore builds every run from
-`PYCOLMAP_ABLATION`, the `--features-backend pycolmap --matching-backend pycolmap
---ba-backend ceres --no-optimize-extrinsics` path, and states that once. What the defaults
+**The suite runs the default models without the default engines, on purpose.** A run with no
+flags asks for RaCo, FlexGlue and CASPAR on TensorRT, which needs engines and a GPU.
+`test_pipeline.py` therefore builds every run from `ENGINE_FREE_RUN`: the same RaCo-ALIKED and
+FlexGlue graphs on ONNX Runtime's CPU provider (`--inference-runtime onnxruntime`), with
+`--ba-backend ceres --no-optimize-extrinsics`, stated once. Its cases skip, naming the export
+commands, when the graphs are not in the checkout; the cases that only resolve a plan use
+`PLAN_ONLY` (COLMAP's own backends, no graph) and run on a bare clone. What the defaults
 *are* is pinned separately, as pure assertions on `PipelineOptions` and on `resolve_run`'s
 `ResolvedRun`, which need no engine and no GPU. The engines themselves are exercised by
-`test_raco_backend.py` and `test_tensorrt_backends.py` behind their own skips, and CASPAR by
+`test_raco_backend.py` and `test_onnxruntime_runners.py` behind their own skips, and CASPAR by
 `test_mapping_ba_backend.py`, which asserts *both* branches — the GPU solve where the build
 has it, and the loud Ceres fallback with its reason in `MappingStats` where it does not.
 
