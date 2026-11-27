@@ -39,7 +39,8 @@ def _repo(tmp_path: Path) -> Path:
 def test_each_layer_keeps_its_own_record_on_the_catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A segment's layers merge their property columns, so each record is its own group: both read back whole."""
     monkeypatch.setattr(sys, "argv", ["tools/apps/stage.py", "--segment", "seg", "--note", "two words"])
-    run: RunStart = replace(start_run(_Config(segment="seg")), started=datetime.now(UTC) - timedelta(seconds=2))
+    # A clean checkout and a host without nvidia-smi record empty strings, which the catalog does not hand back.
+    run: RunStart = replace(start_run(_Config(segment="seg")), started=datetime.now(UTC) - timedelta(seconds=2), git_dirty_sha256="", gpu="")
     records: dict[str, RunRecord] = {layer: run.finish(layer, "seg") for layer in ("base", "masks")}
     paths: list[Path] = []
     for layer, record in records.items():

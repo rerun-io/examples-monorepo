@@ -34,7 +34,8 @@ RUN_RECORD_PREFIX: str = "run_"
 @serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
 class RunRecord:
-    """What wrote one layer of one segment."""
+    """What wrote one layer of one segment. A field that may be empty defaults to it: the catalog returns no cell for an
+    empty string."""
 
     layer: str
     """The catalog layer the run wrote."""
@@ -44,21 +45,10 @@ class RunRecord:
     """The process's command line, as a shell would take it (``python <argv...>``)."""
     cwd: str
     """The working directory, relative to the repository root when it is inside it."""
-    pixi_environment: str
-    """The pixi environment the process ran in; empty outside pixi."""
     config: str
     """The stage's resolved configuration (its ``repr``), defaults included: the command alone does not state them."""
-    git_commit: str
-    """The commit checked out; empty outside a git checkout."""
-    git_dirty_sha256: str
-    """SHA-256 of the uncommitted changes (``git diff HEAD`` and every untracked file); empty for a clean checkout."""
-    pixi_lock_sha256: str
-    """SHA-256 of the repository's ``pixi.lock``; empty when there is none."""
     host: str
     """The machine's host name."""
-    gpu: str
-    """The GPUs ``nvidia-smi`` reports, with their driver, ``; ``-separated; empty without one, ``unavailable: <why>``
-    when the probe failed."""
     started_at: str
     """When the run started, ISO 8601 UTC."""
     wall_s: float
@@ -66,6 +56,17 @@ class RunRecord:
     process_peak_rss_mb: float
     """The process's peak resident memory since it started: a batch process's earlier work counts, so it bounds this
     layer's need from above."""
+    pixi_environment: str = ""
+    """The pixi environment the process ran in; empty outside pixi."""
+    git_commit: str = ""
+    """The commit checked out; empty outside a git checkout."""
+    git_dirty_sha256: str = ""
+    """SHA-256 of the uncommitted changes (``git diff HEAD`` and every untracked file); empty for a clean checkout."""
+    pixi_lock_sha256: str = ""
+    """SHA-256 of the repository's ``pixi.lock``; empty when there is none."""
+    gpu: str = ""
+    """The GPUs ``nvidia-smi`` reports, with their driver, ``; ``-separated; empty without one, ``unavailable: <why>``
+    when the probe failed."""
     peak_torch_gpu_mb: float | None = None
     """Peak GPU memory torch's allocator reserved in the process; None when it used no torch CUDA. Native GPU backends
     (wgpu, TensorRT) allocate outside it, so this is not the process's GPU memory."""
