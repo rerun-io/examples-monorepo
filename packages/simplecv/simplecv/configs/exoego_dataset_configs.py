@@ -7,13 +7,11 @@ import tyro
 from simplecv.data.exoego.assembly101 import Assembly101Config
 from simplecv.data.exoego.base_exoego import BaseExoEgoDatasetConfig
 from simplecv.data.exoego.hocap import HocapConfig
-from simplecv.data.exoego.robocap import RobocapConfig
 
 # ───────────────────── registry → union ─────────────────── #
 dataset_defaults = {
     "assembly101": Assembly101Config(),
     "hocap": HocapConfig(),
-    "robocap": RobocapConfig(),
 }
 
 

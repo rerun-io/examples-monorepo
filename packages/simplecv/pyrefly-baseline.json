@@ -397,18 +397,6 @@
       "severity": "error"
     },
     {
-      "line": 208,
-      "column": 9,
-      "stop_line": 208,
-      "stop_column": 30,
-      "path": "simplecv/data/ego/robocap_ego.py",
-      "code": -2,
-      "name": "bad-override",
-      "description": "Class member `RobocapEgoSequence.align_cams_and_videos` overrides parent class `BaseEgoSequence` in an inconsistent manner\n  `RobocapEgoSequence.align_cams_and_videos` has type `(self: RobocapEgoSequence, video_path_list: list[Path], ego_cam_dict: dict[str, list[CameraParam]]) -> tuple[dict[str, list[CameraParam]], dict[str, Path]]`, which is not assignable to `[CamNameType: str](self: RobocapEgoSequence, video_path_list: list[Path], ego_cam_dict: dict[CamNameType, list[CameraParam]]) -> tuple[dict[CamNameType, list[CameraParam]], dict[CamNameType, Path]]`, the type of `BaseEgoSequence.align_cams_and_videos`\n  Signature mismatch:\n  ...dict: dict[CamNameType, list[CameraParam]]) -> tuple[dict[CamNameType, list[CameraParam]], dict[CamNameType, Path]]: ...\n                ^^^^^^^^^^^ parameters                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ return type\n  ...dict: dict[str, list[CameraParam]]) -> tuple[dict[str, list[CameraParam]], dict[str, Path]]: ...\n                ^^^ parameters                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ return type",
-      "concise_description": "Class member `RobocapEgoSequence.align_cams_and_videos` overrides parent class `BaseEgoSequence` in an inconsistent manner",
-      "severity": "error"
-    },
-    {
       "line": 90,
       "column": 9,
       "stop_line": 90,

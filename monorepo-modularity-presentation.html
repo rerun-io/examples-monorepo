@@ -1029,13 +1029,6 @@
                   <td>CLI, app, kernel tests</td>
                   <td>Has stronger tests. Naming differs from <code>gradio_ui</code>, and native build steps need isolated responsibility.</td>
                 </tr>
-                <tr data-kind="pipeline" data-text="robocap-slam visual odometry slam multicamera cli">
-                  <td><code>robocap-slam</code></td>
-                  <td>Multicamera visual odometry and SLAM</td>
-                  <td>Flat package: <code>robocap_slam/</code></td>
-                  <td>CLIs only</td>
-                  <td>Good example of typed tyro command structure without Gradio pressure.</td>
-                </tr>
                 <tr data-kind="data" data-text="slam-evals catalog ingest benchmark rerun cli">
                   <td><code>slam-evals</code></td>
                   <td>VSLAM ingest and Rerun catalog serving</td>
@@ -2063,7 +2056,7 @@
                 </tr>
                 <tr>
                   <td>SfM, visual odometry, and SLAM</td>
-                  <td><code>pysfm</code>, <code>robocap-slam</code>, <code>dpvo</code>, <code>mast3r-slam</code>, <code>slam-evals</code></td>
+                  <td><code>pysfm</code>, <code>dpvo</code>, <code>mast3r-slam</code>, <code>slam-evals</code></td>
                   <td>Trajectory, reconstruction, keyframe, or RRD layer artifact</td>
                   <td>Workflow/model packages plus eval package</td>
                   <td>These are workflows more than single model calls; app boundaries matter.</td>
@@ -2189,7 +2182,7 @@
             </article>
             <article class="capability-item">
               <h3>SLAM</h3>
-              <p><code>dpvo</code>, <code>mast3r-slam</code>, <code>robocap-slam</code>: stateful runtimes.</p>
+              <p><code>dpvo</code>, <code>mast3r-slam</code>: stateful runtimes.</p>
               <span class="tag blue">explicit classes</span>
             </article>
             <article class="capability-item">
@@ -2534,23 +2527,6 @@
               </dl>
             </article>
 
-            <article class="model-card">
-              <div class="model-title-row">
-                <h3>Robocap cuVSLAM</h3>
-                <span class="tag blue">vendor runtime node</span>
-              </div>
-              <p>NVIDIA <code>cuvslam.Tracker</code>, odometry/SLAM configs, pose graph, loop closures, landmarks, and Robocap fisheye rig adapter.</p>
-              <dl>
-                <dt>Current</dt>
-                <dd><code>robocap_slam</code> with odometry and SLAM CLIs.</dd>
-                <dt>Home</dt>
-                <dd>Vendor tracker wrapper in <code>robocap-slam</code>; rig/data adapters stay separate from the tracker runtime.</dd>
-                <dt>Surface</dt>
-                <dd>Odometry CLI and full SLAM CLI are workflows over the same wrapper.</dd>
-                <dt>Tests</dt>
-                <dd>Config mapping, rig calibration loading, trajectory artifact schema, vendor availability skip behavior.</dd>
-              </dl>
-            </article>
 
             <article class="model-card">
               <div class="model-title-row">
@@ -2834,7 +2810,7 @@ result = node.predict(image)</code></pre>
                       </tr>
                       <tr>
                         <td><code>SLAM</code></td>
-                        <td><code>DpvoSlamNode(config)</code>, <code>Mast3rSlamNode(config)</code>, <code>CuvslamNode(config)</code></td>
+                        <td><code>DpvoSlamNode(config)</code>, <code>Mast3rSlamNode(config)</code></td>
                         <td>Catalog only documents datasets, required assets, output artifacts, and Pixi tasks.</td>
                       </tr>
                     </tbody>

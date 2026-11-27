@@ -80,7 +80,7 @@ CAMERA_TO_IMU_OFFSET_NS: int = 14_902_432
 """Legacy Basalt correction, matching the median of Cap A's four coverage-camera
 factory offsets. Not an independently validated offset for every camera/device."""
 IMAGE_PLANE_DISTANCE: float = 0.025
-"""Frustum length in metres, matching ``RobocapEgoSequence.image_plane_distance``."""
+"""Frustum length in metres."""
 RIG: int = 0
 """RoboCap is one rig; the whole device is ``rig_00``."""
 RIG_REFERENCE: str = "imu_00"
@@ -99,7 +99,7 @@ MESH_RELATIVE_PATH: str = "robocap-mesh/3DModel.glb"
 """Cap scan location under the corpus root; the mesh is optional (skipped when unreadable)."""
 MESH_TRANSLATION: list[float] = [0.0, -0.15, 0.025]
 """Hand-tuned alignment of the Y-up photogrammetry scan into the dev0 IMU (rig) frame,
-carried over from robocap-slam's visualization; eyeballed, not a CAD extrinsic."""
+eyeballed, not a CAD extrinsic."""
 MESH_MAT3X3: list[list[float]] = [
     [0.17364818, 0.0, 0.98480775],
     [-0.98480775, 0.0, 0.17364818],

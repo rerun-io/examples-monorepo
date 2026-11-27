@@ -85,7 +85,6 @@ removes that worktree and its `.pixi` directory automatically.
 | [prompt-da](packages/prompt-da/) | Prompt Depth Anything depth completion for Polycam captures and ARKitScenes catalog segments. |
 | [pysfm](packages/pysfm/) | COLMAP/pycolmap structure-from-motion with Rerun visualization. |
 | [pyvrs-viewer](packages/pyvrs-viewer/) | VRS-to-Rerun conversion with compressed video and sensor streams. |
-| [robocap-slam](packages/robocap-slam/) | Multicamera visual odometry and SLAM using NVIDIA cuVSLAM. |
 | [sam2-streaming](packages/sam2-streaming/) | Vendored, inference-only SAM2 fork with frame streaming and bounded-memory banks. |
 | [sam3](packages/sam3/) | Text-conditioned SAM3 image and video segmentation with Rerun. |
 | [simplecv](packages/simplecv/) | Shared Python utilities for datasets, geometry, video, and Rerun logging. |
@@ -107,10 +106,10 @@ environments or demo tasks; their role is described in the second column.
   `deadcode`, and `tests` tasks:
 
   ```bash
-  pixi run -e robocap-slam-dev --frozen lint
-  pixi run -e robocap-slam-dev --frozen typecheck
-  pixi run -e robocap-slam-dev --frozen deadcode
-  pixi run -e robocap-slam-dev --frozen tests
+  pixi run -e slam-rs-dev --frozen lint
+  pixi run -e slam-rs-dev --frozen typecheck
+  pixi run -e slam-rs-dev --frozen deadcode
+  pixi run -e slam-rs-dev --frozen tests
   ```
 
 - Prefer `pixi run --frozen` and `pixi install --frozen` while dependencies are
