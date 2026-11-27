@@ -178,11 +178,13 @@ def read_asog(path: Path) -> AsogFile:
     return parse_asog(path.read_bytes(), str(path))
 
 
-def decode_streams(asog: AsogFile) -> dict[str, Int64[ndarray, "_ _"]]:
-    """Every stream as `[count, channels]` integers (inflate, byte planes, un-zigzag, running sum)."""
+def decode_streams(asog: AsogFile, names: frozenset[str] | None = None) -> dict[str, Int64[ndarray, "_ _"]]:
+    """Every stream (or only `names`) as `[count, channels]` integers (inflate, byte planes, un-zigzag, running sum)."""
     payload_offset: int = struct.unpack("<Q", asog.data[32:40])[0]
     out: dict[str, Int64[ndarray, "_ _"]] = {}
     for s in asog.manifest.streams:
+        if names is not None and s.name not in names:
+            continue
         start: int = payload_offset + s.byte_offset
         raw: bytes = zlib.decompress(asog.data[start : start + s.byte_length])
         if len(raw) != s.count * s.channels * s.planes:
@@ -226,7 +228,7 @@ def decode_sh(asog: AsogFile) -> Float64[ndarray, "n c 3"]:
     m: AsogManifest = asog.manifest
     if m.sh_n is None:
         return np.zeros((m.count, 0, 3))
-    s: dict[str, Int64[ndarray, "_ _"]] = decode_streams(asog)
+    s: dict[str, Int64[ndarray, "_ _"]] = decode_streams(asog, frozenset({"shlabels", "shpalette"}))
     labels: Int64[ndarray, " n"] = s["shlabels"][:, 0]
     if (labels >= m.sh_n.count).any():
         raise ValueError(f"shlabels: label {int(labels.max())} beyond the {m.sh_n.count}-entry palette")
