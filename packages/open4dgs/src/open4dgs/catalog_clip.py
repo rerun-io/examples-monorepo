@@ -34,9 +34,9 @@ from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
 from simplecv.catalog_calibration import CatalogCameraCalibration, camera_models_from_static_table, read_lens
 from simplecv.catalog_rig_layout import CatalogCamera, CatalogRigLayout, catalog_components, parse_rig_layout
-from simplecv.catalog_video import CatalogVideo, catalog_keyframes, catalog_video_from_table
+from simplecv.catalog_video import CatalogVideo, catalog_video_from_table
 from simplecv.catalog_video_codec import wrap_mp4
-from simplecv.catalog_video_reader import select_decode_device
+from simplecv.catalog_video_reader import StreamIndex, read_video_index, select_decode_device
 from simplecv.rrd_query_utils import first_valid_value
 from simplecv.sensors.camera.vicon_radial import ViconRadialLens
 from simplecv.video_io import bind_cuda_device
@@ -444,22 +444,14 @@ def read_catalog_clip(
         raise ValueError(f"segment {segment_id} has no property:capture:fps")
     fps: float = float(np.asarray(fps_cell).reshape(-1)[0])
 
-    # Keyframe flags of the whole segment (no samples) fix each camera's decode window.
+    # The cameras' keyframe flags (no samples) fix each camera's decode window.
     videos: list[str] = [camera.video_entity for camera in chosen]
-    flag_table: pa.Table = (
-        entry.filter_segments(segment_id)
-        .filter_contents(videos)
-        .reader(index=FRAME_TIMELINE)
-        .select(FRAME_TIMELINE, *[f"{video}:VideoStream:is_keyframe" for video in videos])
-        .to_arrow_table()
-    )
-    timeline: Int64[ndarray, " n"] = flag_table.column(FRAME_TIMELINE).to_numpy().astype(np.int64)
+    streams: tuple[StreamIndex, ...] = read_video_index(entry, segment_id, videos, FRAME_TIMELINE)
+    timeline: Int64[ndarray, " n"] = np.unique(np.concatenate([stream.t_ns for stream in streams]))
     frames: Int64[ndarray, " t"] = select_frame_indices(frame_start, num_frames, frame_step, timeline)
     window_start: int = int(frames.min())
-    for video in videos:
-        keyframe_times: Int64[ndarray, " k"] = timeline[
-            np.asarray(catalog_keyframes(flag_table.column(f"{video}:VideoStream:is_keyframe")), dtype=bool)
-        ]
+    for video, indexed in zip(videos, streams, strict=True):
+        keyframe_times: Int64[ndarray, " k"] = indexed.t_ns[indexed.keyframes]
         before: Int64[ndarray, " k"] = keyframe_times[keyframe_times <= frames.min()]
         if len(before) == 0:
             raise ValueError(f"{video}: no keyframe at or before frame {int(frames.min())}")

@@ -72,11 +72,12 @@ def baseline_s(window: WindowReference, key: str, name: str, served_s: float) ->
 @pytest.mark.parametrize("key", KEYS)
 def test_catalog_links_match_frozen_measurements(key: str, tmp_path: Path, private_catalog) -> None:
     reference = read_sync(FIXTURES / f"{key}.sync.json")
-    with private_catalog([reference], tmp_path, layers=False) as server:
-        inputs = read_episode(open_segment(server.client().get_dataset(DATASET_NAME), f"selfcap__{key}"))
     window = from_json(WindowReference, (FIXTURES / f"{key}.links.json").read_text())
     print("REFERENCE", window.video_start_source, window.search_half_width_source, window.scratch_final_source, flush=True)
-    result = measure_links(inputs, window_s=window.window_s, search_half_width_s=window.search_half_width_s)
+    # The videos are read a chunk at a time while they decode, so the server stays up until the links are measured.
+    with private_catalog([reference], tmp_path, layers=False) as server:
+        inputs = read_episode(open_segment(server.client().get_dataset(DATASET_NAME), f"selfcap__{key}"))
+        result = measure_links(inputs, window_s=window.window_s, search_half_width_s=window.search_half_width_s)
     gyro_offset = (
         None
         if result.left_to_gyro.lag_s is None or result.quest_video_to_gyro.lag_s is None

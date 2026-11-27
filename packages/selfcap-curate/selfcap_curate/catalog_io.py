@@ -111,7 +111,7 @@ class EpisodeInputs:
     pose: SpeedSeries
     """Quest angular speed on the requested catalog clock."""
     videos: tuple[ChunkedVideoDecoder, ...]
-    """OAK left, RGB, Quest right videos, decoded a chunk at a time; a reader each, as links decodes them on three threads."""
+    """OAK left, RGB, Quest right videos over one reader, decoded a chunk at a time."""
     focal_px: tuple[float, ...]
     """Original horizontal focal lengths in video order."""
     width_px: tuple[int, ...]
@@ -166,8 +166,7 @@ def read_episode(
         resolution: Float64[ndarray, "2"] = np.asarray(first_valid_value(calibration[f"{pinhole}:Pinhole:resolution"]), dtype=np.float64).reshape(2)
         focals.append(float(matrix[0, 0]))
         widths.append(int(resolution[0]))
-    device: torch.device = torch.device(select_decode_device())
-    videos: tuple[ChunkedVideoDecoder, ...] = tuple(open_decoders(dataset, segment_id, [entity], timeline, device)[0] for entity in layout.video_entities)
+    videos: tuple[ChunkedVideoDecoder, ...] = open_decoders(dataset, segment_id, layout.video_entities, timeline, torch.device(select_decode_device()))
     axes = rdf_head(quaternions)
     return EpisodeInputs(
         layout,
@@ -217,14 +216,10 @@ def read_catalog_hands(segment: Segment) -> CatalogHands:
 def read_phone_videos(
     segment: Segment, *, timeline: Literal["capture_time", "video_time"] = CAPTURE_TIMELINE
 ) -> dict[str, ChunkedVideoDecoder]:
-    """Index the phone videos on the requested catalog clock; their packets are read a chunk at a time as they decode.
-
-    A reader each: keypoints decodes the phones on threads of their own.
-    """
-    device: torch.device = torch.device(select_decode_device())
-    return {
-        phone: open_decoders(segment.dataset, segment.id, [video_path(rig, 0)], timeline, device)[0] for rig, phone in enumerate(segment.layout.phones)
-    }
+    """Index the phone videos on the requested catalog clock; one reader fetches their packets a chunk at a time as they decode."""
+    entities: list[str] = [video_path(rig, 0) for rig in range(len(segment.layout.phones))]
+    videos = open_decoders(segment.dataset, segment.id, entities, timeline, torch.device(select_decode_device()))
+    return dict(zip(segment.layout.phones, videos, strict=True))
 
 
 def aligned_phone_times(videos_capture: dict[str, ChunkedVideoDecoder], sync: TimeSync) -> dict[str, Int64[ndarray, "n"]]:
