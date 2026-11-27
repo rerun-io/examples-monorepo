@@ -9,7 +9,9 @@ this code follows live in the source fork, pablovela5620/pyCuSFM (branch feat/py
 
 from __future__ import annotations
 
+import ctypes
 import os
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Final
@@ -22,6 +24,14 @@ RESOURCES_DIR: Final[Path] = Path(__file__).resolve().parent / "resources"
 
 DATA_DIR: Final[Path] = PACKAGE_DIR / "data"
 """Gitignored: downloaded datasets, run outputs, and the older home of the model graphs (`MODEL_DIR`)."""
+
+# pycolmap runs ALIKED and LightGlue on conda's ONNX Runtime, and the env also installs PyPI onnxruntime-gpu. Both open
+# libonnxruntime_providers_shared.so with RTLD_GLOBAL and the first one loaded serves every CUDA provider in the process,
+# so after `import onnxruntime` pycolmap's first CUDA session calls into the PyPI runtime and segfaults. Loading conda's
+# bridge first fixes that; onnxruntime's own CUDA provider then cannot run here (colsfm uses only its CPU one).
+if "onnxruntime" in sys.modules:
+    raise ImportError("import colsfm before onnxruntime: pycolmap's CUDA provider needs its own ONNX Runtime bridge loaded first")
+ctypes.CDLL(str(Path(sys.prefix) / "lib" / "libonnxruntime_providers_shared.so"), mode=ctypes.RTLD_GLOBAL)
 
 MODEL_DIR_ENV: Final[str] = "COLSFM_MODEL_DIR"
 """Environment variable that names the model directory outright."""

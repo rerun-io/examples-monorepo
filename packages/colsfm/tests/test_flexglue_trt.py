@@ -9,10 +9,12 @@ import onnx
 import pytest
 from onnx import TensorProto, helper, numpy_helper
 
-ort = pytest.importorskip("onnxruntime", reason="the rewrite is checked against ONNX Runtime's own contrib kernels")
 pytest.importorskip("trtkit", reason="colsfm.flexglue_trt imports trtkit's runtime")
 
 from colsfm.flexglue_trt import _lower_early_stop, _rewrite  # noqa: E402
+
+# After colsfm, whose import claims the ONNX Runtime provider bridge for pycolmap (colsfm/__init__.py).
+ort = pytest.importorskip("onnxruntime", reason="the rewrite is checked against ONNX Runtime's own contrib kernels")
 
 HIDDEN: int = 16
 HEADS: int = 4
