@@ -1369,7 +1369,7 @@ class CatalogStream:
         return self._stop.is_set() or generation != self._generation
 
     def _read_from_catalog(self, info: SegmentInfo) -> SegmentData:
-        """Statics, timeline, video index and packets, on this thread's own client."""
+        """Statics, timeline and video index, on this thread's own client; frame requests fetch the packets."""
         entries: dict[str, DatasetEntry] | None = getattr(self._local, "entries", None)
         if entries is None:
             client: rr.catalog.CatalogClient = rr.catalog.CatalogClient(self.config.catalog_url)
@@ -1381,9 +1381,6 @@ class CatalogStream:
         rig_letterboxes: tuple[CameraRig, tuple[Letterbox, ...]] = read_rig(statics, info, UPRIGHT_TURNS[info.dataset] if self.config.upright else None)
         timeline: HandTimeline = read_hand_timeline(entry, info, statics)
         videos: tuple[ChunkedVideoDecoder, ...] = open_decoders(entry, info.segment_id, [f"{camera}/pinhole/video" for camera in layout.cameras], TIMELINE, self.device)
-        # The fetcher does the I/O, so producers only decode: a training segment (5-30 MB) fits the reader's cache, a longer one is cut by it.
-        for chunk in range(videos[0].reader.num_chunks):
-            videos[0].reader.packets(chunk)
         angles: tuple[float, ...] = camera_angles(statics, info)
         return SegmentData(rig=rig_letterboxes[0], letterboxes=rig_letterboxes[1], timeline=timeline, videos=videos, camera_angles=angles)
 

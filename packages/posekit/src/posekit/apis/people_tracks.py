@@ -329,7 +329,7 @@ def track_segment(
     chunks: list[list[int]] = [tracked[begin : begin + config.decode_chunk] for begin in range(0, len(tracked), config.decode_chunk)]
     # decoding starts here, overlapping the model load
     reader: CatalogVideoReader = CatalogVideoReader(dataset, segment_id, streams, config.timeline)
-    decoded: Iterator[UInt8[Tensor, "s n h w 3"]] = (torch.stack(batches) for batches in PrefetchedChunks(reader, chunks, config.start, end, config.device))
+    decoded: Iterator[UInt8[Tensor, "s n h w 3"]] = (torch.stack(batches) for batches in PrefetchedChunks(reader, chunks, config.device))
     tracker = PeopleTracker(config.track, config.mask, config.device)
     targets: list[str] = [mask_entity(e) for e in entities]
     factor: int = config.mask_downscale

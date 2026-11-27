@@ -247,7 +247,7 @@ def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id
         """The tracked framesets ``decode_chunk`` at a time: the position of the first, their indices, and per frameset the
         lens frames. The next chunk decodes on one thread per lens while the caller computes on this one."""
         nonlocal decode_wait_s
-        prefetched = PrefetchedChunks(CatalogVideoReader(dataset, segment_id, streams, config.timeline), chunks, config.start, end, str(device))
+        prefetched = PrefetchedChunks(CatalogVideoReader(dataset, segment_id, streams, config.timeline), chunks, str(device))
         for position, (chunk, batches) in enumerate(zip(chunks, prefetched, strict=True)):
             yield position * config.decode_chunk, chunk, [[batch[column] for batch in batches] for column in range(len(chunk))]
         decode_wait_s += prefetched.wait_s

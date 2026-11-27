@@ -1,20 +1,17 @@
-import io
 import logging
 import os
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
-import av
 import numpy as np
 import rerun as rr
 import rerun.chunk as rrc
 from jaxtyping import Float32, Float64, Int, Int64
 from numpy import ndarray
-from pyarrow import ChunkedArray, LargeListArray, ListArray, RecordBatch
+from pyarrow import ChunkedArray, RecordBatch
 
 from simplecv.camera_parameters import Fisheye62Parameters, PinholeParameters
 from simplecv.rerun_custom_types import (
@@ -372,66 +369,6 @@ def read_video_stream_from_rrd(
     samples: ChunkedArray = timestamps_and_samples.column(1)
 
     return codec, times, samples
-
-
-def read_h264_samples_from_rrd(rrd_path: str, video_entity: str, timeline: str) -> tuple[ChunkedArray, ChunkedArray]:
-    """Read H.264 ``rr.VideoStream`` samples from an ``.rrd`` recording.
-
-    Thin wrapper around :func:`read_video_stream_from_rrd` that enforces
-    H.264. Kept for back-compat with callers that assume H.264 (e.g.
-    :func:`mux_h264_to_mp4`).
-    """
-    codec, times, samples = read_video_stream_from_rrd(rrd_path, video_entity, timeline)
-    if codec != rr.VideoCodec.H264:
-        raise ValueError(
-            f"Video stream codec is not H.264 at {video_entity} for timeline {timeline}. "
-            f"Got {hex(codec.value)}, but the value for H.264 is {hex(rr.VideoCodec.H264.value)}."
-        )
-    return times, samples
-
-
-def mux_h264_to_mp4(times: ChunkedArray, samples: ChunkedArray, output_path: str) -> None:
-    """Mux H.264 Annex B samples to an mp4 file using PyAV."""
-    # See https://pyav.basswood-io.com/docs/stable/cookbook/basics.html#remuxing
-
-    # Flatten out sample list into a single byte buffer.
-    sample_array = samples.combine_chunks()
-    if isinstance(sample_array, ListArray | LargeListArray):
-        sample_array = sample_array.flatten(recursive=True)
-    buffer = sample_array.buffers()[1]
-    if buffer is None:
-        raise ValueError("Missing H.264 sample buffer.")
-    sample_bytes = io.BytesIO(buffer.to_pybytes())
-
-    # Setup samples as input container.
-    input_container = av.open(sample_bytes, mode="r", format="h264")  # Input is AnnexB H.264 stream.
-    input_stream = input_container.streams.video[0]
-
-    # Setup output container.
-    output_container = av.open(output_path, mode="w")
-    output_stream = output_container.add_stream_from_template(input_stream)
-    # Preserve nanosecond timeline from the recording to avoid fps skew when
-    # remuxing. Without this, ffmpeg/pyav may infer a default time_base that
-    # snaps frames to a different cadence than the recorded timestamps.
-    output_stream.time_base = Fraction(1, 1_000_000_000)
-    if output_stream.codec_context is not None:
-        output_stream.codec_context.time_base = output_stream.time_base
-
-    # Timestamps are made relative to the first timestamp.
-    start_time = times.chunk(0)[0]
-    print(f"Offsetting timestamps with start time: {start_time}")
-
-    # Demux and mux packets.
-    ns_time_base = Fraction(1, 1_000_000_000)
-    for packet, time in zip(input_container.demux(input_stream), times, strict=False):
-        packet.time_base = ns_time_base  # timestamps stored in nanoseconds
-        packet.pts = int(time.value - start_time.value)
-        packet.dts = packet.pts  # dts == pts since there's no B-frames.
-        packet.stream = output_stream
-        output_container.mux(packet)
-
-    input_container.close()
-    output_container.close()
 
 
 def mesh_bounding_geometry(vertices: Float64[ndarray, "n 3"]) -> tuple[Float64[ndarray, "3"], float]:

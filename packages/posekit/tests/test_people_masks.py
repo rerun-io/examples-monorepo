@@ -109,22 +109,6 @@ def test_dilate_masks_on_cuda_matches_opencv_dilation() -> None:
         grown: Bool[ndarray, "n h w"] = dilate_masks(torch.from_numpy(masks).cuda(), radius).cpu().numpy()
         assert np.array_equal(grown, np.stack([dilate_mask(m, radius) for m in masks]))
 
-def test_selection_windows_group_frames_that_share_a_decode_run() -> None:
-    from posekit.ops.people_masks import selection_windows
-
-    keyframes: list[bool] = [i % 4 == 0 for i in range(16)]
-    windows = selection_windows(keyframes, [15, 2, 9, 1, 2])  # unsorted, with a repeat
-    assert [(run.start, run.stop, run.wanted.tolist()) for run in windows] == [(0, 3, [1, 2]), (8, 10, [9]), (12, 16, [15])]
-
-
-def test_selection_windows_rejects_out_of_range_and_missing_keyframe() -> None:
-    from posekit.ops.people_masks import selection_windows
-
-    with pytest.raises(ValueError, match="out of range"):
-        selection_windows([True, False], [2])
-    with pytest.raises(ValueError, match="keyframe"):
-        selection_windows([False, True], [0])
-
 
 def test_overlay_tints_masked_pixels_red_only() -> None:
     from posekit.ops.people_masks import overlay_mask

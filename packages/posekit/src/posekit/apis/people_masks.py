@@ -20,14 +20,13 @@ import torch
 from einops import rearrange
 from jaxtyping import Bool, Int64, UInt8
 from numpy import ndarray
-from simplecv.catalog_video_codec import wrap_mp4
-from simplecv.catalog_video_reader import MP4_FPS, CatalogVideoReader, StreamIndex, StreamPackets, read_video_index
+from simplecv.catalog_video_reader import ChunkedVideoDecoder, open_decoders
 from simplecv.rerun_log_utils import RerunTyroConfig
 from torch import Tensor
 
 from posekit.models.base import SegmentationPrompts
 from posekit.models.sam3_segmenter import Sam3Segmenter, Sam3SegmenterConfig
-from posekit.ops.people_masks import TileWindow, dilate_mask, overlay_mask, selection_windows, tile_to_image, tile_windows, union_instances
+from posekit.ops.people_masks import TileWindow, dilate_mask, overlay_mask, tile_to_image, tile_windows, union_instances
 from posekit.predictions import BoxDetections
 
 PERSON_CLASS_ID: int = 1
@@ -222,25 +221,20 @@ def write_overlay(overlay_dir: Path, entity: str, index: int, rgb: UInt8[ndarray
     path.chmod(0o644)
 
 
-def decode_selected(reader: CatalogVideoReader, stream: int, indices: list[int], device: str) -> tuple[list[int], UInt8[Tensor, "n h w 3"]]:
-    """NVDEC-decode the selected packets of one stream of ``reader``, one decoder per GOP (a reader chunk holds whole GOPs).
+def decode_selected(decoder: ChunkedVideoDecoder, indices: list[int]) -> tuple[list[int], UInt8[Tensor, "n h w 3"]]:
+    """Decode the selected packets of one stream; reuse the decoder across calls, so a chunk spanning batches decodes once.
 
     Returns:
-        The decoded packet indices (ascending) and their RGB frames.
-    """
-    from torchcodec.decoders import VideoDecoder
+        The decoded packet indices (ascending, without repeats) and their RGB frames.
 
-    index: StreamIndex = reader.streams[stream]
-    decoded: list[int] = []
-    frames: list[UInt8[Tensor, "m h w 3"]] = []
-    for run in selection_windows(index.keyframes.tolist(), indices):
-        packets: StreamPackets = reader.packets(reader.chunk_of(stream, run.start)).streams[stream]
-        lo, hi = run.start - packets.first, run.stop - packets.first
-        decoder = VideoDecoder(wrap_mp4(packets.samples[lo:hi], packets.keyframes[lo:hi], MP4_FPS, codec=index.codec), device=device, seek_mode="exact")
-        batch: UInt8[Tensor, "m 3 h w"] = decoder.get_frames_at((run.wanted - run.start).tolist()).data
-        frames.append(rearrange(batch, "m c h w -> m h w c").contiguous())
-        decoded.extend(run.wanted.tolist())
-    return decoded, torch.cat(frames, dim=0)
+    Raises:
+        ValueError: If a selected packet precedes the stream's first keyframe: it does not decode.
+    """
+    wanted: list[int] = sorted(set(indices))
+    if wanted and (not decoder.index.keyframes.any() or wanted[0] < int(np.argmax(decoder.index.keyframes))):
+        raise ValueError(f"{decoder.index.entity}: no keyframe at or before packet {wanted[0]}")
+    frames: UInt8[Tensor, "n 3 h w"] = decoder.get_frames_at(wanted)
+    return wanted, rearrange(frames, "n c h w -> n h w c").contiguous()
 
 
 def main(config: PeopleMasksConfig) -> None:
@@ -273,14 +267,12 @@ def main(config: PeopleMasksConfig) -> None:
         for entity in entities:
             target: str = mask_entity(entity)
             rr.log(target, PEOPLE_MASK_ANNOTATION, static=True)
-            dataset = client.get_dataset(sources[entity].dataset)
-            reader = CatalogVideoReader(dataset, segment_id, read_video_index(dataset, segment_id, [entity], config.timeline), config.timeline)
-            n_packets: int = len(reader.streams[0].times)
-            selected: list[int] = list(config.frames) if config.frames else list(range(0, n_packets, config.stride))
+            decoder: ChunkedVideoDecoder = open_decoders(
+                client.get_dataset(sources[entity].dataset), segment_id, [entity], config.timeline, torch.device(config.device)
+            )[0]
+            selected: list[int] = list(config.frames) if config.frames else list(range(0, len(decoder), config.stride))
             for begin in range(0, len(selected), config.mask.batch_size):
-                decoded: tuple[list[int], UInt8[Tensor, "n h w 3"]] = decode_selected(
-                    reader, 0, selected[begin : begin + config.mask.batch_size], config.device
-                )
+                decoded: tuple[list[int], UInt8[Tensor, "n h w 3"]] = decode_selected(decoder, selected[begin : begin + config.mask.batch_size])
                 torch.cuda.synchronize()
                 start: float = time.perf_counter()
                 masks: Bool[ndarray, "n h w"] = masker(decoded[1])
@@ -289,12 +281,13 @@ def main(config: PeopleMasksConfig) -> None:
                 n_images += len(decoded[0])
                 frames_cpu: UInt8[ndarray, "n h w 3"] | None = decoded[1].cpu().numpy() if config.overlay_dir is not None else None
                 for row, index in enumerate(decoded[0]):
-                    set_frame_time(config.timeline, reader.streams[0].times[index])
+                    set_frame_time(config.timeline, decoder.index.times[index])
                     rr.log(target, rr.SegmentationImage(masks[row].astype(np.uint8) * PERSON_CLASS_ID))
                     if frames_cpu is not None and config.overlay_dir is not None:
                         write_overlay(config.overlay_dir, entity, index, frames_cpu[row], masks[row])
                 person_px: Int64[ndarray, "n"] = masks.sum(axis=(1, 2)).astype(np.int64)
                 print(f"{entity} frames {decoded[0]}: person px {person_px.tolist()}")
+            decoder.close()
     recording: rr.RecordingStream | None = rr.get_data_recording()
     assert recording is not None
     recording.flush()

@@ -16,7 +16,7 @@ from datafusion import col
 from jaxtyping import Float32, Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry, DatasetSelection, OnDuplicateSegmentLayer, RegistrationOperation
-from simplecv.rerun_dataloader import SegmentNvdecDecoder
+from simplecv.catalog_video_reader import ChunkedVideoDecoder, open_decoders
 from torch import Tensor
 
 # Beartype runs only under pytest (pytest-beartype imports it); its violations must escape broad handlers then.
@@ -239,18 +239,14 @@ class SegmentReader:
         Yields:
             uint8 RGB frames shaped ``3 h w`` in requested timestamp order.
         """
-        decoder: SegmentNvdecDecoder = SegmentNvdecDecoder(self.dataset, entity_path, TIMELINE, device)
-        timestamps_verified: bool = False
-        for timestamp in timestamps_n:
-            frame_chw: UInt8[Tensor, "3 h w"] | None = decoder.decode_at(timestamp, self.video_id)
-            if frame_chw is None:
-                raise RuntimeError(f"{entity_path} decoder returned no frame at requested timestamp {timestamp}")
-            if not timestamps_verified:
-                matched_indices_n: Int64[ndarray, "n"] = match_exact_timestamps(decoder.times, timestamps_n)
-                if len(np.unique(matched_indices_n)) != len(matched_indices_n):
-                    raise RuntimeError(f"requested {entity_path} timestamps do not map one-to-one onto video packets")
-                timestamps_verified = True
-            yield frame_chw
+        if len(timestamps_n) == 0:
+            return
+        decoder: ChunkedVideoDecoder = open_decoders(self.dataset, self.video_id, [entity_path], TIMELINE, device)[0]
+        matched_indices_n: Int64[ndarray, "n"] = match_exact_timestamps(decoder.index.times, timestamps_n)
+        if len(np.unique(matched_indices_n)) != len(matched_indices_n):
+            raise RuntimeError(f"requested {entity_path} timestamps do not map one-to-one onto video packets")
+        for index in matched_indices_n.tolist():
+            yield decoder.get_frame_at(index)
 
 
 def register_layer(dataset: DatasetEntry, rrd_path: Path, layer_name: str) -> None:

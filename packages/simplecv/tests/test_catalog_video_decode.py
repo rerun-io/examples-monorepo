@@ -11,9 +11,8 @@ import torch
 pytest.importorskip("rerun.catalog", reason="rerun.catalog is required by this test module")
 pytest.importorskip("torchcodec", reason="torchcodec is required by this test module")
 
-from simplecv import catalog_video_decode  # noqa: E402
 from simplecv.catalog_video_codec import wrap_mp4  # noqa: E402
-from simplecv.catalog_video_decode import PrefetchedChunks, StreamDecoder  # noqa: E402
+from simplecv.catalog_video_decode import PrefetchedChunks  # noqa: E402
 from simplecv.catalog_video_reader import CatalogVideoReader, VideoChunk, read_video_index, select_decode_device  # noqa: E402
 from simplecv.testing import encode_h264, whole_column  # noqa: E402
 
@@ -65,7 +64,7 @@ def test_prefetched_batches_are_the_whole_stream_frames_on_the_selected_device(s
     device: str = select_decode_device()
     wanted: list[int] = list(range(4, 86, 3))
     chunks: list[list[int]] = [wanted[begin : begin + 7] for begin in range(0, len(wanted), 7)]
-    prefetched = PrefetchedChunks(_reader(server), chunks, 4, 87, device)
+    prefetched = PrefetchedChunks(_reader(server), chunks, device)
     batches: list[list[torch.Tensor]] = list(prefetched)
     assert len(batches) == len(chunks) and prefetched.wait_s >= 0.0
     for chunk, per_stream in zip(chunks, batches, strict=True):
@@ -78,22 +77,17 @@ def test_nvdec_decodes_whenever_cuda_is_available(server: rr.server.Server, refe
     if not torch.cuda.is_available():
         pytest.skip("no CUDA device: the NVDEC path cannot be checked here")
     assert select_decode_device() == "cuda"
-    wanted: list[int] = [5, 6, 14, 15, 16, 40, 59]
-    frames: torch.Tensor = StreamDecoder(_reader(server), 1, 5, 60, "cuda").frames(wanted)
-    assert frames.device.type == "cuda"
-    assert torch.equal(frames.cpu(), reference[1][wanted])
+    chunks: list[list[int]] = [[5, 6, 14, 15, 16], [40, 59]]
+    batches: list[list[torch.Tensor]] = list(PrefetchedChunks(_reader(server), chunks, "cuda"))
+    for chunk, per_stream in zip(chunks, batches, strict=True):
+        for frames, whole in zip(per_stream, reference, strict=True):
+            assert frames.device.type == "cuda"
+            assert torch.equal(frames.cpu(), whole[chunk])
 
 
-def test_the_decoders_read_no_further_than_the_last_wanted_frame(server: rr.server.Server, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A caller passes the end of the clip while its batches stop early (a sample pack of a long clip): only the chunks up
-    to the last wanted frame are fetched, and none is muxed past it."""
-    muxed: list[tuple[int, int]] = []
-
-    def counted_mux(samples: list[np.ndarray], keyframes: list[bool], fps: int, codec: str) -> bytes:
-        muxed.append((len(samples), sum(keyframes)))
-        return wrap_mp4(samples, keyframes, fps, codec=codec)
-
-    monkeypatch.setattr(catalog_video_decode, "wrap_mp4", counted_mux)
+def test_the_decoders_fetch_only_the_chunks_that_hold_wanted_frames(server: rr.server.Server, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sparse batches (a sample pack of a long clip) fetch the chunks that hold their frames, each once, none between or
+    past them."""
     reader: CatalogVideoReader = _reader(server)
     fetched: list[int] = []
     fetch = reader.fetch
@@ -103,13 +97,9 @@ def test_the_decoders_read_no_further_than_the_last_wanted_frame(server: rr.serv
         return fetch(chunk)
 
     monkeypatch.setattr(reader, "fetch", counted_fetch)
-    assert reader.num_chunks >= 6
-    batches = list(PrefetchedChunks(reader, [[10, 20], [30]], 10, 1000, select_decode_device()))
+    chunks: list[list[int]] = [[10, 12], [80]]
+    holding: set[int] = {reader.chunk_of(stream, index) for stream in range(2) for chunk in chunks for index in chunk}
+    assert reader.num_chunks >= 6 and len(holding) < max(holding) - min(holding) + 1, "the batches must skip chunks"
+    batches = list(PrefetchedChunks(reader, chunks, select_decode_device()))
     assert [[len(frames) for frames in per_stream] for per_stream in batches] == [[2, 2], [1, 1]]
-    assert fetched == list(range(max(reader.chunk_of(stream, 30) for stream in range(2)) + 1))
-    # Each mux opens on the keyframe at or before its first frame and ends at the chunk's end or at frame 30.
-    assert all(count <= 15 + 10 for count, _ in muxed)
-
-    muxed.clear()
-    assert len(StreamDecoder(reader, 0, 10, 13, "cpu").frames([10, 11, 12])) == 3
-    assert muxed == [(3, 1)], "a caller's earlier end bounds the mux: keyframe 10 up to frame 12"
+    assert sorted(fetched) == sorted(holding)
