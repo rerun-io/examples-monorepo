@@ -9,7 +9,7 @@ from jaxtyping import Bool, Float, Float32, Float64, Int, UInt8
 from numpy import ndarray
 from posekit.models import PersonDetector, RtmPoseConfig, TopDownPose2d, YoloxDetectorConfig
 from posekit.predictions import BoxDetections, Keypoints2d
-from posekit.runtimes import TensorRtBackendConfig
+from posekit.runtimes import OnnxBackendConfig, TensorRtBackendConfig
 from posekit.zoo import PRESETS, PosePreset
 from simplecv.camera_parameters import PinholeParameters
 from simplecv.data.skeleton.coco133_layers import COCO133_PREDICTION_LAYER_TO_PATH, Coco133AnnotationLayer
@@ -121,6 +121,24 @@ class MultiviewBodyTrackerConfig:
     """Enables additional debug logging when True."""
 
 
+def posekit_model_configs(config: MultiviewBodyTrackerConfig) -> tuple[YoloxDetectorConfig, RtmPoseConfig]:
+    """The mode's detector and pose configs on the tracker's backend.
+
+    posekit's own default is ``auto``, so ``onnxruntime`` is set here as explicitly as ``tensorrt``.
+
+    Args:
+        config: The tracker options.
+
+    Returns:
+        The detector and the pose config.
+    """
+    preset: PosePreset = MODE_PRESETS[config.mode]
+    # All mv-api mode presets pair the ONNX-artifact models, whose configs carry the swappable backend field.
+    assert isinstance(preset.detector, YoloxDetectorConfig) and isinstance(preset.pose, RtmPoseConfig)
+    backend: OnnxBackendConfig | TensorRtBackendConfig = TensorRtBackendConfig() if config.backend == "tensorrt" else OnnxBackendConfig()
+    return replace(preset.detector, backend=backend), replace(preset.pose, backend=backend)
+
+
 class MultiviewBodyTracker:
     def __init__(
         self,
@@ -144,16 +162,9 @@ class MultiviewBodyTracker:
                 Sapiens2, a TensorRT-backed RTMW, ...).
         """
         self.config: MultiviewBodyTrackerConfig = config
-        preset: PosePreset = MODE_PRESETS[config.mode]
-        det_config = preset.detector
-        pose_config = preset.pose
-        # All mv-api mode presets pair the ONNX-artifact models, whose configs
-        # carry the swappable onnx/tensorrt backend field.
-        assert isinstance(det_config, YoloxDetectorConfig) and isinstance(pose_config, RtmPoseConfig)
-        if config.backend == "tensorrt":
-            trt_backend = TensorRtBackendConfig()
-            det_config = replace(det_config, backend=trt_backend)
-            pose_config = replace(pose_config, backend=trt_backend)
+        det_config: YoloxDetectorConfig
+        pose_config: RtmPoseConfig
+        det_config, pose_config = posekit_model_configs(config)
         self.det_model: PersonDetector = detector if detector is not None else det_config.setup()
         self.pose_model: TopDownPose2d = pose if pose is not None else pose_config.setup()
         self.num_keypoints: int = self.pose_model.skeleton.num_keypoints

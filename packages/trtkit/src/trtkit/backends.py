@@ -3,20 +3,27 @@
 Backend choice is a config value, not a code path. Models accept a
 ``BackendConfig`` (a tyro subcommand union) and build their runtime through
 :func:`create_runtime_from_onnx` — ONNX is the interchange format, so the same
-artifact feeds both the ONNX Runtime CUDA session and the TensorRT engine
-builder. The torch backend wraps a model-provided ``nn.Module`` directly and is
-offered by model families that ship PyTorch weights.
+artifact feeds both the ONNX Runtime session and the TensorRT engine builder.
+The torch backend wraps a model-provided ``nn.Module`` directly and is offered
+by model families that ship PyTorch weights.
+
+``auto`` (:class:`AutoBackendConfig`) is the default of the ONNX-artifact
+models: TensorRT where an NVIDIA GPU and the TensorRT bindings are present,
+ONNX Runtime on CUDA where only torch has CUDA, ONNX Runtime on the CPU
+elsewhere (:func:`resolve_backend`). :func:`create_runtime_from_onnx` resolves
+it; a model that reads its backend before then resolves it first.
 """
 
+import importlib.util
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, TypeAlias
 
 import torch
 import tyro
 
 from trtkit.base import TensorRuntime
-from trtkit.onnx_cuda import OnnxCudaRuntime
+from trtkit.onnx_cuda import OnnxRuntime, OrtDevice
 from trtkit.tensorrt_runtime import TensorRtRuntime
 from trtkit.trt_builder import DEFAULT_TRT_CACHE_DIR, TrtBuildConfig, ensure_engine
 
@@ -41,10 +48,12 @@ class TorchBackendConfig:
 
 @dataclass(frozen=True, slots=True)
 class OnnxBackendConfig:
-    """Run the model's ONNX artifact through ONNX Runtime's CUDA provider (IOBinding, GPU-resident)."""
+    """Run the model's ONNX artifact through ONNX Runtime (IOBinding onto torch tensors)."""
 
+    device: OrtDevice = "cuda"
+    """``cuda`` (GPU-resident; not on the GB10, whose conda-forge build has no kernels) or ``cpu``."""
     device_id: int = 0
-    """CUDA device ordinal."""
+    """CUDA device ordinal; unused on the CPU."""
     max_batch_size: int = 32
     """Batch cap for dynamic-batch graphs; static graphs use their baked batch."""
 
@@ -68,31 +77,68 @@ class TensorRtBackendConfig:
     miscompiled fusions; see :class:`trtkit.trt_builder.TrtBuildConfig`)."""
 
 
+@dataclass(frozen=True, slots=True)
+class AutoBackendConfig:
+    """TensorRT on an NVIDIA GPU with the TensorRT bindings, else ONNX Runtime: on CUDA where torch has it, else on the CPU."""
+
+    max_batch_size: int = 32
+    """Largest batch a single call may submit, on either backend."""
+    opt_batch_size: int = 8
+    """Batch size TensorRT tunes kernels for; unused on ONNX Runtime."""
+
+
+def tensorrt_available() -> bool:
+    """Whether this process can build and run TensorRT engines: a CUDA device and the ``tensorrt`` bindings."""
+    return torch.cuda.is_available() and importlib.util.find_spec("tensorrt") is not None
+
+
+ResolvedBackendConfig: TypeAlias = OnnxBackendConfig | TensorRtBackendConfig
+"""What an ONNX-artifact model runs on once ``auto`` is resolved."""
+
+
+def resolve_backend(backend: "OnnxOrTrtBackendConfig") -> ResolvedBackendConfig:
+    """The concrete backend ``backend`` stands for: :class:`AutoBackendConfig` resolved here, any other one as given.
+
+    Args:
+        backend: A backend config.
+
+    Returns:
+        ``backend`` itself, or what ``auto`` is on this host: TensorRT; else, where torch has CUDA (the models then feed
+        CUDA frames), ONNX Runtime on CUDA; else ONNX Runtime on the CPU.
+    """
+    if not isinstance(backend, AutoBackendConfig):
+        return backend
+    if tensorrt_available():
+        return TensorRtBackendConfig(max_batch_size=backend.max_batch_size, opt_batch_size=backend.opt_batch_size)
+    return OnnxBackendConfig(device="cuda" if torch.cuda.is_available() else "cpu", max_batch_size=backend.max_batch_size)
+
+
 if TYPE_CHECKING:
     BackendConfig = TorchBackendConfig | OnnxBackendConfig | TensorRtBackendConfig
-    OnnxOrTrtBackendConfig = OnnxBackendConfig | TensorRtBackendConfig
+    OnnxOrTrtBackendConfig = AutoBackendConfig | OnnxBackendConfig | TensorRtBackendConfig
 else:
     BackendConfig = tyro.extras.subcommand_type_from_defaults(
         {"torch": TorchBackendConfig(), "onnx": OnnxBackendConfig(), "tensorrt": TensorRtBackendConfig()}, prefix_names=False
     )
     OnnxOrTrtBackendConfig = tyro.extras.subcommand_type_from_defaults(
-        {"onnx": OnnxBackendConfig(), "tensorrt": TensorRtBackendConfig()}, prefix_names=False
+        {"auto": AutoBackendConfig(), "onnx": OnnxBackendConfig(), "tensorrt": TensorRtBackendConfig()}, prefix_names=False
     )
 
 
-def create_runtime_from_onnx(onnx_path: Path, backend: "OnnxBackendConfig | TensorRtBackendConfig") -> TensorRuntime:
+def create_runtime_from_onnx(onnx_path: Path, backend: "OnnxOrTrtBackendConfig") -> TensorRuntime:
     """Create an ONNX Runtime or TensorRT runtime from one ONNX interchange file.
 
     Args:
         onnx_path: The model's ONNX artifact (exported once from torch, or
             downloaded from a model zoo).
-        backend: Which accelerated backend to run it on.
+        backend: Which accelerated backend to run it on; ``auto`` is resolved here.
 
     Returns:
         A ready runtime satisfying the trtkit tensor-function contract.
     """
+    backend = resolve_backend(backend)
     if isinstance(backend, OnnxBackendConfig):
-        return OnnxCudaRuntime(onnx_path, device_id=backend.device_id, max_batch_size=backend.max_batch_size)
+        return OnnxRuntime(onnx_path, device=backend.device, device_id=backend.device_id, max_batch_size=backend.max_batch_size)
     from trtkit.onnx_graph import onnx_static_batch_size
 
     # Graphs exported with a fixed batch dictate the engine batch themselves;

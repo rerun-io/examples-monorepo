@@ -28,7 +28,7 @@ from posekit.ops.letterbox import letterbox_frames
 from posekit.ops.yolox import decode_yolox_head_outputs
 from posekit.predictions import BoxDetections
 from posekit.runtimes import (
-    OnnxBackendConfig,
+    AutoBackendConfig,
     OnnxOrTrtBackendConfig,
     TensorRuntime,
     create_runtime_from_onnx,
@@ -50,7 +50,7 @@ class YoloxDetectorConfig:
 
     variant: YoloxVariant = "yolox-m-humanart"
     """Model size/checkpoint to run."""
-    backend: OnnxOrTrtBackendConfig = field(default_factory=OnnxBackendConfig)
+    backend: OnnxOrTrtBackendConfig = field(default_factory=AutoBackendConfig)
     """Accelerated backend running the detector graph."""
     score_thr: float = 0.5
     """Minimum person score."""

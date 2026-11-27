@@ -1246,6 +1246,12 @@ cmd = "python tools/demos/video_pose.py"
 cwd = "packages/posekit"
 description = "Run the GPU video 2D pose demo (detector + top-down pose over torch/onnx/tensorrt backends)"
 
+# Run once per machine (and after a TensorRT or ONNX graph change) so the first real run does not build engines.
+[feature.posekit.tasks.posekit-warm-engines]
+cmd = "python tools/apps/warm_engines.py"
+cwd = "packages/posekit"
+description = "Build this machine's TensorRT engines for every YOLOX and RTMPose/RTMW variant, as the auto backend loads them"
+
 [feature.posekit.tasks.posekit-sapiens-calibrate]
 cmd = "python tools/apps/sapiens_calibrate.py"
 cwd = "packages/posekit"

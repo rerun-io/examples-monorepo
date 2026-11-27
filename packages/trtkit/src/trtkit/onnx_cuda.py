@@ -1,16 +1,18 @@
-"""ONNX Runtime CUDA backend with IOBinding onto torch tensor memory.
+"""ONNX Runtime backend (CUDA or CPU provider) with IOBinding onto torch tensor memory.
 
-Inputs and outputs are bound directly to torch CUDA tensor ``data_ptr``s so no
+Inputs and outputs are bound directly to torch tensor ``data_ptr``s so no
 numpy/host copies happen anywhere in the hot path — the gap that makes the
-stock rtmlib ONNX path slow. When available, the session is attached to the
-current torch CUDA stream (``user_compute_stream``) so execution is fully
-stream-ordered with surrounding torch preprocessing/decode kernels.
+stock rtmlib ONNX path slow. On CUDA, the session is attached to a torch
+stream (``user_compute_stream``) when available so execution is
+stream-ordered with surrounding torch preprocessing/decode kernels. On the
+CPU, the same contract runs on CPU tensors: engine-free tests and hosts
+without NVIDIA run the very artifact a TensorRT engine is built from.
 """
 
 import functools
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, TypeAlias
 
 import numpy as np
 import torch
@@ -88,15 +90,50 @@ def require_cuda_kernels(device_id: int) -> None:
         ) from error
 
 
-class OnnxCudaRuntime:
-    """GPU-resident ONNX Runtime session implementing the trtkit runtime contract."""
+def _open_cuda_session(ort: Any, onnx_path: Path, session_options: Any, device: torch.device) -> tuple[Any, torch.cuda.Stream | None]:
+    """Create the CUDA session, stream-ordered on a torch side stream when ORT accepts one.
 
-    def __init__(self, onnx_path: Path, *, device_id: int = 0, max_batch_size: int = 32) -> None:
-        """Load an ONNX graph into a CUDA execution-provider session.
+    Returns:
+        The session, and the stream it is ordered on (``None`` for the host-synchronized fallback).
+
+    Raises:
+        RuntimeError: If the CUDA provider is unavailable or cannot run a kernel on this GPU.
+    """
+    device_id: int = device.index or 0
+    require_cuda_kernels(device_id)
+    # Dedicated session stream, NEVER torch's current stream: the default
+    # stream's raw handle is 0, which ORT parses as "no user stream" and
+    # silently runs on its own non-blocking internal stream — unfenced
+    # against torch, so inputs race (intermittent garbage inferences). A
+    # torch-owned side stream has a real handle ORT honors, and __call__
+    # fences it against the caller's stream on both sides of the run.
+    torch_stream: torch.cuda.Stream = torch.cuda.Stream(device=device)
+    provider_options: dict[str, Any] = {"device_id": device_id, "user_compute_stream": str(int(torch_stream.cuda_stream))}
+    try:
+        return ort.InferenceSession(str(onnx_path), sess_options=session_options, providers=[("CUDAExecutionProvider", provider_options)]), torch_stream
+    except BeartypeException:
+        raise
+    except Exception as error:
+        # Perf-relevant mode switch: every call will host-sync the caller's
+        # stream instead of being stream-ordered — say so, don't hide it.
+        print(f"[trtkit] ORT user_compute_stream unavailable ({error}); falling back to a host-synchronized session.")
+        return ort.InferenceSession(str(onnx_path), sess_options=session_options, providers=[("CUDAExecutionProvider", {"device_id": device_id})]), None
+
+
+OrtDevice: TypeAlias = Literal["cuda", "cpu"]
+"""Which ONNX Runtime execution provider a session runs on."""
+
+
+class OnnxRuntime:
+    """ONNX Runtime session implementing the trtkit runtime contract on CUDA or CPU tensors."""
+
+    def __init__(self, onnx_path: Path, *, device: OrtDevice = "cuda", device_id: int = 0, max_batch_size: int = 32) -> None:
+        """Load an ONNX graph into a CUDA or CPU execution-provider session.
 
         Args:
             onnx_path: Path to the ONNX model file.
-            device_id: CUDA device ordinal for the execution provider.
+            device: ``cuda`` (GPU-resident, stream-ordered) or ``cpu``.
+            device_id: CUDA device ordinal for the execution provider; unused on the CPU.
             max_batch_size: Batch cap for graphs with a dynamic batch dimension.
                 Graphs with a static batch dimension use that value instead and
                 pad smaller batches up to it.
@@ -105,36 +142,38 @@ class OnnxCudaRuntime:
             RuntimeError: If onnxruntime or its CUDA provider is unavailable.
             ValueError: If the graph has symbolic non-batch dimensions.
         """
-        require_cuda_kernels(device_id)
-        import onnxruntime as ort
-
-        self._device: torch.device = torch.device("cuda", device_id)
-        # Dedicated session stream, NEVER torch's current stream: the default
-        # stream's raw handle is 0, which ORT parses as "no user stream" and
-        # silently runs on its own non-blocking internal stream — unfenced
-        # against torch, so inputs race (intermittent garbage inferences). A
-        # torch-owned side stream has a real handle ORT honors, and __call__
-        # fences it against the caller's stream on both sides of the run.
-        self._torch_stream: torch.cuda.Stream = torch.cuda.Stream(device=self._device)
-        provider_options: dict[str, Any] = {"device_id": device_id, "user_compute_stream": str(int(self._torch_stream.cuda_stream))}
+        try:
+            import onnxruntime as ort
+        except ImportError as exc:
+            raise RuntimeError("onnxruntime is not installed in this Pixi environment.") from exc
         session_options: Any = ort.SessionOptions()
         session_options.log_severity_level = 3
-        try:
-            self._session: Any = ort.InferenceSession(
-                str(onnx_path), sess_options=session_options, providers=[("CUDAExecutionProvider", provider_options)]
-            )
-            self._stream_ordered: bool = True
-        except BeartypeException:
-            raise
-        except Exception as error:
-            # Perf-relevant mode switch: every call will host-sync the caller's
-            # stream instead of being stream-ordered — say so, don't hide it.
-            print(f"[trtkit] ORT user_compute_stream unavailable ({error}); falling back to a host-synchronized session.")
-            self._session = ort.InferenceSession(
-                str(onnx_path), sess_options=session_options, providers=[("CUDAExecutionProvider", {"device_id": device_id})]
-            )
-            self._stream_ordered = False
-        self._device_id: int = device_id
+        self._device: torch.device = torch.device("cuda", device_id) if device == "cuda" else torch.device("cpu")
+        self._session: Any
+        # None on the CPU and on the host-synchronized CUDA fallback; else the stream the session is ordered on.
+        self._torch_stream: torch.cuda.Stream | None
+        if device == "cpu":
+            self._session, self._torch_stream = ort.InferenceSession(str(onnx_path), sess_options=session_options, providers=["CPUExecutionProvider"]), None
+        else:
+            self._session, self._torch_stream = _open_cuda_session(ort, onnx_path, session_options, self._device)
+        spec_and_batch: tuple[RuntimeSpec, int | None] = self._read_spec(max_batch_size)
+        self._spec: RuntimeSpec = spec_and_batch[0]
+        self._static_batch: int | None = spec_and_batch[1]
+        self._input_buffers: dict[str, Tensor] = {}
+        self._output_buffers: dict[str, Tensor] | None = None
+
+    @property
+    def device(self) -> torch.device:
+        """The torch device inputs must live on and outputs are returned on."""
+        return self._device
+
+    @property
+    def _bound_on(self) -> dict[str, Any]:
+        """IOBinding's ``device_type`` / ``device_id`` for this runtime's tensors."""
+        return {"device_type": self._device.type, "device_id": self._device.index or 0}
+
+    def _read_spec(self, max_batch_size: int) -> tuple[RuntimeSpec, int | None]:
+        """The I/O contract read from the session, and the graph's static batch (``None`` when dynamic)."""
         static_batch: int | None = None
         input_specs: list[TensorSpec] = []
         for node in self._session.get_inputs():
@@ -142,14 +181,12 @@ class OnnxCudaRuntime:
             input_specs.append(spec)
             static_batch = node_batch if node_batch is not None else static_batch
         output_specs: list[TensorSpec] = self._resolve_output_specs(tuple(input_specs), static_batch)
-        self._static_batch: int | None = static_batch
-        self._spec = RuntimeSpec(
+        runtime_spec: RuntimeSpec = RuntimeSpec(
             inputs=tuple(input_specs),
             outputs=tuple(output_specs),
             max_batch_size=static_batch if static_batch is not None else max_batch_size,
         )
-        self._input_buffers: dict[str, Tensor] = {}
-        self._output_buffers: dict[str, Tensor] | None = None
+        return runtime_spec, static_batch
 
     @property
     def spec(self) -> RuntimeSpec:
@@ -182,14 +219,13 @@ class OnnxCudaRuntime:
             dummy: Tensor = torch.zeros((probe_batch, *tensor_spec.shape), dtype=tensor_spec.dtype, device=self._device)
             binding.bind_input(
                 name=tensor_spec.name,
-                device_type="cuda",
-                device_id=self._device_id,
+                **self._bound_on,
                 element_type=_TORCH_TO_NUMPY_DTYPE[tensor_spec.dtype],
                 shape=tuple(int(dim) for dim in dummy.shape),
                 buffer_ptr=int(dummy.data_ptr()),
             )
         for node in output_nodes:
-            binding.bind_output(node.name, device_type="cuda", device_id=self._device_id)
+            binding.bind_output(node.name, **self._bound_on)
         self._session.run_with_iobinding(binding)
         specs: list[TensorSpec] = []
         for node, ort_value in zip(output_nodes, binding.get_outputs(), strict=True):
@@ -204,10 +240,10 @@ class OnnxCudaRuntime:
         """Run one batch through ONNX Runtime with zero host copies.
 
         Args:
-            inputs: CUDA tensors keyed by ``spec.inputs`` names.
+            inputs: Tensors on :attr:`device` keyed by ``spec.inputs`` names.
 
         Returns:
-            CUDA tensors keyed by ``spec.outputs`` names, sliced to the submitted
+            Tensors on :attr:`device` keyed by ``spec.outputs`` names, sliced to the submitted
             batch size. Buffers are reused across calls — clone before mutating
             or holding results past the next call.
         """
@@ -218,8 +254,7 @@ class OnnxCudaRuntime:
             tensor: Tensor = self._bound_input(tensor_spec, inputs[tensor_spec.name], bound_batch)
             binding.bind_input(
                 name=tensor_spec.name,
-                device_type="cuda",
-                device_id=self._device_id,
+                **self._bound_on,
                 element_type=_TORCH_TO_NUMPY_DTYPE[tensor_spec.dtype],
                 shape=tuple(int(dim) for dim in tensor.shape),
                 buffer_ptr=int(tensor.data_ptr()),
@@ -233,31 +268,32 @@ class OnnxCudaRuntime:
             output: Tensor = self._output_buffers[tensor_spec.name]
             binding.bind_output(
                 name=tensor_spec.name,
-                device_type="cuda",
-                device_id=self._device_id,
+                **self._bound_on,
                 element_type=_TORCH_TO_NUMPY_DTYPE[tensor_spec.dtype],
                 shape=tuple(int(dim) for dim in output.shape),
                 buffer_ptr=int(output.data_ptr()),
             )
-        # The session executes on the construction-time stream; when the caller
-        # is on a different stream, order the two on both sides of the run so
-        # ORT never reads half-written inputs and torch never reads stale
-        # outputs. The non-stream-ordered fallback must drain the CALLER's
-        # stream (ORT runs on its own internal stream there).
-        current_stream: torch.cuda.Stream = torch.cuda.current_stream(self._device)
-        if self._stream_ordered:
+        if self._device.type == "cpu":
+            self._session.run_with_iobinding(binding)
+        elif self._torch_stream is not None:
+            # The session executes on the construction-time stream; when the
+            # caller is on a different stream, order the two on both sides of
+            # the run so ORT never reads half-written inputs and torch never
+            # reads stale outputs.
+            current_stream: torch.cuda.Stream = torch.cuda.current_stream(self._device)
             if current_stream != self._torch_stream:
                 self._torch_stream.wait_stream(current_stream)
             self._session.run_with_iobinding(binding)
             if current_stream != self._torch_stream:
                 current_stream.wait_stream(self._torch_stream)
         else:
-            current_stream.synchronize()
+            # The host-synchronized fallback runs on ORT's own internal stream: drain the caller's first.
+            torch.cuda.current_stream(self._device).synchronize()
             self._session.run_with_iobinding(binding)
         return {name: buffer[:batch_size] for name, buffer in self._output_buffers.items()}
 
     def _bound_input(self, tensor_spec: TensorSpec, tensor: Tensor, bound_batch: int) -> Tensor:
-        """Return a contiguous CUDA tensor padded to the bound batch size.
+        """Return a contiguous tensor on the session's device, padded to the bound batch size.
 
         Args:
             tensor_spec: Input contract being bound.
@@ -269,7 +305,7 @@ class OnnxCudaRuntime:
             zero-padded staging buffer.
 
         Raises:
-            ValueError: If the tensor is not on the session's CUDA device.
+            ValueError: If the tensor is not on the session's device.
         """
         if tensor.device != self._device:
             raise ValueError(f"Input {tensor_spec.name!r} must live on {self._device}, got {tensor.device}.")
@@ -309,3 +345,7 @@ def _tensor_spec_from_node(node: Any) -> tuple[TensorSpec, int | None]:
         raise ValueError(f"Unsupported ONNX tensor type {node.type!r} for {node.name!r}.")
     static_batch: int | None = int(dims[0]) if dims and isinstance(dims[0], int) else None
     return TensorSpec(name=str(node.name), shape=tuple(per_sample), dtype=dtype), static_batch
+
+
+OnnxCudaRuntime = OnnxRuntime
+"""The CUDA spelling: ``OnnxCudaRuntime(path, device_id=...)`` is ``OnnxRuntime(path, device="cuda", device_id=...)``."""
