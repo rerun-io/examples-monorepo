@@ -18,7 +18,7 @@ import rerun as rr
 from simplecv.camera_parameters import BrownConradyDistortion, Extrinsics, Fisheye62Parameters, Intrinsics, KannalaBrandtDistortion, PinholeParameters
 from simplecv.rerun_log_utils import log_pinhole
 
-from colsfm.catalog import CatalogCameraModel
+from colsfm.catalog import CALIBRATION_PROPERTY, CatalogCameraModel
 from colsfm.rerun_layer import IMAGE_PLANE_DISTANCE, open_layer
 
 CALIBRATION_ENTITY: Final[str] = "/world/runs/colsfm_calibrate/rig"
@@ -72,7 +72,7 @@ def write_calibration_layer(
         try:
             for model in models:
                 log_pinhole(model, Path(f"{root}/{model.name}"), image_plane_distance=IMAGE_PLANE_DISTANCE, static=True, recording=recording)
-            recording.send_property("colsfm_calibrate", properties)
+            recording.send_property(CALIBRATION_PROPERTY, properties)
             recording.flush()
         finally:
             recording.disconnect()

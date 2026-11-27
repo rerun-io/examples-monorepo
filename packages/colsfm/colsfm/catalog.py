@@ -61,6 +61,9 @@ DEFAULT_TRAJECTORY_ENTITY: Final[str] = "/world/runs/slam_rs/rig"
 """slam-rs's final run in its `slam_rs` layer (`dataforge.schema.run_path(SLAM_RS_SOURCE)`): `/world/rig_00` belongs to
 the base and the `gt` layer."""
 
+CALIBRATION_PROPERTY: Final[str] = "colsfm_calibrate"
+"""The recording property a calibration layer states how it was made in (`colsfm.calibration_layer`)."""
+
 DEFAULT_TIMELINE: Final[str] = "video_time"
 """The timeline exoego:v2 segments index their video and poses on."""
 
@@ -306,7 +309,7 @@ class PreparedInput:
     """With ``view_rig`` and viewing streams on every camera: what the layer's ``rig_view`` is drawn from."""
 
 
-def _static_values(table: pa.Table, column: str) -> list[float] | list[str] | None:
+def _static_values(table: pa.Table, column: str) -> list[float] | list[str] | list[bool] | None:
     if column not in table.column_names:
         return None
     values = table.column(column).drop_null()
@@ -631,6 +634,26 @@ def nearest_packets(videos: Sequence[StreamIndex], targets_ns: Sequence[int], to
     return selection
 
 
+def refuse_unscaled_calibration(dataset: DatasetEntry, segment: str, calibration_entity: str) -> None:
+    """Refuse a calibration layer that says it is not in metres before it is composed with a trajectory.
+
+    `colsfm calibrate` writes its cameras in the first camera's frame and the reconstruction's own scale
+    (`metric_scale=False`); `prepare_catalog_input` composes every camera as `world_T_rig @ rig_T_cam` with a metric
+    trajectory in its own rig frame (slam_rs: the IMU frame), which would put every camera in the wrong place.
+    A layer that states nothing is taken as it is.
+
+    Raises:
+        ValueError: When the segment's `colsfm_calibrate` property says `metric_scale=False`.
+    """
+    table: pa.Table = dataset.filter_segments(segment).filter_contents(["/__properties/**"]).reader(index=None).to_arrow_table()
+    metric = _static_values(table, f"property:{CALIBRATION_PROPERTY}:metric_scale")
+    if metric is not None and not metric[0]:
+        raise ValueError(
+            f"{segment}: the calibration at {calibration_entity} is in its first camera's frame and its own scale "
+            f"({CALIBRATION_PROPERTY}: metric_scale=False), so it cannot be composed with a metric trajectory in another rig frame"
+        )
+
+
 def prepare_catalog_input(config: CatalogInputConfig, *, view_rig: bool = False) -> PreparedInput:
     """Read the segment and write the pipeline's input directory: `frames_meta.json`, `frame_source.json`, ground truth.
 
@@ -646,6 +669,8 @@ def prepare_catalog_input(config: CatalogInputConfig, *, view_rig: bool = False)
     """
     started: float = time.perf_counter()
     dataset: DatasetEntry = CatalogClient(config.catalog_url).get_dataset(name=config.dataset)
+    if config.calibration_entity is not None:
+        refuse_unscaled_calibration(dataset, config.segment, config.calibration_entity)
     cameras: tuple[CatalogCameraModel, ...] = read_catalog_cameras(dataset, config.segment, config.cameras, config.calibration_entity)
     if config.mask_entity is not None:
         mask_entities: set[str] = {

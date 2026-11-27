@@ -127,3 +127,20 @@ def test_a_camera_that_does_not_fit_its_projection_leaves_the_previous_layer_who
     assert layer.read_bytes() == before
     assert sorted(path.name for path in tmp_path.iterdir()) == ["calibrate.rrd"]
     assert layer.stat().st_mode & 0o777 == 0o644
+
+
+@pytest.mark.integration
+def test_a_run_refuses_a_calibration_in_its_own_scale_and_takes_a_metric_one(tmp_path: Path) -> None:
+    """Needs a catalog server (an in-process one, on an OS port)."""
+    import rerun as rr
+    from rerun.catalog import CatalogClient
+
+    from colsfm.catalog import prepare_catalog_input, refuse_unscaled_calibration
+
+    unscaled: CatalogInputConfig = dataclasses.replace(_segment(tmp_path), calibration_entity=CALIBRATION_ENTITY)
+    with serve_catalog_input(unscaled) as served, pytest.raises(ValueError, match="metric_scale=False"):
+        prepare_catalog_input(served)  # refused before the trajectory is read: the fixture has none
+    write_calibration_layer(tmp_path / "metric.rrd", "seg", tuple(_calibrated(camera) for camera in RECORDED), rr.AnyValues(metric_scale=True))
+    metric: CatalogInputConfig = dataclasses.replace(unscaled, layers={**unscaled.layers, "calibrate": tmp_path / "metric.rrd"})
+    with serve_catalog_input(metric) as served:
+        refuse_unscaled_calibration(CatalogClient(served.catalog_url).get_dataset(name="robocap"), served.segment, CALIBRATION_ENTITY)

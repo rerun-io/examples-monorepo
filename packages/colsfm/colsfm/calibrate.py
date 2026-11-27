@@ -5,14 +5,16 @@ rig frames sampled from the segment it runs colsfm's own features and matcher (R
 from the catalog) and matches every camera against every camera of its own and the nearby rig frames. COLMAP's global
 mapper then maps the images without a rig, intrinsics estimated from a seed; `apply_rig_config` derives the rig from
 that model, and the global mapper maps again on the rig, with the rig extrinsics and every intrinsic free. The result
-is a calibration layer (`colsfm.catalog.write_calibration_layer`), which `run catalog --source.calibration-entity` reads.
+is a calibration layer (`colsfm.calibration_layer.write_calibration_layer`).
 
 What it assumes instead of solving:
 
 - the rig frame is the first selected camera (its `rig_T_cam` is the identity);
 - the scale is the reconstruction's own, not metres: rotations and intrinsics are what the solve found, translations
-  share one unknown factor. The layer says so (`metric_scale=False`), and a trajectory in metres or in another rig frame
-  does not combine with it as it is.
+  share one unknown factor. The layer says so (`metric_scale=False`). A run that starts from a trajectory composes each
+  camera as `world_T_rig @ rig_T_cam`, so the layer combines only with a trajectory in the same frame and scale; a metric
+  trajectory in another rig frame (slam_rs: the IMU frame, metres) does not combine with it as it is, and `run catalog`
+  refuses it (`colsfm.catalog.refuse_unscaled_calibration`).
 
 Why the order: COLMAP's mappers discard a rig whose `sensor_from_rig` is unknown, so the first pass maps single images;
 without the cross-camera pairs of the same and nearby rig frames it splits into one model per camera (pysfm's
@@ -37,7 +39,8 @@ from rerun.catalog import CatalogClient, DatasetEntry
 from simplecv.catalog_video_reader import StreamIndex, read_video_index
 
 from colsfm import DATA_DIR
-from colsfm.catalog import CatalogCameraModel, CatalogInputConfig, ProjectionModel, nearest_packets, read_camera_names, write_calibration_layer
+from colsfm.calibration_layer import write_calibration_layer
+from colsfm.catalog import CatalogCameraModel, CatalogInputConfig, ProjectionModel, nearest_packets, read_camera_names
 from colsfm.database import ImagePair
 from colsfm.features import ExtractionReport, FeatureOptions, extract_features
 from colsfm.frame_manifest import FrameSourceManifest, StreamKeyframes
@@ -154,6 +157,7 @@ def solve_rig(database_path: Path, names: Sequence[str], work_dir: Path) -> pyco
     )
     with pycolmap.Database.open(database_path) as database:
         pycolmap.apply_rig_config([rig_config], database, bootstrap)
+    del bootstrap  # the rig is in the database now; the second mapping reads only that
     return _global_map(database_path, work_dir, "rig", rig=True)
 
 
@@ -209,15 +213,25 @@ def window_streams(
 
     Returns:
         Per camera, its keyframes named `<camera>/<rig frame>`: the same name across cameras is one rig frame.
+
+    Raises:
+        ValueError: When the trimmed window is empty, a camera has no packet in it, or one packet would serve two rig frames.
     """
     times: Int64[ndarray, " n"] = videos[0].t_ns
     first_ns: int = int(times[0]) + int(trims_s[0] * 1e9)
     last_ns: int = int(times[-1]) - int(trims_s[1] * 1e9)
     first: int = int(np.searchsorted(times, first_ns))
     last: int = int(np.searchsorted(times, last_ns, side="right")) - 1
+    if last < first:
+        raise ValueError(f"the trims {trims_s} s leave no frame of {videos[0].entity}")
     # Unique: a window shorter than `num_rig_frames` packets must not put one packet in two rig frames.
     indices: Int64[ndarray, " k"] = np.unique(np.linspace(first, last, num_rig_frames).round().astype(np.int64))
     selection: list[dict[int, int]] = nearest_packets(videos, [int(times[index]) for index in indices], tolerance_ns, (first_ns, last_ns))
+    for name, chosen in zip(entities, selection, strict=True):
+        if not chosen:
+            raise ValueError(f"{name} has no packet within {tolerance_ns} ns of any rig frame of the window")
+        if len(set(chosen.values())) < len(chosen):
+            raise ValueError(f"{name}: a packet is the nearest of two rig frames; lower the sync tolerance ({tolerance_ns} ns)")
     return [
         StreamKeyframes(
             entity=f"{entity.lstrip('/')}/pinhole/video",

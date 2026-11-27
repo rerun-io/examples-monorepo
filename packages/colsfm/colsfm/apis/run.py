@@ -12,7 +12,8 @@ pipeline on the decoded keyframes, and writes the run as a `/world/runs/colsfm` 
 (`colsfm.rerun_layer`).
 
 `calibrate` estimates the rig's intrinsics and extrinsics on a window of a catalog segment and writes them as a
-calibration layer (`colsfm.calibrate`); `catalog --source.calibration-entity /world/runs/colsfm_calibrate/rig` reads it.
+calibration layer (`colsfm.calibrate`) in its first camera's frame and its own scale, which `catalog` refuses to compose
+with a metric trajectory (`metric_scale=False`).
 """
 
 from __future__ import annotations

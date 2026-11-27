@@ -155,3 +155,29 @@ def test_the_window_is_on_the_reference_packets_and_names_one_rig_frame_alike() 
     assert (a.names, a.t_ns) == (["a/000000", "a/000001", "a/000002", "a/000003", "a/000004"], [0, 100, 200, 300, 400])
     assert (b.names, b.t_ns) == (["b/000000", "b/000001", "b/000003", "b/000004"], [2, 101, 302, 399])
     assert a.entity == "world/rig_00/cam_00/pinhole/video"
+
+
+@pytest.mark.parametrize(
+    ("other_t_ns", "tolerance_ns", "trims_s", "message"),
+    [
+        ([0, 100, 200, 300, 400], 5, (0.0, 1.0), "leave no frame"),
+        ([50, 150, 250, 350, 450], 5, (0.0, 0.0), "b has no packet"),
+        ([0, 100, 200, 300, 400], 100, (0.0, 0.0), "nearest of two rig frames"),
+    ],
+)
+def test_a_window_that_cannot_be_sampled_is_refused_before_anything_is_written(
+    other_t_ns: list[int], tolerance_ns: int, trims_s: tuple[float, float], message: str
+) -> None:
+    from simplecv.catalog_video_reader import StreamIndex
+
+    from colsfm.calibrate import window_streams
+
+    def stream(entity: str, t_ns: list[int]) -> StreamIndex:
+        return StreamIndex(
+            entity=entity, times=np.asarray(t_ns, dtype=np.int64).astype("timedelta64[ns]"), keyframes=np.zeros(len(t_ns), dtype=bool), codec="h264"
+        )
+
+    reference: StreamIndex = stream("/world/rig_00/cam_00/pinhole/video", [0, 100, 200, 300, 400])
+    sparse: StreamIndex = stream("/world/rig_00/cam_01/pinhole/video", other_t_ns if message != "nearest of two rig frames" else [0, 300])
+    with pytest.raises(ValueError, match=message):
+        window_streams({"a": "/world/rig_00/cam_00", "b": "/world/rig_00/cam_01"}, (reference, sparse), 5, tolerance_ns, trims_s)
