@@ -20,13 +20,13 @@ from numpy import ndarray
 from simplecv.rerun_walk_path import ENDPOINTS, TRAIL, segments, send_endpoints, send_trail, walk_colors
 
 from slam_rs import _core
-from slam_rs.catalog_feed import RIG_ENTITY, TIMELINE, SegmentFeed
+from slam_rs.catalog_feed import RIG_ENTITY, TIMELINE, CameraCalib, SegmentFeed
 from slam_rs.columns import ColumnLog
 from slam_rs.config import config_text_sha256
 from slam_rs.follow_frame import follow_entity, follow_yaw, yaw_quaternion_xyzw
 from slam_rs.tracking import Lockstep, SegmentRun, drive
 from slam_rs.trajectory import Trajectory, shift_clock
-from slam_rs.vio_log import COLOR_DOWNSCALE, VioLogger, VioStage, dataset_videos
+from slam_rs.vio_log import COLOR_DOWNSCALE, VioLogger, VioStage, dataset_videos, log_rig
 
 POSE_SOURCE: str = "slam_rs"
 """Catalog layer name, and DataForge run name of the final (optimised, non-causal) trajectory."""
@@ -110,8 +110,7 @@ def track_layer(
                             run_gba=run_gba, observer=stage)
     log_layer(rec, run, clock_offset_ns=feed.video_time_offset_ns, profile=profile, backend=str(_core.gpu_backend) if vio.gpu else "cpu",
               decoder=feed.decode_device, detail=detail, animate_base_rig=animate_base_rig,
-              # The lens frames hang under the frusta only the full layer's rig copy draws (VioLogger).
-              lens_videos=dataset_videos(feed.camera_positions) if stage is not None else (),
+              lenses=tuple(zip(feed.cameras, dataset_videos(feed.camera_positions), strict=True)),
               walk_span_ns=(int(feed.frame_t_ns[0]) - cam_offset_ns, int(feed.frame_t_ns[-1]) - cam_offset_ns), strict=strict)
     if stage is not None:
         stage.finish(shift_clock(run.estimate if run.final is None else run.final, -feed.export_offset_ns), run.map_result)
@@ -147,7 +146,7 @@ def log_layer(
     decoder: str = "cpu",
     detail: LayerDetail = "poses",
     animate_base_rig: bool = False,
-    lens_videos: Sequence[str] = (),
+    lenses: Sequence[tuple[CameraCalib, str]] = (),
     walk_span_ns: tuple[int, int] | None = None,
     strict: bool = True,
 ) -> None:
@@ -176,8 +175,8 @@ def log_layer(
         decoder: Video decoder, recorded.
         detail: What the layer holds (:data:`LayerDetail`), recorded.
         animate_base_rig: Also move ``/world/rig_00`` with the final run.
-        lens_videos: The base ``VideoStream`` of each fed camera, in feed order: the raw run's rig then shows each lens's
-            current frame in its frustum (``VideoFrameReference``). Empty, the frusta stay empty.
+        lenses: Each fed camera with its base ``VideoStream``, in feed order: the raw run's rig carries a frustum a camera
+            showing that lens's frame of the pose (``VideoFrameReference``). Empty: the rig carries no frusta.
         walk_span_ns: ``video_time`` the walk gradient runs from green to red over (the feed's first and last frameset);
             None: the first and last pose.
         strict: Refuse an incomplete run (above).
@@ -209,7 +208,7 @@ def log_layer(
         # dataset's, whose base layer states its own axes.
         rec.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
     _log_run(rec, POSE_SOURCE, times, positions, rotations, gradient)
-    _log_run(rec, VIO_SOURCE, times, raw_positions, raw_rotations, gradient, lens_videos)
+    _log_run(rec, VIO_SOURCE, times, raw_positions, raw_rotations, gradient, lenses)
     if animate_base_rig:
         rec.send_columns(RIG_ENTITY, indexes=[rr.TimeColumn(TIMELINE, duration=times.astype("timedelta64[ns]"))],
                          columns=rr.Transform3D.columns(translation=positions, quaternion=rotations))
@@ -231,11 +230,11 @@ def _log_run(
     positions: Float64[ndarray, "n 3"],
     rotations: Float64[ndarray, "n 4"],
     colors: UInt8[ndarray, "n 3"],
-    lens_videos: Sequence[str] = (),
+    lenses: Sequence[tuple[CameraCalib, str]] = (),
 ) -> None:
     """One run under ``/world/runs/<source>`` (:mod:`simplecv.rerun_walk_path`'s names): the per-frame rig, its follow frame,
     the whole path (static here: every dataset's catalog layout draws it at any cursor), the trail up to the cursor and
-    the endpoints, and with ``lens_videos`` each lens's frame of the pose's time in the rig's frusta.
+    the endpoints, and with ``lenses`` the rig's frusta, each showing its lens's frame of the pose's time.
 
     Args:
         rec: The layer's recording.
@@ -244,7 +243,7 @@ def _log_run(
         positions: Rig positions in the world, metres.
         rotations: Rig rotations, Rerun's XYZW.
         colors: One colour per pose (a segment takes its later pose's).
-        lens_videos: The base ``VideoStream`` of each camera of the run's rig copy (``rig/cam_NN``, feed order).
+        lenses: Each camera of the run's rig copy (``rig/cam_NN``, feed order) with its base ``VideoStream``.
     """
     run: str = schema.run_path(source)
     rig: str = f"{run}/rig"
@@ -252,8 +251,9 @@ def _log_run(
     rec.send_columns(rig, indexes=index, columns=rr.Transform3D.columns(translation=positions, quaternion=rotations))
     rec.send_columns(follow_entity(run), indexes=index, columns=rr.Transform3D.columns(translation=positions, quaternion=yaw_quaternion_xyzw(follow_yaw(times, positions))))
     rec.log(rig, rr.TransformAxes3D(RIG_AXIS_LENGTH_M), static=True)
-    for camera, video in enumerate(lens_videos):
-        lens: str = f"{rig}/cam_{camera:02d}/pinhole/video"
+    log_rig(tuple(camera for camera, _ in lenses), rig, recording=rec)
+    for camera, video in lenses:
+        lens: str = f"{rig}/cam_{camera.index:02d}/pinhole/video"
         rec.log(lens, rr.VideoFrameReference.from_fields(video_reference=video), static=True)
         rec.send_columns(lens, indexes=index, columns=rr.VideoFrameReference.columns(timestamp=times))
     indices: Int64[ndarray, " n_overview"] = np.unique(np.append(np.arange(0, len(positions), max(1, len(positions) // 4000)), len(positions) - 1))

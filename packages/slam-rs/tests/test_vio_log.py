@@ -163,7 +163,7 @@ def drive(
         final: The final run from the raw estimate (what the back end's re-anchoring would give); None: the raw run.
         colors: Each frameset's RGB frames (``Frameset.colors``); None logs without them.
         animate_base_rig: :func:`slam_rs.catalog_layer.log_layer`'s ``animate_base_rig``.
-        video_entities: The lens videos, for the logger's window frusta and the layer's rig.
+        video_entities: The lens videos the logger's window frusta show; the layer's rig shows them, or the dataset's own.
         camera_positions: The logger's :attr:`VioLogger.camera_positions`.
         base_downscale: The logger's :attr:`VioLogger.base_downscale`.
 
@@ -200,7 +200,10 @@ def drive(
         final_run: Trajectory = estimate if final is None else final(estimate)
         run: SegmentRun = SegmentRun(estimate=estimate, final=None if final is None else final_run, framesets=len(estimate), lost=0, wall_s=0.0,
                                      ground_truth=empty_trajectory(), median_tracker_ms=0.0, config_sha256="test", calibration_sha256="test")
-        log_layer(recording, run, clock_offset_ns=0, profile="fast", backend="cpu", animate_base_rig=animate_base_rig, lens_videos=video_entities,
+        # As track_layer: the layer's rig copy always shows the base lens videos.
+        videos: tuple[str, ...] = video_entities or dataset_videos(range(len(cameras)))
+        log_layer(recording, run, clock_offset_ns=0, profile="fast", backend="cpu", animate_base_rig=animate_base_rig,
+                  lenses=tuple(zip(cameras, videos, strict=True)),
                   walk_span_ns=(int(frame_t_ns[0]), int(frame_t_ns[-1])), strict=False)
         watch.stage.finish(final_run, None)
     return Logged(rows=read_rows(output), tracked=tracked, logger=logger, recording=output, newest_keyframes=watch.newest)
@@ -289,16 +292,14 @@ def test_the_dataset_videos_are_the_fed_cameras_own_streams() -> None:
 def test_the_live_rig_shows_each_lens_frame_in_its_frustum(
     pipeline: PipelineFactory, texture: TextureFactory, camera: CameraFactory, tmp_path: Path, read_rows: RowsReader
 ) -> None:
-    """Told where the dataset's videos are, the run's rig references the current frame of each lens under its
-    ``pinhole`` (camera, pinhole, video: the dataset's own layout), a row a frameset. Told nothing, it logs none."""
+    """The run's rig references the current frame of each lens under its ``pinhole`` (camera, pinhole, video: the
+    dataset's own layout), a row a pose."""
     rig: tuple[CameraCalib, ...] = (camera(0, 0.0), camera(1, 0.1))
     videos: tuple[str, ...] = (f"{RIG_ENTITY}/cam_00/pinhole/video", f"{RIG_ENTITY}/cam_01/pinhole/video")
     shown: Logged = drive(pipeline(2), rig, empty_trajectory(), texture, tmp_path / "shown.rrd", read_rows, video_entities=videos)
     for index in range(2):
         entity: str = f"{VIO_RUN_ENTITY}/rig/cam_{index:02d}/pinhole/video"
         assert video_references(shown.rows, entity) == [(t_ns, t_ns) for t_ns in shown.tracked], entity
-    plain: Logged = drive(pipeline(2), rig, empty_trajectory(), texture, tmp_path / "plain.rrd", read_rows)
-    assert not any(entity.endswith("/video") for entity in plain.rows)
 
 
 def test_a_window_keyframe_shows_both_lenses_at_its_own_time_and_keeps_its_slot(

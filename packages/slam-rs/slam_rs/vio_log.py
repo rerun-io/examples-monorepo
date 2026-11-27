@@ -34,7 +34,7 @@ from slam_rs.tracking import DropReason, Lockstep
 from slam_rs.trajectory import MIN_ASSOCIATED_POSES, AteResult, PoseLog, Trajectory, ate
 
 VIO_RUN_ENTITY: str = "/world/runs/slam_rs_vio"
-"""The raw causal VIO: its window, landmarks and rig frusta here, its path from :func:`slam_rs.catalog_layer.log_layer`."""
+"""The raw causal VIO: its window and landmarks here; its rig, frusta and path from :func:`slam_rs.catalog_layer.log_layer`."""
 GT_ENTITY: str = "/world/runs/gt"
 """The dataset's own ground-truth run, which its ``gt`` layer draws (:func:`vio_blueprint` gives its trail a time range)."""
 MAP_KEYFRAMES_ENTITY: str = f"{RUN_ENTITY}/keyframes"
@@ -254,8 +254,7 @@ class VioLogger:
     """The map's points by host as read, and the blocks to draw again; its revision is the next read's ``since``."""
 
     def __post_init__(self) -> None:
-        """Log the estimated rig's static geometry."""
-        log_rig(self.cameras, f"{VIO_RUN_ENTITY}/rig", recording=self.columns.recording)
+        """Precompute each camera's frustum and keypoint scale, and check the camera positions."""
         self.display_intrinsics = tuple(display_intrinsics(camera) for camera in self.cameras)
         self.keypoint_scale = tuple(self.base_downscale * camera.width / width for camera, (width, _) in zip(self.cameras, self.tracked_resolution, strict=True))
         positions: tuple[int, ...] = self.camera_positions or tuple(camera.index for camera in self.cameras)
@@ -292,7 +291,7 @@ class VioLogger:
         pose: Float64[ndarray, " 7"] | None = result.world_from_rig
         assert pose is not None, f"Tracking result at {result.t_ns} has no pose"
         self.framesets += 1
-        self.poses.append(result.t_ns, pose[0:3], np.roll(pose[3:7], 1))
+        self.poses.append(result.t_ns, pose[0:3], pose[[6, 3, 4, 5]])
         t: int = self.video_t_ns(result.t_ns)
         self._log_keypoints(frame, t, colors)
         self._log_window(snapshot, t)
