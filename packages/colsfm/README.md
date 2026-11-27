@@ -58,9 +58,46 @@ cached per machine by trtkit.
 | Catalog rig, calibration and video readers, Umeyama | `packages/simplecv` |
 | Pose graph and extrinsic refinement | pyceres 2.6 |
 
-Where it sits: `pysfm` is COLMAP's own incremental/global SfM from video (no initial trajectory, pycolmap 4.0 cpu);
-colsfm is cuSFM-style mapping that needs a starting trajectory — `slam_rs` (RoboCap), cuVSLAM (KITTI) or any
-`/world/runs/<source>/rig` layer.
+## Two modes
+
+colsfm has two modes on one camera contract (`/world/rig_NN/cam_MM` camera nodes, or a calibration layer):
+
+- **`run catalog`** refines a starting trajectory with cuSFM's eight stages. It needs the rig's calibration and a
+  starting trajectory: `slam_rs` (RoboCap), cuVSLAM (KITTI) or any `/world/runs/<source>/rig` layer.
+- **`calibrate`** makes the calibration when there is none: each camera's intrinsics and its pose in the rig, from a
+  window of the segment, as a calibration layer under `/world/runs/colsfm_calibrate/rig`. It does not refine a
+  trajectory.
+
+### calibrate
+
+```bash
+pixi run -e colsfm colsfm-calibrate-robocap    # RoboCap Cap A s00000021, its factory calibration ignored
+python tools/run.py calibrate --help           # segment, cameras, trims, --options.camera-model, --options.num-rig-frames
+```
+
+300 rig frames (default) on the reference camera's packets, colsfm's RaCo + FlexGlue on TensorRT, every camera of a
+rig frame matched against every camera of it and of the next 5; COLMAP's global mapper without a rig from seed
+intrinsics, `apply_rig_config`, and the global mapper again on the rig with the extrinsics and the intrinsics free. About
+8 minutes for 4 fisheyes on the 5090.
+
+What it does not solve: the rig frame is the first camera, and the translations are in the reconstruction's own scale
+(the layer's root says `metric_scale=False`). `run catalog --source.calibration-entity` refuses such a calibration,
+because with a metric trajectory in another rig frame (slam_rs: the IMU frame) every camera would land in the wrong
+place. slam-rs always needs a calibration and stops without one.
+
+Lessons carried over from pysfm (deleted; its `docs/workflow.md`, sections 7 and 9):
+
+- Without cross-camera pairs of the same and nearby rig frames, the mapping without a rig splits into one model per
+  camera: on a 4 x 50-frame rig, 601 vs 2601 cross-camera pairs and 0 vs 196 of 200 images registered.
+- COLMAP's mappers discard a rig whose `sensor_from_rig` is unknown, so the first mapping runs on single images and the
+  rig enters only after it (`apply_rig_config` with the model).
+- Judge the first model by the rig it seeds, not by how it looks; compare extrinsics up to scale.
+- A fisheye without a focal prior gives degenerate pairs in COLMAP's verification (a fundamental matrix cannot recover
+  its focal length), so the fisheye seed is a prior.
+
+Checked against the factory Kalibr calibrations of two RoboCaps (`tests/test_calibrate_golden.py`, 300 rig frames, 4
+fisheyes each): every image registers, and per camera the estimate reprojects at 1.5-1.9 px against 1.9-9.2 px with the
+factory calibration held on the same observations (Cap A s00000021, Cap B s00000028).
 
 ## Tests
 
@@ -70,12 +107,3 @@ pixi run -e colsfm-dev --frozen tests-integration  # GPU, Galileo sample, RaCo e
 pixi run -e colsfm-dev --frozen tests-golden       # Galileo + KITTI 06 parity bands
 pixi run -e colsfm-dev --frozen gate
 ```
-
-## TODO
-
-TODO: one package, two modes. pysfm (plain pycolmap: no prior trajectory, intrinsics estimated, rig discovered) and
-colsfm (cuSFM-style refinement: needs rig, calibration and a starting trajectory) are complementary. Pablo leans towards
-one package with two modes, for example pysfm bootstrapping the start trajectory that colsfm refines, sharing one
-rig-layer contract (rrd in, rrd out). Not decided: first define what each mode does and which features we want.
-
-The other half: [pysfm](../pysfm/README.md).
