@@ -21,12 +21,15 @@ pixi run -e mv-api mv-api-full-app --rr-config.save artifacts/node-validation/ho
 The catalog tools (`mv-api-catalog-prediction-layer` and the macOS
 `mv-api-catalog-register`) connect to an **already-running** Rerun catalog via
 `CatalogClient` — they no longer mount the catalog in-process. Before running
-either, start the base catalog with the simplecv tasks:
+either, serve the catalog and register the base recordings with dataforge:
 
 ```bash
 pixi run -e simplecv-catalog --frozen simplecv-catalog-serve       # tier 1: serve the catalog (rerun server)
-pixi run -e simplecv-catalog --frozen simplecv-catalog-register    # tier 2: register the base ExoEgo Forge recordings
+pixi run -e dataforge --frozen dataforge-register --catalog-url rerun+http://127.0.0.1:9988 assembly101  # tier 2
 ```
+
+Tier 2 registers dataforge's converted `assembly101` recordings (convert them first) on the
+server the tools use; for another dataset, pass its subcommand here and its name to the mv-api tool.
 
 Both tools default to `--catalog-url rerun+http://127.0.0.1:9988`. Prediction
 layers are attached with `on_duplicate=REPLACE`, so re-running is idempotent.

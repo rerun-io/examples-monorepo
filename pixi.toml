@@ -317,19 +317,11 @@ dill = ">=0.3.8,<0.4.1"
 datasets = ">=4.0.0"
 
 [feature.simplecv.pypi-dependencies]
-jax = ">=0.6.0,<0.7"
-jaxopt = ">=0.8.5,<0.9"
-lovely-jax = "*"
 smplx = ">=0.1.28"
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
 trtkit = { path = "packages/trtkit", editable = true }
 timm = "<1.0"
 PyTurboJPEG = ">=1.7.0"
-
-# vrs ships no linux-aarch64 wheels (macOS arm64 + sdist only); it is used only by
-# the Aria/HOT3D download+preprocess apis, so keep it linux-64-scoped.
-[feature.simplecv.target.linux-64.pypi-dependencies]
-vrs = ">=1.1.0"
 
 [feature.simplecv.activation.env]
 PACKAGE_DIR = "packages/simplecv"
@@ -352,88 +344,17 @@ cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m golden \"$@\" || test $? -eq 5' _"
 depends-on = ["lietorch-mojo-build"]
 description = "Build lietorch-mojo, then run the package golden reference tests"
 
-[feature.simplecv.tasks.simplecv-view-polycam-data]
-cmd = "python tools/view_polycam.py --polycam-zip-path data/example-room-scan-poly.zip"
-depends-on = ["_download-simplecv-example-polycam-data"]
-cwd = "packages/simplecv"
-description = "View example Polycam data"
-
 [feature.simplecv.tasks.simplecv-view-exoego-data]
 cmd = "python tools/view_exoego.py"
 depends-on = ["_download-simplecv-hocap-sample"]
 cwd = "packages/simplecv"
 description = "View example HoCap exo/ego data"
 
-[feature.simplecv.tasks.simplecv-view-torchcodec-multiview]
-cmd = "python tools/view_torchcodec_multiview.py"
-cwd = "packages/simplecv"
-description = "View videos with TorchCodec CUDA multiview decoding"
-
-[feature.simplecv.tasks.simplecv-download-hot3d]
-cmd = "python tools/download_hot3d.py"
-cwd = "packages/simplecv"
-description = "Download HOT3D Aria sequences from CDN URLs"
-
-[feature.simplecv.tasks.simplecv-preprocess-hot3d]
-cmd = "python tools/preprocess_hot3d.py"
-cwd = "packages/simplecv"
-description = "Convert HOT3D VRS files to AV1 MP4 for SimpleCV"
-
-[feature.simplecv.tasks.simplecv-download-aria-gen2-pilot]
-cmd = "python tools/download_aria_gen2_pilot.py"
-cwd = "packages/simplecv"
-description = "Download Aria Gen2 Pilot sequences from CDN URLs"
-
-[feature.simplecv.tasks.simplecv-preprocess-aria-gen2-pilot]
-cmd = "python tools/preprocess_aria_gen2_pilot.py"
-cwd = "packages/simplecv"
-description = "Convert Aria Gen2 Pilot VRS files to AV1 MP4 for SimpleCV"
-
-[feature.simplecv.tasks.simplecv-preprocess-epfl-smart-kitchen]
-cmd = "python tools/preprocess_epfl_smart_kitchen.py"
-cwd = "packages/simplecv"
-description = "Build an AV1-transcoded EPFL-Smart-Kitchen mirror for SimpleCV"
-
-[feature.simplecv.tasks.simplecv-download-mamma]
-cmd = "python tools/download_mamma.py"
-cwd = "packages/simplecv"
-description = "Download one MAMMA sequence per subset (register at mamma.is.tue.mpg.de; set MAMMA_USERNAME/MAMMA_PASSWORD)"
-
-[feature.simplecv.tasks.simplecv-preprocess-mamma]
-cmd = "python tools/preprocess_mamma.py"
-cwd = "packages/simplecv"
-description = "Re-encode downloaded MAMMA yuv444 videos to AV1 yuv420 (videos_av1 mirror)"
-
 [feature.simplecv.tasks.simplecv-catalog-serve]
 # Tier 1: empty in-memory catalog. High ulimit: the server holds one open fd
 # per registered recording (6332 files overflow the default).
 cmd = "bash -c 'ulimit -n 524288 && rerun server --port 9988'"
 description = "Serve an empty ExoEgo Forge catalog on :9988 (2-tier; leave running)"
-
-[feature.simplecv.tasks.simplecv-catalog-register]
-# Tier 2: register the v1 root (flat /world/{exo,ego}/<name> layout → --layout flat).
-cmd = "python tools/catalog_register.py --rrd-root /mnt/8tb/data/exoego-forge-catalog --layout flat"
-cwd = "packages/simplecv"
-description = "Register the v1 (flat) root into the running catalog"
-
-[feature.simplecv.tasks.simplecv-catalog-register-rig]
-# `--suffix=-rig` (equals form — a bare `-rig` parses as a flag) avoids
-# recording_id collisions with the v1 entries.
-cmd = "python tools/catalog_register.py --rrd-root /mnt/8tb/data/exoego-forge-catalog-rig --suffix=-rig"
-cwd = "packages/simplecv"
-description = "Register the rig (exoego:v2) root as -rig entries into the running catalog"
-
-[feature.simplecv.tasks._download-simplecv-example-polycam-data]
-cmd = "test -e data/example-room-scan-poly.zip || hf download pablovela5620/polycam-example-data example-room-scan-poly.zip --repo-type dataset --local-dir data/"
-cwd = "packages/simplecv"
-outputs = ["packages/simplecv/data/example-room-scan-poly.zip"]
-description = "Download an example Polycam dataset from Hugging Face"
-
-[feature.simplecv.tasks._download-simplecv-example-easymocap-data]
-cmd = "test -e data/412-hand.zip || hf download pablovela5620/easymocap-example-data 412-hand.zip --repo-type dataset --local-dir data/"
-cwd = "packages/simplecv"
-outputs = ["packages/simplecv/data/412-hand.zip"]
-description = "Download an example EasyMocap dataset from Hugging Face"
 
 [feature.simplecv.tasks._download-simplecv-hocap-sample]
 cmd = "test -e data/hocap/sample.zip && test -e data/hocap/sample || (mkdir -p data/hocap/ && hf download pablovela5620/hocap-sample sample.zip --repo-type dataset --local-dir data/hocap/ && python -m zipfile -e data/hocap/sample.zip data/hocap/)"
@@ -443,15 +364,6 @@ outputs = [
     "packages/simplecv/data/hocap/sample",
 ]
 description = "Download and extract an example HoCap dataset from Hugging Face"
-
-[feature.simplecv.tasks._download-simplecv-epfl-smart-kitchen-sample]
-cmd = "test -e data/epfl-smart-kitchen/sample.zip && test -e data/epfl-smart-kitchen/sample || (mkdir -p data/epfl-smart-kitchen/ && hf download pablovela5620/epfl-smart-kitchen-sample sample.zip --repo-type dataset --local-dir data/epfl-smart-kitchen/ && python -m zipfile -e data/epfl-smart-kitchen/sample.zip data/epfl-smart-kitchen/)"
-cwd = "packages/simplecv"
-outputs = [
-    "packages/simplecv/data/epfl-smart-kitchen/sample.zip",
-    "packages/simplecv/data/epfl-smart-kitchen/sample",
-]
-description = "Download and extract an example EPFL-Smart-Kitchen dataset from Hugging Face"
 
 [feature.simplecv.tasks._download-simplecv-assembly101-sample]
 cmd = "test -e data/assembly101-sample || hf download pablovela5620/Assembly101-Sample --repo-type dataset --include 'assembly101-sample/**' --local-dir data/"
@@ -946,7 +858,7 @@ description = "Launch the EgoExo Forge Gradio viewer"
 [feature.egoexo-forge-demo.tasks.egoexo-forge-batch-convert]
 cmd = "python tools/batch_convert.py"
 cwd = "packages/egoexo-forge"
-description = "Deprecated no-op: ego/exo → .rrd conversion moved to simplecv (simplecv.apis.batch_raw_to_rrd)"
+description = "Deprecated no-op: ego/exo → .rrd conversion moved to dataforge (dataforge.apis.convert)"
 
 [feature.egoexo-forge-demo.tasks.egoexo-forge-catalog]
 cmd = "python tools/catalog.py"
@@ -1006,7 +918,7 @@ PACKAGE_DIR = "packages/mv-api"
 [feature.mv-api-catalog.tasks.mv-api-catalog-prediction-layer]
 cmd = "python tools/apps/catalog_prediction_layer.py"
 cwd = "packages/mv-api"
-description = "Generate and register the catalog-native MVAPI COCO133 prediction layer (needs a running catalog: simplecv-catalog-serve + simplecv-catalog-register)"
+description = "Generate and register the catalog-native MVAPI COCO133 prediction layer (needs a running catalog: simplecv-catalog-serve + dataforge-register --catalog-url rerun+http://127.0.0.1:9988 assembly101)"
 
 [feature.mv-api-catalog.tasks.mv-api-catalog-tests]
 cmd = "python -m pytest -q tests/test_catalog_prediction_layer.py"
@@ -1043,7 +955,7 @@ PACKAGE_DIR = "packages/mv-api"
 [feature.mv-api-catalog-register-mac.tasks.mv-api-catalog-register]
 cmd = "python tools/apps/register_catalog_with_predictions.py"
 cwd = "packages/mv-api"
-description = "Register existing prediction RRD layers into a running catalog on macOS (needs a running catalog: simplecv-catalog-serve + simplecv-catalog-register)"
+description = "Register existing prediction RRD layers into a running catalog on macOS (needs a running catalog: simplecv-catalog-serve + dataforge-register --catalog-url rerun+http://127.0.0.1:9988 assembly101)"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # sam3-rerun

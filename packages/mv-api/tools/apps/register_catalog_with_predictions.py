@@ -3,7 +3,7 @@
 This script intentionally avoids importing MVAPI inference code. It connects to a
 catalog server that is already serving the base ExoEgo Forge catalog (start it with
 the ``simplecv-catalog-serve`` task and register the base recordings with
-``simplecv-catalog-register``) and attaches each prediction RRD as a segment layer,
+``dataforge-register --catalog-url <this catalog> <dataset>``) and attaches each prediction RRD as a segment layer,
 replacing any existing layer of the same name.
 """
 
@@ -25,7 +25,7 @@ class CatalogRegistrationConfig:
 
     catalog_url: str = "rerun+http://127.0.0.1:9988"
     """URL of the running Rerun catalog server. Start it with the ``simplecv-catalog-serve``
-    task and register the base recordings with ``simplecv-catalog-register``."""
+    task and register the base recordings with ``dataforge-register --catalog-url <this catalog> <dataset>``."""
     prediction_root: Path = DEFAULT_PREDICTION_ROOT
     """Root containing prediction ``<dataset>/**/*.rrd`` files."""
     prediction_rrds: Annotated[tuple[Path, ...], tyro.conf.arg(name="prediction-rrd")] = ()
