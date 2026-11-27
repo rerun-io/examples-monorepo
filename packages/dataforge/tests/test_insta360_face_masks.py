@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -143,7 +144,7 @@ def test_each_face_mask_draws_masked_pixels_as_a_tint_over_a_clear_face(tmp_path
     write_faces(faces)
     write_masks(masks, STAMPS)
     main(Config(base=base, masks=masks, faces=faces, output=output))
-    contexts: dict[str, object] = {}
+    contexts: dict[str, list[dict[str, Any]]] = {}
     for chunk in rrc.RrdReader(output).store().stream().filter(is_static=True):
         batch = chunk.to_record_batch()
         if "AnnotationContext:context" in batch.schema.names:

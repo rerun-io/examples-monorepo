@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
@@ -41,7 +43,7 @@ def override(view: rrb.View, entity: str) -> list[object]:
     return list(found) if isinstance(found, list) else [found]
 
 
-def ui_radii(items: list[object]) -> list[float]:
+def ui_radii(items: Sequence[object]) -> list[float]:
     """The point radii among a view's defaults or an entity's overrides (negative: ui points)."""
     return [radius for item in items if isinstance(item, rr.Points3D) and item.radii is not None for radius in item.radii.pa_array.to_pylist()]
 
@@ -153,9 +155,10 @@ def test_no_view_draws_a_grid_and_the_overviews_turn_slowly_about_the_walk() -> 
         for view in (overview, follow):
             assert view.properties["LineGrid3D"] is not None, name
             assert not any("floor" in str(entity) for entity in (view.visualizer_overrides or {})), name
-        eye: rrb.EyeControls3D = overview.properties["EyeControls3D"]
-        assert eye.spin_speed is not None and eye.spin_speed.as_arrow_array().to_pylist() == [OVERVIEW_SPIN_RAD_S], name
-        assert follow.properties["EyeControls3D"].spin_speed.as_arrow_array().to_pylist() == [0.0], name
+        for view, spin in ((overview, OVERVIEW_SPIN_RAD_S), (follow, 0.0)):
+            eye = view.properties["EyeControls3D"]
+            assert isinstance(eye, rrb.EyeControls3D), name
+            assert eye.spin_speed is not None and eye.spin_speed.as_arrow_array().to_pylist() == [spin], name
 
 
 def test_the_marginalized_frames_are_hidden_in_every_slam_view() -> None:

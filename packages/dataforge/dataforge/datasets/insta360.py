@@ -494,7 +494,7 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
             pictures = lens_pictures(rig, np.arange(rig.num_frames, dtype=np.int64), device, batch=max(1, LENS_BATCH_PIXELS // (width * height)), threads=self.config.decode_threads)
             encode_and_log(
                 recording,
-                (torch.stack([area_downscale_uint8(lens, stored[::-1]) for lens in pair]) for pair in pictures),
+                (torch.stack([area_downscale_uint8(lens, (stored[1], stored[0])) for lens in pair]) for pair in pictures),
                 [schema.video_path(RIG, lens) for lens in range(2)],
                 rig.frame_ns() - rig.start_ns,
                 width=stored[0],
