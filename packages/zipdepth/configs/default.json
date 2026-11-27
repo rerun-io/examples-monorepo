@@ -51,7 +51,6 @@
 
   "logging": {
     "tensorboard": true,
-    "wandb": false,
     "log_interval_steps": 2000
   },
 

@@ -84,7 +84,6 @@ def merge_config_args(cfg: dict, args: argparse.Namespace) -> argparse.Namespace
         'scale_lr':            cfg.get('optimizer', {}).get('scale_lr_with_gpus', False),
         'amp':                 cfg.get('amp', {}).get('enabled', True),
         'amp_dtype':           cfg.get('amp', {}).get('dtype', 'bfloat16'),
-        'wandb':               cfg.get('logging', {}).get('wandb', False),
         'profile':             cfg.get('profiler', {}).get('enabled', False),
         'profile_dir':         cfg.get('profiler', {}).get('dir', './log/profiler'),
         'profile_wait':        cfg.get('profiler', {}).get('wait', 2),
@@ -223,7 +222,7 @@ def main(args):
     # LOGGING
     # ========================================================================
     writer = None
-    if is_main and not args.wandb:
+    if is_main:
         try:
             from torch.utils.tensorboard import SummaryWriter
             writer = SummaryWriter(log_dir=os.path.join(args.save_dir, 'runs'))
@@ -240,7 +239,6 @@ def main(args):
         scheduler=scheduler,
         device=device,
         use_amp=args.amp,
-        log_wandb=args.wandb and is_main,
         writer=writer,
         is_distributed=is_distributed,
         rank=rank,
@@ -447,7 +445,6 @@ def cli() -> None:
     parser.add_argument('--amp', action='store_true', default=None)
     parser.add_argument('--amp-dtype', type=str, default=None,
                         choices=['bfloat16', 'float16'])
-    parser.add_argument('--wandb', action='store_true', default=False)
     parser.add_argument('--scale-lr', action='store_true', default=False)
     parser.add_argument('--balanced-sampling', action='store_true', default=False)
 

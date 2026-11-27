@@ -24,8 +24,9 @@ import rerun.chunk as rrc
 import torch
 from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
+from simplecv.run_record import RunStart, start_run, write_run_record
 
-from dataforge import schema, writing
+from dataforge import paths, schema, writing
 from dataforge.datasets import insta360_cube as cube
 from dataforge.datasets.insta360 import FACE_CAMS, RIG, LensCameras, cameras_from_recording, layer_device
 
@@ -157,6 +158,7 @@ def main(config: Config) -> None:
     Raises:
         ValueError: If a face stamp has no mask on both lenses, or a lens mask and its scale do not cover the lens image.
     """
+    run: RunStart = start_run(config)
     lenses: LensCameras = cameras_from_recording(config.base)
     faces: dict[int, cube.CubeFace] = faces_from_layer(config.faces, lenses)
     device: torch.device = layer_device(config.device)
@@ -188,3 +190,4 @@ def main(config: Config) -> None:
         absent: list[int] = sorted(wanted - done)
         if absent:
             raise ValueError(f"{len(absent)} face stamps have no mask on both lenses in {config.masks}, first {absent[:5]}")
+        write_run_record(recording, run.finish(paths.MASKS_LAYER, recording_id))

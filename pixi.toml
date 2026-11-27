@@ -388,7 +388,6 @@ omegaconf = "*"
 scipy = "*"
 timm = ">=1.0.15,<2"
 matplotlib = ">=3.8.3,<3.9"
-wandb = ">=0.19.10,<0.20"
 pandas = ">=2.3.3,<2.4"
 jupyterlab = ">=4.2.0,<4.3"
 tyro = ">=0.9.1,<0.10"
@@ -4213,6 +4212,12 @@ cmd = "python tools/run.py catalog"
 depends-on = ["colsfm-raco-export", "colsfm-download-flexglue", "colsfm-flexglue-fp8"]
 cwd = "packages/colsfm"
 description = "The default pipeline on one catalog segment; pass --source.* and --options.* (the capture_to_splat flow's colsfm step)"
+
+[feature.colsfm.tasks.colsfm-calibrate-robocap]
+cmd = "python tools/run.py calibrate --source.catalog-url rerun+http://dgx-spark:51235 --source.dataset robocap --source.segment robocap__f408193e6447b3b0__s00000021 --source.cameras left_front right_front left right --source.trim-start-seconds 2 --source.trim-end-seconds 2"
+depends-on = ["colsfm-raco-export", "colsfm-download-flexglue", "colsfm-flexglue-fp8"]
+cwd = "packages/colsfm"
+description = "Estimate the RoboCap Cap A fisheye rig's intrinsics and extrinsics on segment s00000021, ignoring its factory calibration (a calibration layer)"
 
 [feature.colsfm.tasks.colsfm-robocap]
 cmd = "python tools/run.py catalog --source.catalog-url rerun+http://dgx-spark:51235 --source.dataset robocap --source.segment robocap__f408193e6447b3b0__s00000021 --source.cameras left_front right_front left right --source.stereo-pairs left_front right_front --source.frame-stride 4 --source.trim-start-seconds 2 --source.trim-end-seconds 2"

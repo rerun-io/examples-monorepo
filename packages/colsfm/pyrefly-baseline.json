@@ -1458,6 +1458,20 @@
     },
     {
       "column": 1,
+      "path": "tests/test_calibrate.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `calibrate_helpers`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
+      "path": "tests/test_calibration_check.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `calibrate_helpers`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
       "path": "tests/test_colour_points.py",
       "name": "missing-import",
       "concise_description": "Cannot find module `conftest`",

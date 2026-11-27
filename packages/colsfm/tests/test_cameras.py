@@ -200,3 +200,15 @@ def test_a_refined_stereo_projection_keeps_its_baseline() -> None:
     refined: CameraParams = camera_params_with_colmap_intrinsics(right, solved)
     assert refined.projection_matrix is not None
     assert np.allclose(refined.projection_matrix, k_new @ np.hstack([np.eye(3), np.array([[-baseline_m], [0.0], [0.0]])]))
+
+
+def test_a_catalog_lens_maps_onto_its_colmap_model_and_parameter_order() -> None:
+    from colsfm.cameras import colmap_model_and_parameters
+
+    k = np.array([[500.0, 0.0, 320.0], [0.0, 505.0, 240.0], [0.0, 0.0, 1.0]])
+    model, params = colmap_model_and_parameters("DISTORTED_PINHOLE", k, (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8))
+    assert model == "FULL_OPENCV" and params.tolist() == [500.0, 505.0, 320.0, 240.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+    assert colmap_model_and_parameters("OPENCV_FISHEYE", k, (0.1, 0.2, 0.3, 0.4))[0] == "OPENCV_FISHEYE"
+    assert colmap_model_and_parameters("PINHOLE", k, ())[1].tolist() == [500.0, 505.0, 320.0, 240.0]
+    with pytest.raises(ValueError, match="OPENCV_FISHEYE takes 4"):
+        colmap_model_and_parameters("OPENCV_FISHEYE", k, (0.1,))

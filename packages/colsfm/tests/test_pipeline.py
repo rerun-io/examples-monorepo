@@ -775,3 +775,16 @@ def test_a_failed_prior_alignment_publishes_nothing(galileo_input_dir: Path, tmp
     with pytest.raises(ValueError, match="no prior"):
         run_pipeline(options)
     assert not (tmp_path / "run").exists()
+
+
+@pytest.mark.integration
+def test_the_run_layer_carries_the_run_record_it_is_given(galileo_run: PipelineSummary, tmp_path: Path) -> None:
+    """`colsfm catalog` hands `write_run_layer` its run record (`simplecv.run_record`); the layer holds it as `run_colsfm`."""
+    import rerun.chunk as rrc
+    from simplecv.run_record import start_run
+
+    from colsfm.rerun_layer import DEFAULT_SOURCE, write_run_layer
+
+    layer: Path = tmp_path / "colsfm.rrd"
+    write_run_layer(galileo_run.options.output_dir, layer, segment="seg", record=start_run(None).finish(DEFAULT_SOURCE, "seg"))
+    assert "/__properties/run_colsfm" in {str(chunk.entity_path) for chunk in rrc.RrdReader(layer).stream()}

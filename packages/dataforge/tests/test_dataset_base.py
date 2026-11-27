@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 import rerun as rr
 import rerun.blueprint as rrb
-from conftest import assert_raw_root_guarded, read_chunks
+from conftest import assert_raw_root_guarded, read_back, read_chunks, recording_properties
 
 from dataforge import paths
 from dataforge.datasets import dataset_defaults
@@ -77,6 +77,16 @@ def test_every_layer_is_written_once_each_alone_or_together_and_timed(output_roo
         assert {str(chunk.entity_path) for chunk in chunks if not str(chunk.entity_path).startswith("/__")} == {f"/{layer}"}
     # Only the layers written alone are timed here; ``together`` times its own work.
     assert set(dataset.timer.stage_s) == {f"write:{layer}" for layer in LAYERS[:2]}
+
+
+def test_every_layer_carries_the_run_record_of_the_conversion_that_wrote_it(output_root: Path, tmp_path: Path) -> None:
+    """Alone or together, each layer gets its own ``run_<layer>`` group (:mod:`simplecv.run_record`), timed from the sequence."""
+    dataset = ToyDataset(ToyConfig(root=tmp_path / "raw"))
+    dataset.convert(IDENTITY, None, force=False)
+    for layer in LAYERS:
+        record: dict[str, object] = recording_properties(read_back(output_root / layer / f"{IDENTITY.recording_id}.rrd"), f"run_{layer}")
+        assert record["layer"] == layer and record["segment"] == IDENTITY.recording_id
+        assert record["started_at"] == dataset.timer.started_at and record["config"] == repr(dataset.config)
 
 
 def test_a_published_layer_is_pending_again_only_under_force(output_root: Path, tmp_path: Path) -> None:
