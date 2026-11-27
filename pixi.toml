@@ -317,19 +317,11 @@ dill = ">=0.3.8,<0.4.1"
 datasets = ">=4.0.0"
 
 [feature.simplecv.pypi-dependencies]
-jax = ">=0.6.0,<0.7"
-jaxopt = ">=0.8.5,<0.9"
-lovely-jax = "*"
 smplx = ">=0.1.28"
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
 trtkit = { path = "packages/trtkit", editable = true }
 timm = "<1.0"
 PyTurboJPEG = ">=1.7.0"
-
-# vrs ships no linux-aarch64 wheels (macOS arm64 + sdist only); it is used only by
-# the Aria/HOT3D download+preprocess apis, so keep it linux-64-scoped.
-[feature.simplecv.target.linux-64.pypi-dependencies]
-vrs = ">=1.1.0"
 
 [feature.simplecv.activation.env]
 PACKAGE_DIR = "packages/simplecv"
@@ -926,7 +918,7 @@ PACKAGE_DIR = "packages/mv-api"
 [feature.mv-api-catalog.tasks.mv-api-catalog-prediction-layer]
 cmd = "python tools/apps/catalog_prediction_layer.py"
 cwd = "packages/mv-api"
-description = "Generate and register the catalog-native MVAPI COCO133 prediction layer (needs a running catalog: simplecv-catalog-serve + dataforge-register)"
+description = "Generate and register the catalog-native MVAPI COCO133 prediction layer (needs a running catalog: simplecv-catalog-serve + dataforge-register --catalog-url rerun+http://127.0.0.1:9988 assembly101)"
 
 [feature.mv-api-catalog.tasks.mv-api-catalog-tests]
 cmd = "python -m pytest -q tests/test_catalog_prediction_layer.py"
@@ -963,7 +955,7 @@ PACKAGE_DIR = "packages/mv-api"
 [feature.mv-api-catalog-register-mac.tasks.mv-api-catalog-register]
 cmd = "python tools/apps/register_catalog_with_predictions.py"
 cwd = "packages/mv-api"
-description = "Register existing prediction RRD layers into a running catalog on macOS (needs a running catalog: simplecv-catalog-serve + dataforge-register)"
+description = "Register existing prediction RRD layers into a running catalog on macOS (needs a running catalog: simplecv-catalog-serve + dataforge-register --catalog-url rerun+http://127.0.0.1:9988 assembly101)"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # sam3-rerun
