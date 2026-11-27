@@ -231,6 +231,9 @@ def y_planes(chunks: Iterator[StreamPackets], codec: CatalogCodecName, threads: 
     for packets in chunks:
         if not packets.samples:
             continue
+        if packets.lead:
+            # Frames are consumed by position: a frame before the first keyframe, which cannot decode, would shift them all.
+            raise ValueError(f"the stream starts mid-GOP: its first {packets.lead} samples precede its first keyframe")
         container: av.container.InputContainer = av.open(BytesIO(packets.mp4(codec)), mode="r")
         with container:
             stream: av.video.stream.VideoStream = container.streams.video[0]

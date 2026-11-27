@@ -369,3 +369,29 @@ def test_a_cuda_decoder_that_falls_back_to_the_cpu_says_so_once(
     decoder.get_frames_at([0, 1])
     decoder.get_frames_at([40])
     assert capsys.readouterr().out.count("decodes on the CPU") == 1
+
+
+def test_a_stream_that_starts_mid_gop_decodes_from_its_first_keyframe(tmp_path: Path) -> None:
+    samples: list[tuple[bytes, bool]] = encode_h264(40, 10, seed=7)[3:]  # the first 7 samples precede the first keyframe
+    times = (33_333_333 * np.arange(len(samples), dtype=np.int64)).astype("timedelta64[ns]")
+    path: Path = tmp_path / "mid_gop.rrd"
+    with rr.RecordingStream("test", recording_id="segment") as rec:
+        rec.save(path)
+        rec.log("/cam/video", rr.VideoStream(codec=rr.VideoCodec.H264), static=True)
+        rec.send_columns(
+            "/cam/video",
+            indexes=[rr.TimeColumn("video_time", duration=times)],
+            columns=rr.VideoStream.columns(sample=[s for s, _ in samples], is_keyframe=[k for _, k in samples]),
+        )
+    from torchcodec.decoders import VideoDecoder
+
+    first_keyframe: int = next(position for position, (_, key) in enumerate(samples) if key)
+    tail = samples[first_keyframe:]
+    reference: torch.Tensor = VideoDecoder(wrap_mp4([s for s, _ in tail], [k for _, k in tail], 30, codec="h264"), device=str(_device())).get_frames_at(
+        list(range(len(tail)))
+    ).data
+    with rr.server.Server(datasets={"test": [path]}) as running:
+        decoder: ChunkedVideoDecoder = open_decoders(running.client().get_dataset("test"), "segment", ["/cam/video"], "video_time", _device(), chunk_s=0.5)[0]
+        assert torch.equal(decoder.get_frames_at(list(range(first_keyframe, len(samples)))), reference)
+        with pytest.raises(ValueError, match="before the stream's first keyframe"):
+            decoder.get_frame_at(first_keyframe - 1)

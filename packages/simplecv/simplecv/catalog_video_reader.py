@@ -125,9 +125,17 @@ class StreamPackets:
     keyframes: list[bool]
     """One per sample."""
 
+    @property
+    def lead(self) -> int:
+        """Samples before the first keyframe: non-zero only in a stream's first chunk when the stream starts mid-GOP."""
+        return next((position for position, key in enumerate(self.keyframes) if key), len(self.keyframes))
+
     def mp4(self, codec: CatalogCodecName) -> bytes:
-        """An in-memory MP4 (one copy of the chunk's bytes) with sample ``i`` at frame ``i``."""
-        return wrap_mp4(self.samples, self.keyframes, MP4_FPS, codec=codec)
+        """An in-memory MP4 (one copy of the chunk's bytes) from the first keyframe: frame ``i`` is sample ``lead + i``.
+
+        Samples before a keyframe cannot be decoded, and an MP4 that opens on one carries no parameter sets to open with.
+        """
+        return wrap_mp4(self.samples[self.lead :], self.keyframes[self.lead :], MP4_FPS, codec=codec)
 
 
 @dataclass(frozen=True, slots=True)
@@ -468,7 +476,8 @@ class ChunkedVideoDecoder:
         self.stream: int = stream
         self.device: torch.device = device
         self.max_open: int = max_open
-        self._open: OrderedDict[int, _ChunkDecoder] = OrderedDict()
+        self._open: OrderedDict[int, tuple[int, _ChunkDecoder]] = OrderedDict()
+        """Per open chunk: the stream sample index of the decoder's frame 0, and the decoder."""
         self._fallback_said: bool = False
 
     @property
@@ -479,20 +488,22 @@ class ChunkedVideoDecoder:
     def __len__(self) -> int:
         return len(self.index.times)
 
-    def _decoder(self, chunk: int) -> _ChunkDecoder:
+    def _decoder(self, chunk: int) -> tuple[int, _ChunkDecoder]:
         from torchcodec.decoders import VideoDecoder
 
         if chunk in self._open:
             self._open.move_to_end(chunk)
             return self._open[chunk]
         packets: StreamPackets = self.reader.packets(chunk).streams[self.stream]
+        if packets.lead == len(packets.samples):
+            raise ValueError(f"{self.index.entity}: chunk {chunk} holds only samples before the stream's first keyframe")
         decoder: _ChunkDecoder = VideoDecoder(
             packets.mp4(self.reader.streams[self.stream].codec), device=str(self.device), seek_mode="exact", num_ffmpeg_threads=0
         )
-        self._open[chunk] = decoder
+        self._open[chunk] = (packets.first + packets.lead, decoder)
         while len(self._open) > self.max_open:
             self._open.popitem(last=False)
-        return decoder
+        return self._open[chunk]
 
     def get_frames_at(self, indices: Sequence[int]) -> UInt8[Tensor, "n 3 h w"]:
         """In the order asked, repeats allowed.
@@ -508,8 +519,10 @@ class ChunkedVideoDecoder:
         chunk_of: Int64[ndarray, " u"] = np.searchsorted(self.reader.starts[:, self.stream], unique, side="right") - 1
         parts: list[Tensor] = []
         for chunk in np.unique(chunk_of).tolist():
-            local: list[int] = (unique[chunk_of == chunk] - int(self.reader.starts[chunk, self.stream])).tolist()
-            decoder: _ChunkDecoder = self._decoder(int(chunk))
+            frame_zero, decoder = self._decoder(int(chunk))
+            local: list[int] = (unique[chunk_of == chunk] - frame_zero).tolist()
+            if local[0] < 0:
+                raise ValueError(f"{self.index.entity}: sample {int(unique[chunk_of == chunk][0])} is before the stream's first keyframe")
             parts.append(decoder.get_frames_at(local).data)
             # torchcodec decodes on the CPU by itself when NVDEC cannot (no libnvcuvid, an unsupported stream): never silently.
             if decoder.cpu_fallback and not self._fallback_said:
