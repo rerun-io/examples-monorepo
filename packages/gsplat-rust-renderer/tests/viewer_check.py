@@ -47,7 +47,7 @@ def capture(viewer: ViewerClient, view: rrb.Spatial3DView, path: Path, allow_bla
     deadline = time.monotonic() + 60.0
     previous = None
     while time.monotonic() < deadline:
-        if not any(v.view_id.replace("-", "") == str(view.id).replace("-", "") for v in viewer.viewer_state().views):
+        if not any(v.view_id == view.id for v in viewer.get_state().views):
             time.sleep(0.1)
             continue
         path.unlink(missing_ok=True)
@@ -103,7 +103,7 @@ def cursor_at(viewer: ViewerClient, timeline: str, frame: int) -> bool:
 def wait_for_view(viewer: ViewerClient, view: rrb.Spatial3DView) -> None:
     """Wait until the viewer shows `view`, i.e. it has applied the blueprint that holds it."""
     deadline: float = time.monotonic() + 30.0
-    while not any(v.view_id.replace("-", "") == str(view.id).replace("-", "") for v in viewer.viewer_state().views):
+    while not any(v.view_id == view.id for v in viewer.get_state().views):
         if time.monotonic() > deadline:
             raise RuntimeError(f"Viewer never showed view {view.id}: the blueprint was not applied")
         time.sleep(0.1)
@@ -174,7 +174,7 @@ def check_portable_recording(config: Config) -> None:
                 unsupported = choice == "ComputeGaussianSplats3D" and name == "stock"
                 pixels = capture(viewer, view, config.out / f"{label}-{name}.png", allow_blank=unsupported, ready=None if unsupported else has_lego_color)
                 yellow: float = yellow_fraction(pixels)
-                reports = [report.summary for item in viewer.viewer_state().views for report in item.reports]
+                reports = [report.summary for item in viewer.get_state().views for report in item.reports]
                 print(f"PORTABLE_PIXELS {label} {name} yellow={yellow:.6f} reports={reports}", flush=True)
                 if unsupported:
                     assert yellow < 0.001, "Stock must not silently reinterpret the explicit compute choice"
@@ -483,7 +483,7 @@ def check_sog(config: Config) -> None:
     with spawn_viewer(str(config.binaries / "gsplat-rust-renderer")) as viewer:
         viewer.open_url(str(recording_path.resolve()))
         image: UInt8[np.ndarray, "h w 3"] = capture(viewer, view, config.out / "sog-gpu.png")
-        reports = [report.summary for item in viewer.viewer_state().views for report in item.reports]
+        reports = [report.summary for item in viewer.get_state().views for report in item.reports]
         assert not reports, f"view reports: {reports}"
     score: float = pose_psnr(config, ply, image, look_at(position, target, up), DEFAULT_FOV_Y, "sog-gpu")
     print(f"SOG_PIXELS gpu viewer/standalone {score:.3f} dB", flush=True)
