@@ -20,6 +20,7 @@ from simplecv.data.exoego.base_exoego import (
     ExoEgoSample,
 )
 from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
+from simplecv.rerun_log_utils import mp4_frame_timestamps_ns
 
 
 @dataclass
@@ -81,9 +82,7 @@ class RobocapSequence(BaseExoEgoSequence[RobocapConfig]):
                 strict=True,
             ):
                 stream_name: str = f"ego/{name}"
-                timestamps: Int[ndarray, "n_frames"] = rr.AssetVideo(
-                    path=video_path
-                ).read_frame_timestamps_nanos()
+                timestamps: Int[ndarray, "n_frames"] = mp4_frame_timestamps_ns(video_path)
                 stream_ts[stream_name] = timestamps
                 self._ego_stream_names.append(stream_name)
 

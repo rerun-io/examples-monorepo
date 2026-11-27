@@ -21,6 +21,7 @@ from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels, E
 from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
 from simplecv.data.exoego.sequence_identity import SequenceIdentity
 from simplecv.data.skeleton.coco_133 import LEFT_HAND_IDX, RIGHT_HAND_IDX
+from simplecv.rerun_log_utils import mp4_frame_timestamps_ns
 
 
 @serde
@@ -110,7 +111,7 @@ class HocapSequence(BaseExoEgoSequence[HocapConfig]):
                 strict=True,
             ):
                 stream_name: str = f"ego/{name}"
-                timestamps: Int[ndarray, "n_frames"] = rr.AssetVideo(path=video_path).read_frame_timestamps_nanos()
+                timestamps: Int[ndarray, "n_frames"] = mp4_frame_timestamps_ns(video_path)
                 stream_ts[stream_name] = timestamps
                 self._ego_stream_names.append(stream_name)
 
@@ -121,7 +122,7 @@ class HocapSequence(BaseExoEgoSequence[HocapConfig]):
                 strict=True,
             ):
                 stream_name = f"exo/{name}"
-                timestamps = rr.AssetVideo(path=video_path).read_frame_timestamps_nanos()
+                timestamps = mp4_frame_timestamps_ns(video_path)
                 stream_ts[stream_name] = timestamps
                 self._exo_stream_names.append(stream_name)
 

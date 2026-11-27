@@ -129,7 +129,7 @@ def log_exo_videos(sequence: BaseExoEgoSequence, parent_log_path: Path, timeline
     video_timestamps: dict[str, Int[ndarray, "n_frames"]] = {}
     for stream_name, video_source in exo_video_sources(sequence):
         video_log_path: Path = parent_log_path / "exo" / stream_name / "pinhole" / "video"
-        # log_video (rr.AssetVideo / Mp4Reader) accepts only file paths —
+        # log_video (Mp4Reader) accepts only file paths —
         # spill RRD blobs to a temp file first.
         if isinstance(video_source, bytes):
             with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as blob_file:
@@ -167,7 +167,7 @@ def log_camera_outputs(
     if timestamp_ns is not None:
         rr.set_time("video_time", duration=1e-9 * timestamp_ns)
     rr.set_time("frame_idx", sequence=frame_idx)
-    # Note: Video is logged once as AssetVideo, no per-frame image logging needed
+    # Note: Video is logged once as a VideoStream, no per-frame image logging needed
     rr.log(f"{pinhole_path}/segmentation_ids", rr.SegmentationImage(segmentation.seg_map))
 
     boxes: Float32[ndarray, "n 4"] | None = segmentation.boxes

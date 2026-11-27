@@ -25,7 +25,7 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 # Time Estimation Constants (empirical averages)
 # =============================================================================
 
-# Ingestion: ~10 seconds per episode (measured: 9.3s avg for AssetVideo + CSV)
+# Ingestion: ~10 seconds per episode (measured: 9.3s avg for video + CSV)
 INGEST_SECONDS_PER_EPISODE: float = 10.0
 
 # Cutting: ~8 seconds per video (GPU re-encode), ~7 videos per episode

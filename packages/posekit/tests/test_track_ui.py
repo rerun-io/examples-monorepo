@@ -16,6 +16,7 @@ from gradio_rerun import Rerun
 from gradio_rerun.events import SelectionChange, TimeUpdate
 from jaxtyping import Int64, UInt8
 from numpy import ndarray
+from simplecv.rerun_log_utils import log_video
 
 import posekit.track_recording as track_recording
 import posekit.track_ui as track_ui
@@ -92,7 +93,7 @@ def test_download_recording_contains_video_prompts_masks_and_confidence(tmp_path
 
     recording_pair: tuple[rr.RecordingStream, rr.BinaryStream] = _open_recording(session)
     rec: rr.RecordingStream = recording_pair[0]
-    rec.log("video", rr.AssetVideo(path=CLIP), static=True)
+    log_video(CLIP, Path("video"), recording=rec)
     rec.log("video/points", rr.Points2D([[360.0, 450.0]]))
     rec.disconnect()
     recording_pair = _open_recording(session)

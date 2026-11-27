@@ -19,6 +19,7 @@ from pyarrow import ChunkedArray
 
 from simplecv.rerun_log_utils import (
     log_video,
+    mp4_frame_timestamps_ns,
     mux_h264_to_mp4,
     read_video_stream_from_rrd,
 )
@@ -142,21 +143,34 @@ def _can_open_local_socket() -> bool:
         return False
 
 
-def test_log_video_timestamps_match(synthetic_h264_mp4: Path, tmp_path: Path) -> None:
-    """Mp4Reader logging returns the source video frame timestamps."""
-    rec_stream: rr.RecordingStream = rr.RecordingStream(
-        application_id="test-log-video-stream",
-        recording_id="ts-stream",
-    )
-    rec_stream.save(str(tmp_path / "stream.rrd"))
+def _bframe_h264_mp4(out_path: Path) -> Path:
+    """H.264 MP4 with B-frames: the reader re-encodes it for a VideoStream, and its PTS differ from its decode order."""
+    with av.open(str(out_path), mode="w") as container:
+        stream: av.video.stream.VideoStream = container.add_stream("libx264", rate=_FPS, options={"preset": "ultrafast", "bf": "2"})
+        stream.width = _WIDTH
+        stream.height = _HEIGHT
+        stream.pix_fmt = "yuv420p"
+        for i in range(_FRAME_COUNT):
+            container.mux(stream.encode(av.VideoFrame.from_ndarray(_frame_pixels(i), format="rgb24")))
+        container.mux(stream.encode())
+    with av.open(str(out_path)) as container:
+        assert container.streams.video[0].codec_context.has_b_frames
+    return out_path
 
-    entity: Path = Path("/video")
-    ts_asset: Int64[ndarray, "num_frames"] = rr.AssetVideo(path=synthetic_h264_mp4).read_frame_timestamps_nanos()
-    ts_stream: Int64[ndarray, "num_frames"] = log_video(synthetic_h264_mp4, entity, recording=rec_stream)
 
-    assert len(ts_asset) == _FRAME_COUNT
-    assert len(ts_stream) == _FRAME_COUNT
-    np.testing.assert_array_equal(np.sort(ts_asset), np.sort(ts_stream))
+@pytest.mark.parametrize("b_frames", [False, True], ids=["no-b-frames", "b-frames"])
+def test_mp4_frame_timestamps_are_the_times_log_video_logs(synthetic_h264_mp4: Path, tmp_path: Path, b_frames: bool) -> None:
+    """Dataset loaders read frame times with mp4_frame_timestamps_ns; they must be the times log_video puts on the timeline."""
+    video: Path = _bframe_h264_mp4(tmp_path / "bframes.mp4") if b_frames else synthetic_h264_mp4
+    rec: rr.RecordingStream = rr.RecordingStream(application_id="test-mp4-frame-timestamps", recording_id="ts")
+    rec.save(str(tmp_path / "stream.rrd"))
+
+    probed_ns: Int64[ndarray, "num_frames"] = mp4_frame_timestamps_ns(video)
+    logged_ns: Int64[ndarray, "num_frames"] = log_video(video, Path("/video"), recording=rec)
+
+    expected_ns: Int64[ndarray, "num_frames"] = np.round(np.arange(_FRAME_COUNT) * 1e9 / _FPS).astype(np.int64)
+    np.testing.assert_array_equal(probed_ns, expected_ns)
+    np.testing.assert_array_equal(logged_ns, expected_ns)
 
 
 def test_log_video_uses_the_context_recording(synthetic_h264_mp4: Path, tmp_path: Path) -> None:
@@ -172,7 +186,7 @@ def test_log_video_uses_the_context_recording(synthetic_h264_mp4: Path, tmp_path
 
 
 def test_log_video_accepts_quicktime_brand(synthetic_h264_mp4: Path, tmp_path: Path) -> None:
-    """iPhone .MOV files carry the ``qt`` brand (sniffed as video/quicktime, which rr.AssetVideo rejects)."""
+    """iPhone .MOV files carry the ``qt`` brand (sniffed as video/quicktime, which a container-sniffing probe rejects)."""
     mov_path: Path = tmp_path / "clip.MOV"
     with av.open(str(synthetic_h264_mp4)) as src, av.open(str(mov_path), mode="w", format="mov") as dst:
         in_stream: av.video.stream.VideoStream = src.streams.video[0]
@@ -188,6 +202,8 @@ def test_log_video_accepts_quicktime_brand(synthetic_h264_mp4: Path, tmp_path: P
     rec.save(str(tmp_path / "mov.rrd"))
     ts_stream: Int64[ndarray, "num_frames"] = log_video(mov_path, Path("/video"), recording=rec)
     assert len(ts_stream) == _FRAME_COUNT
+    with pytest.raises(RuntimeError, match="no frames"):
+        mp4_frame_timestamps_ns(mov_path)
 
 
 def test_log_video_sends_chunks_incrementally(synthetic_h264_mp4: Path, monkeypatch: pytest.MonkeyPatch) -> None:
