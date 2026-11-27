@@ -1,7 +1,8 @@
 """Backend-neutral tensor-function contract shared by torch/ONNX/TensorRT.
 
-A :class:`TensorRuntime` is a pure batched tensor function: CUDA tensors in, CUDA
-tensors out. Everything model-specific (crop generation, normalization, heatmap
+A :class:`TensorRuntime` is a pure batched tensor function: tensors in, tensors
+out, on the runtime's device (CUDA, or the CPU for ONNX Runtime's CPU
+provider). Everything model-specific (crop generation, normalization, heatmap
 or SimCC decode) happens *outside* the runtime in shared torch ops, which is what
 lets one model definition run on all three backends with bit-comparable pre- and
 postprocessing.
@@ -40,7 +41,7 @@ class RuntimeSpec:
 
 @runtime_checkable
 class TensorRuntime(Protocol):
-    """Batched CUDA-tensor function backing one neural network.
+    """Batched tensor function backing one neural network.
 
     Output-lifetime contract: accelerated backends return views into
     runtime-owned buffers that the NEXT call overwrites — clone anything that
@@ -56,11 +57,11 @@ class TensorRuntime(Protocol):
         """Run one batch.
 
         Args:
-            inputs: CUDA tensors keyed by ``spec.inputs`` names. All inputs share
+            inputs: Tensors on the runtime's device keyed by ``spec.inputs`` names. All inputs share
                 the same leading batch size, which must be ``<= spec.max_batch_size``.
 
         Returns:
-            CUDA tensors keyed by ``spec.outputs`` names, sliced to the submitted
+            Tensors on the runtime's device keyed by ``spec.outputs`` names, sliced to the submitted
             batch size. May be views into reused buffers — see the class docstring.
         """
         ...

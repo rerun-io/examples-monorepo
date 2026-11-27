@@ -20,7 +20,7 @@ from posekit.models.base import TopDownPose2d
 from posekit.ops.crops import IMAGENET_MEAN_255, IMAGENET_STD_255, CropBatch, CropSpec, crop_coords_to_image, crop_frames
 from posekit.ops.decode import decode_simcc
 from posekit.predictions import BoxDetections, Keypoints2d
-from posekit.runtimes import OnnxBackendConfig, OnnxOrTrtBackendConfig, TensorRuntime, create_runtime_from_onnx, run_chunked
+from posekit.runtimes import AutoBackendConfig, OnnxOrTrtBackendConfig, TensorRuntime, create_runtime_from_onnx, run_chunked
 from posekit.skeletons import COCO_17, COCO_133, KeypointSkeleton
 
 RtmPoseVariant = Literal["rtmpose-m-coco17", "rtmpose-x-coco17", "rtmw-x-coco133"]
@@ -45,7 +45,7 @@ class RtmPoseConfig:
 
     variant: RtmPoseVariant = "rtmw-x-coco133"
     """Model checkpoint to run (defines skeleton and crop size)."""
-    backend: OnnxOrTrtBackendConfig = field(default_factory=OnnxBackendConfig)
+    backend: OnnxOrTrtBackendConfig = field(default_factory=AutoBackendConfig)
     """Accelerated backend running the pose graph."""
     padding: float = 1.25
     """Bbox padding multiplier before cropping."""

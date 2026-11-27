@@ -5,13 +5,16 @@ import pytest
 import torch
 from jaxtyping import Float32, Float64, UInt8
 from numpy import ndarray
+from posekit.models.rtmpose import RtmPoseConfig
+from posekit.models.yolox import YoloxDetectorConfig
 from posekit.predictions import BoxDetections, Keypoints2d
+from posekit.runtimes import OnnxBackendConfig, TensorRtBackendConfig
 from posekit.skeletons import COCO_133
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 from torch import Tensor
 
 from mv_api import multiview_pose_estimator as estimator_module
-from mv_api.multiview_pose_estimator import MultiviewBodyTracker, MultiviewBodyTrackerConfig, MVHistory
+from mv_api.multiview_pose_estimator import MultiviewBodyTracker, MultiviewBodyTrackerConfig, MVHistory, posekit_model_configs
 
 
 def test_compute_hand_bbox_expands_square_and_clips_to_image() -> None:
@@ -120,3 +123,11 @@ def test_multiview_tracker_filters_images_and_pinholes_for_selected_detection_ca
     assert pose_model.seen_pixel_values == [20]
     assert output_state.uvc_t is not None
     assert output_state.uvc_t.shape == (1, 133, 3)
+
+
+
+@pytest.mark.parametrize(("backend", "expected"), [("onnxruntime", OnnxBackendConfig), ("tensorrt", TensorRtBackendConfig)])
+def test_the_tracker_backend_is_set_on_both_posekit_models(backend: str, expected: type) -> None:
+    """posekit's own default is ``auto``, so ``onnxruntime`` has to be asked for explicitly, as ``tensorrt`` is."""
+    configs: tuple[YoloxDetectorConfig, RtmPoseConfig] = posekit_model_configs(MultiviewBodyTrackerConfig(backend=cast(Any, backend)))
+    assert [type(config.backend) for config in configs] == [expected, expected]

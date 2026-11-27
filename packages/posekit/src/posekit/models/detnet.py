@@ -17,7 +17,7 @@ from torch import Tensor
 
 from posekit.models.base import HandDetector
 from posekit.predictions import BoxDetections, HandDetections, HandSide, validate_frames_rgb
-from posekit.runtimes import OnnxBackendConfig, OnnxOrTrtBackendConfig, TensorRuntime, create_runtime_from_onnx, run_chunked
+from posekit.runtimes import AutoBackendConfig, OnnxOrTrtBackendConfig, TensorRuntime, create_runtime_from_onnx, run_chunked
 
 NET_WIDTH: int = 640
 NET_HEIGHT: int = 480
@@ -90,7 +90,7 @@ class DetNetHandDetectorConfig:
     """Presence probability above which a slot is a hand."""
     quarter_turns: int = 0
     """Clockwise quarter turns that make this camera upright (the model is trained on upright frames; RoboCap cams 2-3: 2)."""
-    backend: OnnxOrTrtBackendConfig = field(default_factory=OnnxBackendConfig)
+    backend: OnnxOrTrtBackendConfig = field(default_factory=AutoBackendConfig)
     """ONNX Runtime reference or a cached TensorRT engine, dynamic batch."""
 
     def setup(self) -> "DetNetHandDetector":

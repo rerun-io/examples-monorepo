@@ -72,10 +72,11 @@ def assert_hands(actual: HandPoses3d, expected: dict[str, np.ndarray], *, xyz_m:
 def test_egohand_eager_matches_preport(oak) -> None:
     """ORT detector + eager predictor, the reference path."""
     from posekit.models.egohand import EgoHandConfig, EgoHandDetectorConfig, EgoHandReconstruction
+    from posekit.runtimes import OnnxBackendConfig
 
     frames, camera = oak
     with torch.inference_mode():
-        detections: HandDetections = EgoHandDetectorConfig().setup()(frames)
+        detections: HandDetections = EgoHandDetectorConfig(backend=OnnxBackendConfig()).setup()(frames)
         assert_detections(detections, read_golden("egohand_golden.rrd", "egohand_eager_detections"))
         result = EgoHandConfig().setup()(frames, detections, camera)
     assert isinstance(result, EgoHandReconstruction)

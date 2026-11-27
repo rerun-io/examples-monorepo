@@ -10,7 +10,15 @@ import tyro
 from einops import rearrange
 from jaxtyping import Float, UInt8
 from torch import Tensor
-from trtkit import OnnxBackendConfig, OnnxOrTrtBackendConfig, TensorRtBackendConfig, TensorRuntime, create_runtime_from_onnx
+from trtkit import (
+    OnnxBackendConfig,
+    OnnxOrTrtBackendConfig,
+    ResolvedBackendConfig,
+    TensorRtBackendConfig,
+    TensorRuntime,
+    create_runtime_from_onnx,
+    resolve_backend,
+)
 
 IMAGENET_MEAN: tuple[float, float, float] = (0.485, 0.456, 0.406)
 IMAGENET_STD: tuple[float, float, float] = (0.229, 0.224, 0.225)
@@ -72,11 +80,12 @@ class DepthEngine:
 
         Args:
             onnx_path: Dynamic-batch ONNX depth model.
-            backend: CUDA ONNX Runtime or cached TensorRT backend configuration.
+            backend: ONNX Runtime, cached TensorRT, or ``auto`` (resolved here, so a TensorRT choice gets the patterns).
         """
-        if isinstance(backend, TensorRtBackendConfig):
-            backend = replace(backend, extra_output_patterns=TRT_EXTRA_OUTPUT_PATTERNS)
-        self._runtime: TensorRuntime = create_runtime_from_onnx(onnx_path, backend)
+        resolved: ResolvedBackendConfig = resolve_backend(backend)
+        if isinstance(resolved, TensorRtBackendConfig):
+            resolved = replace(resolved, extra_output_patterns=TRT_EXTRA_OUTPUT_PATTERNS)
+        self._runtime: TensorRuntime = create_runtime_from_onnx(onnx_path, resolved)
 
     def __call__(self, inputs: DepthInputs) -> DepthOutputs:
         """Predict current-view metric depth from seven posed source views."""
