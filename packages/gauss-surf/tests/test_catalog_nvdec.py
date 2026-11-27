@@ -1,7 +1,6 @@
 """The segment reader and frame selection decode on NVDEC, from a catalog served over a synthetic H.264 recording."""
 
 from collections.abc import Iterator
-from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
@@ -9,7 +8,7 @@ import pytest
 import torch
 
 pytestmark = pytest.mark.integration
-av = pytest.importorskip("av", reason="PyAV encodes the synthetic video")
+pytest.importorskip("av", reason="PyAV encodes the synthetic video")
 rr = pytest.importorskip("rerun", reason="the catalog server comes from rerun-sdk")
 pytest.importorskip("rerun.catalog", reason="requires the rerun.catalog dependency in this environment")
 pytest.importorskip("torchcodec", reason="requires the torchcodec dependency in this environment")
@@ -17,33 +16,18 @@ pytest.importorskip("torchcodec", reason="requires the torchcodec dependency in 
 from arkitscenes_download.ingest.paths import TIMELINE, VIDEO_WIDE  # noqa: E402
 from rerun.catalog import DatasetEntry  # noqa: E402
 from simplecv.catalog_video_codec import wrap_mp4  # noqa: E402
+from simplecv.testing import encode_h264  # noqa: E402
 from torch import Tensor  # noqa: E402
 
 FRAMES: int = 40
 TIMES = (16_666_667 * np.arange(FRAMES, dtype=np.int64)).astype("timedelta64[ns]")
 
 
-def _h264(frames: int, gop: int) -> list[tuple[bytes, bool]]:
-    """Moving noise, closed GOPs, no B-frames: every frame distinct, one packet per frame."""
-    codec = av.CodecContext.create("libx264", "w")
-    codec.width, codec.height, codec.pix_fmt = 96, 64, "yuv420p"
-    codec.time_base = Fraction(1, 60)
-    codec.options = {"g": str(gop), "keyint_min": str(gop), "bf": "0", "sc_threshold": "0"}
-    base: np.ndarray = np.random.default_rng(0).integers(0, 255, (64, 96, 3), dtype=np.uint8)
-    packets: list = []
-    for index in range(frames):
-        frame = av.VideoFrame.from_ndarray(np.roll(base, 3 * index, axis=1), format="rgb24")
-        frame.pts = index
-        packets += codec.encode(frame)
-    packets += codec.encode(None)
-    return [(bytes(packet), bool(packet.is_keyframe)) for packet in packets]
-
-
 @pytest.fixture
 def samples() -> list[tuple[bytes, bool]]:
     if not torch.cuda.is_available():
         pytest.skip("no CUDA device: the NVDEC path cannot be checked here")
-    return _h264(FRAMES, 8)
+    return encode_h264(FRAMES, 8)
 
 
 @pytest.fixture

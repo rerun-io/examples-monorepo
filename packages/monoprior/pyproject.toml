@@ -122,11 +122,6 @@ min_confidence = 60
 ignore_names = [
     # Names consumed by dynamic imports and pytest collection.
     "pytestmark",
-    # tests/test_cube_layer: PyAV encoder settings of the synthetic video.
-    "options",
-    "pix_fmt",
-    "pts",
-    "time_base",
     # rig_depth/xlens_trt: the class swap that gives the export copy of the DPT head its symbolic-size position grid.
     "__class__",
     # tests/test_xlens_dynamic_export: exporter entry point invoked in a clean interpreter via subprocess.

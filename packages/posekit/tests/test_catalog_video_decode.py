@@ -2,7 +2,6 @@
 calibration's pixel hashes) of the whole-stream decoder they replace."""
 
 from collections.abc import Iterator
-from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
@@ -12,8 +11,8 @@ import torch
 pytest.importorskip("rerun.catalog", reason="rerun.catalog is required by this test module")
 pytest.importorskip("torchcodec", reason="torchcodec is required by this test module")
 
-import av  # noqa: E402
 import rerun as rr  # noqa: E402
+from simplecv.testing import encode_h264
 
 pytestmark = pytest.mark.integration
 
@@ -25,25 +24,15 @@ GOP: int = 9
 @pytest.fixture(scope="module")
 def server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[rr.server.Server]:
     """H.264 of moving noise (every frame distinct), closed GOPs, no B-frames, at 30 fps on ``video_time``."""
-    codec = av.CodecContext.create("libx264", "w")
-    codec.width, codec.height, codec.pix_fmt = 96, 64, "yuv420p"
-    codec.time_base = Fraction(1, 30)
-    codec.options = {"g": str(GOP), "keyint_min": str(GOP), "bf": "0", "sc_threshold": "0"}
-    base: np.ndarray = np.random.default_rng(0).integers(0, 255, (64, 96, 3), dtype=np.uint8)
-    packets: list = []
-    for index in range(FRAMES):
-        frame = av.VideoFrame.from_ndarray(np.roll(base, 3 * index, axis=1), format="rgb24")
-        frame.pts = index
-        packets += codec.encode(frame)
-    packets += codec.encode(None)
+    samples: list[tuple[bytes, bool]] = encode_h264(FRAMES, GOP)
     path: Path = tmp_path_factory.mktemp("video") / "camera.rrd"
     with rr.RecordingStream("test", recording_id="segment") as rec:
         rec.save(path)
         rec.log(ENTITY, rr.VideoStream(codec=rr.VideoCodec.H264), static=True)
         rec.send_columns(
             ENTITY,
-            indexes=[rr.TimeColumn("video_time", duration=(33_333_333 * np.arange(len(packets), dtype=np.int64)).astype("timedelta64[ns]"))],
-            columns=rr.VideoStream.columns(sample=[bytes(p) for p in packets], is_keyframe=[bool(p.is_keyframe) for p in packets]),
+            indexes=[rr.TimeColumn("video_time", duration=(33_333_333 * np.arange(len(samples), dtype=np.int64)).astype("timedelta64[ns]"))],
+            columns=rr.VideoStream.columns(sample=[sample for sample, _ in samples], is_keyframe=[key for _, key in samples]),
         )
     with rr.server.Server(datasets={"test": [path]}) as running:
         yield running
@@ -51,11 +40,11 @@ def server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[rr.server.Serve
 
 def _whole_stream_nhwc(server: rr.server.Server, device: str) -> torch.Tensor:
     """The replaced path: every packet muxed into one MP4, decoded with approximate seeks (body_calibrate, hands_eval)."""
-    from simplecv.catalog_video import read_catalog_videos
     from simplecv.catalog_video_codec import wrap_mp4
+    from simplecv.testing import whole_column
     from torchcodec.decoders import VideoDecoder
 
-    video = read_catalog_videos(server.client().get_dataset("test"), "segment", [ENTITY], "video_time")[0]
+    video = whole_column(server.client().get_dataset("test"), "segment", [ENTITY], "video_time")[0]
     decoder = VideoDecoder(wrap_mp4(video.samples, video.keyframes, 30, codec=video.codec), device=device, dimension_order="NHWC", seek_mode="approximate")
     return decoder.get_frames_at(list(range(len(video.samples)))).data.contiguous()
 

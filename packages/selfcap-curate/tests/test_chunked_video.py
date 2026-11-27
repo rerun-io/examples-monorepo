@@ -37,11 +37,11 @@ def server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[rr.server.Serve
 
 def _whole_stream(server: rr.server.Server) -> torch.Tensor:
     """The replaced path: every packet in one MP4, approximate seeks, on CUDA."""
-    from simplecv.catalog_video import read_catalog_videos
     from simplecv.catalog_video_codec import wrap_mp4
+    from simplecv.testing import whole_column
     from torchcodec.decoders import VideoDecoder
 
-    video = read_catalog_videos(server.client().get_dataset("test"), "segment", [ENTITY], "capture_time")[0]
+    video = whole_column(server.client().get_dataset("test"), "segment", [ENTITY], "capture_time")[0]
     decoder = VideoDecoder(wrap_mp4(video.samples, video.keyframes, 24, codec=video.codec), device="cuda", seek_mode="approximate")
     return decoder.get_frames_at(list(range(len(video.samples)))).data
 

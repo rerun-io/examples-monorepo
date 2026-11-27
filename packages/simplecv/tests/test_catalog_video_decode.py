@@ -11,13 +11,11 @@ import torch
 pytest.importorskip("rerun.catalog", reason="rerun.catalog is required by this test module")
 pytest.importorskip("torchcodec", reason="torchcodec is required by this test module")
 
-from video_fixtures import encode_h264  # noqa: E402
-
 from simplecv import catalog_video_decode  # noqa: E402
-from simplecv.catalog_video import read_catalog_videos  # noqa: E402
 from simplecv.catalog_video_codec import wrap_mp4  # noqa: E402
 from simplecv.catalog_video_decode import PrefetchedChunks, StreamDecoder  # noqa: E402
 from simplecv.catalog_video_reader import CatalogVideoReader, VideoChunk, read_video_index, select_decode_device  # noqa: E402
+from simplecv.testing import encode_h264, whole_column  # noqa: E402
 
 pytestmark = pytest.mark.integration
 
@@ -57,7 +55,7 @@ def reference(server: rr.server.Server) -> list[torch.Tensor]:
     from torchcodec.decoders import VideoDecoder
 
     frames: list[torch.Tensor] = []
-    for video in read_catalog_videos(server.client().get_dataset("test"), "segment", list(CAMERAS), "video_time"):
+    for video in whole_column(server.client().get_dataset("test"), "segment", list(CAMERAS), "video_time"):
         decoder = VideoDecoder(wrap_mp4(video.samples, video.keyframes, 30, codec=video.codec), device=select_decode_device(), seek_mode="exact")
         frames.append(decoder.get_frames_at(list(range(len(video.samples)))).data.permute(0, 2, 3, 1).cpu())
     return frames

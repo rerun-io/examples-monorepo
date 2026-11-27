@@ -1,8 +1,8 @@
 """Bounded-memory reads of a segment's ``VideoStream``s from a Rerun catalog: an index first, packets per time chunk.
 
-:func:`simplecv.catalog_video.read_catalog_videos` materializes whole columns: a 4 h, 6-camera RoboCap session is
-~42 GB of packets, held up to three times over (the Arrow result, per-camera copies, a whole-stream MP4). This module
-reads the same packets in pieces whose size does not depend on the session's length:
+A whole-column read of a 4 h, 6-camera RoboCap session is ~42 GB of packets, and decoding it used to hold them up to
+three times over (the Arrow result, per-camera copies, a whole-stream MP4). This module reads the same packets in
+pieces whose size does not depend on the session's length:
 
 1. :func:`read_video_index`: every sample's timestamp and keyframe flag per stream, in time windows. The server reads
    the blobs of a window to answer it, so a window bounds what it holds; none are shipped.
@@ -283,6 +283,7 @@ class CatalogVideoReader:
         units: float = _units_per_second(timeline, self.timeline_type)
         self.starts: Int64[ndarray, "n_bounds n_streams"] = chunk_starts(self.streams, max(1, int(chunk_s * units)))
         self._cache: OrderedDict[int, VideoChunk] = OrderedDict()
+        self._inflight: dict[int, Future[VideoChunk]] = {}
         self._cached_bytes: int = 0
         self._lock: threading.Lock = threading.Lock()
         self.fetched_bytes: int = 0
@@ -338,19 +339,32 @@ class CatalogVideoReader:
         return fetched
 
     def packets(self, chunk: int) -> VideoChunk:
-        """:meth:`fetch` through the byte-bounded cache, for random access."""
+        """:meth:`fetch` through the byte-bounded cache, for random access; threads that miss one chunk at once share its fetch."""
         with self._lock:
             if chunk in self._cache:
                 self._cache.move_to_end(chunk)
                 return self._cache[chunk]
-        fetched: VideoChunk = self.fetch(chunk)
+            owner: bool = chunk not in self._inflight
+            if owner:
+                self._inflight[chunk] = Future()
+            pending: Future[VideoChunk] = self._inflight[chunk]
+        if not owner:
+            return pending.result()
+        try:
+            fetched: VideoChunk = self.fetch(chunk)
+        except BaseException as error:
+            with self._lock:
+                del self._inflight[chunk]
+            pending.set_exception(error)
+            raise
         with self._lock:
-            if chunk not in self._cache:
-                self._cache[chunk] = fetched
-                self._cached_bytes += fetched.nbytes
+            del self._inflight[chunk]
+            self._cache[chunk] = fetched
+            self._cached_bytes += fetched.nbytes
             while self._cached_bytes > self.cache_bytes and len(self._cache) > 1:
                 _, evicted = self._cache.popitem(last=False)
                 self._cached_bytes -= evicted.nbytes
+        pending.set_result(fetched)
         return fetched
 
 

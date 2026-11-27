@@ -56,10 +56,9 @@ ignore = [
 [tool.vulture]
 paths = ["exo_calib", "tests"]
 # Tyro-facing verb entry points (the CLI shims call them) and the eval.json dataclass fields (serialized with asdict).
-# options, pix_fmt, pts, time_base: PyAV encoder settings in the synthetic-video test.
 ignore_names = [
     "main", "mean_abs", "max_abs", "se3", "sim3", "focal_error_pct", "camera_names", "refinement_diagnostics", "refined_rig_geometry",
-    "pytestmark", "options", "pix_fmt", "pts", "time_base",
+    "pytestmark",
 ]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
 sort_by_size = true

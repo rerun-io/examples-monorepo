@@ -1,36 +1,20 @@
 """The exo cameras decode on NVDEC over one shared reader, from a catalog served over a synthetic H.264 recording."""
 
-from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
 import pytest
 import torch
+from simplecv.testing import encode_h264
 
 pytestmark = pytest.mark.integration
-av = pytest.importorskip("av", reason="PyAV encodes the synthetic video")
+pytest.importorskip("av", reason="PyAV encodes the synthetic video")
 rr = pytest.importorskip("rerun", reason="the catalog server comes from rerun-sdk")
 pytest.importorskip("rerun.catalog", reason="requires the rerun.catalog dependency in this environment")
 pytest.importorskip("torchcodec", reason="requires the torchcodec dependency in this environment")
 
 FRAMES: int = 24
 CAMERAS: tuple[str, ...] = ("rig_00", "rig_01")
-
-
-def _h264(frames: int, gop: int, seed: int) -> list[tuple[bytes, bool]]:
-    """Moving noise, closed GOPs, no B-frames: every frame distinct, one packet per frame."""
-    codec = av.CodecContext.create("libx264", "w")
-    codec.width, codec.height, codec.pix_fmt = 96, 64, "yuv420p"
-    codec.time_base = Fraction(1, 30)
-    codec.options = {"g": str(gop), "keyint_min": str(gop), "bf": "0", "sc_threshold": "0"}
-    base: np.ndarray = np.random.default_rng(seed).integers(0, 255, (64, 96, 3), dtype=np.uint8)
-    packets: list = []
-    for index in range(frames):
-        frame = av.VideoFrame.from_ndarray(np.roll(base, 3 * index, axis=1), format="rgb24")
-        frame.pts = index
-        packets += codec.encode(frame)
-    packets += codec.encode(None)
-    return [(bytes(packet), bool(packet.is_keyframe)) for packet in packets]
 
 
 def test_exo_streams_decode_every_camera_on_cuda_from_one_reader(tmp_path: Path) -> None:
@@ -43,7 +27,7 @@ def test_exo_streams_decode_every_camera_on_cuda_from_one_reader(tmp_path: Path)
     from exo_calib.video_io import ExoVideoStreams, open_exo_streams
 
     times = (33_333_333 * np.arange(FRAMES, dtype=np.int64)).astype("timedelta64[ns]")
-    encoded: dict[str, list[tuple[bytes, bool]]] = {name: _h264(FRAMES, 6, seed) for seed, name in enumerate(CAMERAS)}
+    encoded: dict[str, list[tuple[bytes, bool]]] = {name: encode_h264(FRAMES, 6, seed) for seed, name in enumerate(CAMERAS)}
     path: Path = tmp_path / "segment.rrd"
     with rr.RecordingStream("test", recording_id="segment") as recording:
         recording.save(path)

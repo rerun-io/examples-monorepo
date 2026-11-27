@@ -12,9 +12,7 @@ import torch
 pytest.importorskip("rerun.catalog", reason="rerun.catalog is required by this test module")
 pytest.importorskip("torchcodec", reason="torchcodec is required by this test module")
 
-from video_fixtures import encode_h264  # noqa: E402
-
-from simplecv.catalog_video import CatalogVideo, read_catalog_videos  # noqa: E402
+from simplecv.catalog_video import CatalogVideo  # noqa: E402
 from simplecv.catalog_video_codec import wrap_mp4  # noqa: E402
 from simplecv.catalog_video_reader import (  # noqa: E402
     CatalogVideoReader,
@@ -29,6 +27,7 @@ from simplecv.catalog_video_reader import (  # noqa: E402
     relay_video,
     select_decode_device,
 )
+from simplecv.testing import encode_h264, whole_column  # noqa: E402
 
 pytestmark = pytest.mark.integration
 
@@ -71,7 +70,7 @@ def server(recording: Path) -> Iterator[rr.server.Server]:
 @pytest.fixture(scope="module")
 def whole(server: rr.server.Server) -> tuple[CatalogVideo, ...]:
     """The reference: today's whole-column read."""
-    return read_catalog_videos(server.client().get_dataset("test"), "segment", list(CAMERAS), "video_time")
+    return whole_column(server.client().get_dataset("test"), "segment", list(CAMERAS), "video_time")
 
 
 @pytest.fixture(scope="module")
@@ -291,7 +290,7 @@ def test_a_sequence_timeline_reads_in_frame_counted_chunks(tmp_path: Path) -> No
         )
     with rr.server.Server(datasets={"test": [path]}) as running:
         dataset = running.client().get_dataset("test")
-        video: CatalogVideo = read_catalog_videos(dataset, "segment", ["/cam/video"], "frame_index")[0]
+        video: CatalogVideo = whole_column(dataset, "segment", ["/cam/video"], "frame_index")[0]
         index: tuple[StreamIndex, ...] = read_video_index(dataset, "segment", ["/cam/video"], "frame_index", window_s=0.5)
         np.testing.assert_array_equal(index[0].times, video.times)
         reader = CatalogVideoReader(dataset, "segment", index, "frame_index", chunk_s=1.0)  # 30 frame numbers a chunk
@@ -310,8 +309,8 @@ def test_relay_logs_the_window_from_the_keyframe_at_or_before_it(server: rr.serv
         rec.save(relayed_path)
         logged: int = relay_video(reader, targets, first_ns, last_ns, recording=rec)
     with rr.server.Server(datasets={"relayed": [relayed_path]}) as relayed_server:
-        relayed = read_catalog_videos(relayed_server.client().get_dataset("relayed"), "segment", targets, "video_time")
-    whole_videos = read_catalog_videos(dataset, "segment", list(CAMERAS), "video_time")
+        relayed = whole_column(relayed_server.client().get_dataset("relayed"), "segment", targets, "video_time")
+    whole_videos = whole_column(dataset, "segment", list(CAMERAS), "video_time")
     expected_total: int = 0
     for got, video, (_, gop, offset_ns, _) in zip(relayed, whole_videos, CAMERAS.values(), strict=True):
         # The keyframes are every gop-th sample: the window opens on the last one at or before first_ns.
@@ -322,3 +321,28 @@ def test_relay_logs_the_window_from_the_keyframe_at_or_before_it(server: rr.serv
         assert got.keyframes == video.keyframes[first:stop]
         expected_total += stop - first
     assert logged == expected_total
+
+
+def test_concurrent_misses_of_one_chunk_share_one_fetch(
+    server: rr.server.Server, index: tuple[StreamIndex, ...], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    reader = CatalogVideoReader(server.client().get_dataset("test"), "segment", index, "video_time", chunk_s=0.5)
+    plain_fetch = CatalogVideoReader.fetch
+    calls: list[int] = []
+    lock = threading.Lock()
+
+    def slow_fetch(self: CatalogVideoReader, chunk: int) -> VideoChunk:
+        with lock:
+            calls.append(chunk)
+        time.sleep(0.2)  # long enough that every thread misses before the first fetch lands
+        return plain_fetch(self, chunk)
+
+    monkeypatch.setattr(CatalogVideoReader, "fetch", slow_fetch)
+    with ThreadPoolExecutor(4) as pool:
+        chunks: list[VideoChunk] = list(pool.map(lambda _: reader.packets(2), range(4)))
+    assert calls == [2]
+    assert all(chunk is chunks[0] for chunk in chunks)

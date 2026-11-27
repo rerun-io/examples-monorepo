@@ -18,12 +18,12 @@ pytest.importorskip("torchcodec", reason="torchcodec is required by this test mo
 from rerun.catalog import DatasetEntry  # noqa: E402
 from rerun.experimental.dataloader import DecodeRequest, FieldBatch  # noqa: E402
 from torch import Tensor  # noqa: E402
-from video_fixtures import encode_h264  # noqa: E402
 
 import simplecv.rerun_dataloader as rerun_dataloader  # noqa: E402
 from simplecv.catalog_video_codec import wrap_mp4  # noqa: E402
 from simplecv.catalog_video_reader import ChunkedVideoDecoder, select_decode_device  # noqa: E402
 from simplecv.rerun_dataloader import SegmentNvdecDecoder  # noqa: E402
+from simplecv.testing import encode_h264  # noqa: E402
 
 
 def test_segment_nvdec_decoder_decodes_a_fetch_block_across_segments(monkeypatch: pytest.MonkeyPatch) -> None:

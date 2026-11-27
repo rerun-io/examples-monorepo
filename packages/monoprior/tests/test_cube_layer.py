@@ -1,6 +1,5 @@
 """``cube_layer.iter_framesets`` on the chunked reader: NVDEC whenever CUDA is available, the whole-stream decoder's frames."""
 
-from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
@@ -10,8 +9,8 @@ import torch
 pytest.importorskip("rerun.catalog", reason="rerun.catalog is required by this test module")
 pytest.importorskip("torchcodec", reason="torchcodec is required by this test module")
 
-import av  # noqa: E402
 import rerun as rr  # noqa: E402
+from simplecv.testing import encode_h264
 
 pytestmark = pytest.mark.integration
 
@@ -19,26 +18,10 @@ SIZE: int = 64
 FACES: tuple[str, ...] = ("cube6_front0", "cube6_left")
 
 
-def _samples(frames: int, seed: int) -> list[tuple[bytes, bool]]:
-    """H.264 of moving noise, closed GOPs of 8, no B-frames."""
-    codec = av.CodecContext.create("libx264", "w")
-    codec.width, codec.height, codec.pix_fmt = SIZE, SIZE, "yuv420p"
-    codec.time_base = Fraction(1, 30)
-    codec.options = {"g": "8", "keyint_min": "8", "bf": "0", "sc_threshold": "0"}
-    base: np.ndarray = np.random.default_rng(seed).integers(0, 255, (SIZE, SIZE, 3), dtype=np.uint8)
-    packets: list = []
-    for index in range(frames):
-        frame = av.VideoFrame.from_ndarray(np.roll(base, 3 * index, axis=1), format="rgb24")
-        frame.pts = index
-        packets += codec.encode(frame)
-    packets += codec.encode(None)
-    return [(bytes(packet), bool(packet.is_keyframe)) for packet in packets]
-
-
 def test_framesets_decode_on_nvdec_whenever_cuda_is_available(tmp_path: Path) -> None:
-    from simplecv.catalog_video import read_catalog_videos
     from simplecv.catalog_video_codec import wrap_mp4
     from simplecv.catalog_video_reader import select_decode_device
+    from simplecv.testing import whole_column
     from torchcodec.decoders import VideoDecoder
 
     from monopriors.cube_faces import CubeFace
@@ -49,7 +32,7 @@ def test_framesets_decode_on_nvdec_whenever_cuda_is_available(tmp_path: Path) ->
     with rr.RecordingStream("test", recording_id="segment") as rec:
         rec.save(path)
         for seed, _ in enumerate(FACES):
-            samples: list[tuple[bytes, bool]] = _samples(40, seed)
+            samples: list[tuple[bytes, bool]] = encode_h264(40, 8, seed, width=SIZE, height=SIZE)
             entity: str = f"/world/rig_00/cam_0{seed}/pinhole/video"
             rec.log(entity, rr.VideoStream(codec=rr.VideoCodec.H264), static=True)
             rec.send_columns(
@@ -63,7 +46,7 @@ def test_framesets_decode_on_nvdec_whenever_cuda_is_available(tmp_path: Path) ->
     device: str = select_decode_device()
     with open_rrd(path, "faces") as layer:
         framesets = list(iter_framesets(layer, faces, "video_time", set(wanted)))
-        videos = read_catalog_videos(layer.dataset, layer.segment_id, [f"{face.entity}/pinhole/video" for face in faces], "video_time")
+        videos = whole_column(layer.dataset, layer.segment_id, [f"{face.entity}/pinhole/video" for face in faces], "video_time")
     assert [frameset.t_ns for frameset in framesets] == wanted
     for face, video in zip(faces, videos, strict=True):
         whole = VideoDecoder(wrap_mp4(video.samples, video.keyframes, 30, codec=video.codec), device=device, seek_mode="exact")
