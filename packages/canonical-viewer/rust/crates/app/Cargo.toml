@@ -1,0 +1,41 @@
+[package]
+name = "canonical-viewer"
+description = "The canonical Rerun viewer: the stock rerun command line with every extension in EXTENSIONS"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "canonical_viewer"
+
+[[bin]]
+name = "rerun-canonical"
+path = "src/main.rs"
+
+[dependencies]
+canonical-viewer-extension.workspace = true
+mimalloc.workspace = true
+re_build_info.workspace = true
+re_error.workspace = true
+re_log = { workspace = true, features = ["setup"] }
+re_memory.workspace = true
+re_viewer.workspace = true
+# The stock `rerun` binary's features (rerun-cli `base`), without analytics, perf_telemetry and the OSS server (the
+# catalog server stays on stock rerun). `nasm` turns on dav1d's assembly for AV1 on x86-64; other targets ignore it.
+rerun = { workspace = true, features = [
+  "audio",
+  "glam",
+  "image",
+  "importers",
+  "log",
+  "map_view",
+  "native_viewer",
+  "nasm",
+  "run",
+  "server",
+  "video",
+] }
+
+
+[lints]
+workspace = true
