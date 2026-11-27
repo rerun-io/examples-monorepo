@@ -61,7 +61,7 @@ def test_each_layer_keeps_its_own_record_on_the_catalog(tmp_path: Path, monkeypa
     record: RunRecord = records["masks"]
     assert record.command == "python tools/apps/stage.py --segment seg --note 'two words'"
     assert record.config == "_Config(segment='seg', stride=10)"
-    assert record.environment == "STAGE_OUTPUT_ROOT=/data/out", "the inputs a replay needs beside the command; unset names are left out"
+    assert record.environment == "-u STAGE_UNSET STAGE_OUTPUT_ROOT=/data/out", "env words: an unset input stays unset in a replay"
     assert record.wall_s >= 2.0 and record.started_at == run.started.isoformat()
     assert len(record.git_commit) == 40 and record.process_peak_rss_mb > 0.0
 
@@ -119,3 +119,14 @@ def test_an_untracked_link_is_hashed_by_its_target_not_followed(tmp_path: Path) 
     (repo / "gone").unlink()
     (repo / "gone").symlink_to(tmp_path / "elsewhere")
     assert first != "" and start_run(None, source=source).git_dirty_sha256 != first
+
+
+def test_a_file_and_a_link_with_the_same_bytes_hash_apart(tmp_path: Path) -> None:
+    """The entry type is part of the dirty hash: a file holding ``labels-v2.txt`` is not a link to it."""
+    repo: Path = _repo(tmp_path)
+    source: Path = repo / "packages" / "stage" / "code.py"
+    (repo / "labels.txt").write_text("labels-v2.txt")
+    as_file: str = start_run(None, source=source).git_dirty_sha256
+    (repo / "labels.txt").unlink()
+    (repo / "labels.txt").symlink_to("labels-v2.txt")
+    assert start_run(None, source=source).git_dirty_sha256 != as_file

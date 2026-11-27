@@ -28,10 +28,14 @@ from rerun.catalog import DatasetEntry
 from serde import serde
 from simplecv.run_record import RunStart, start_run, write_run_record
 
-from dataforge import paths, writing
+from dataforge import paths, video_encoding, writing
 from dataforge.identity import SequenceIdentity
 from dataforge.timing import SequenceTimer
 from dataforge.writing import TableFields
+
+RUN_ENVIRONMENT: tuple[str, ...] = (*paths.ENVIRONMENT, *video_encoding.ENVIRONMENT)
+"""The environment variables a conversion reads (output and raw roots, the encoder's ffmpeg and session cap): a layer's
+run record keeps them (``simplecv.run_record``)."""
 
 
 @dataclass
@@ -176,7 +180,7 @@ class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
         sequence's rig). The alternative: stop embedding and save an ``.rbl`` beside local files.
         """
         base: bool = layer == paths.BASE_LAYER
-        run: RunStart = self.run if self.run is not None else start_run(self.config, source=Path(__file__), environment=paths.RUN_ENVIRONMENT)
+        run: RunStart = self.run if self.run is not None else start_run(self.config, source=Path(__file__), environment=RUN_ENVIRONMENT)
         sequence: RunStart = replace(run, started=datetime.fromisoformat(self.timer.started_at))
         with writing.atomic_recording(
             target,

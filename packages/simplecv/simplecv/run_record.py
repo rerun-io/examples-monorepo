@@ -69,8 +69,8 @@ class RunRecord:
     """The GPUs ``nvidia-smi`` reports, with their driver, ``; ``-separated; empty without one, ``unavailable: <why>``
     when the probe failed."""
     environment: str = ""
-    """The environment variables the stage reads as inputs, set ones only, as ``NAME=value`` words (``shlex``): what a
-    replay needs beside ``command`` (an output root, a catalog URL taken from the environment)."""
+    """The environment variables the stage reads as inputs, as ``env`` words (``shlex``): ``-u NAME`` for an unset one,
+    ``NAME=value`` for a set one; what a replay needs beside ``command`` (an output root, a catalog URL)."""
     peak_torch_gpu_mb: float | None = None
     """Peak GPU memory torch's allocator reserved in the process; None when it used no torch CUDA. Native GPU backends
     (wgpu, TensorRT) allocate outside it, so this is not the process's GPU memory."""
@@ -154,10 +154,12 @@ def _dirty_sha256(root: Path) -> str:
             path: bytes = entry[3:]
             digest.update(path + b"\0")
             untracked: Path = root / path.decode()
-            # Git records a link as its target text; following it could open a directory or a missing file.
+            # Git records a link as its target text; following it could open a directory or a missing file. The type
+            # byte keeps a link apart from a file that holds the same text.
             if untracked.is_symlink():
-                digest.update(os.readlink(untracked).encode())
+                digest.update(b"l" + os.readlink(untracked).encode())
                 continue
+            digest.update(b"f")
             with untracked.open("rb") as stream:
                 while block := stream.read(HASH_BLOCK_BYTES):
                     digest.update(block)
@@ -186,7 +188,7 @@ def start_run(config: object, *, source: Path, environment: Sequence[str] = ()) 
             (defaults from the environment, a catalog URL from a settings file), or replace it later.
         source: A file of the stage's own code (its ``__file__``): the repository holding it names the code and the
             lock, whatever directory the process runs in.
-        environment: The environment variables the stage reads as inputs; the set ones are recorded.
+        environment: The environment variables the stage reads as inputs; each is recorded set or unset.
 
     Returns:
         The identity, started now.
@@ -212,7 +214,11 @@ def start_run(config: object, *, source: Path, environment: Sequence[str] = ()) 
         pixi_lock_sha256=lock_digest.hexdigest() if lock is not None and lock.is_file() else "",
         host=socket.gethostname(),
         gpu=_gpus(),
-        environment=shlex.join(f"{name}={os.environ[name]}" for name in environment if name in os.environ),
+        # An unset input must stay unset in a replay: a reader's default differs from any value, an empty one included.
+        environment=shlex.join(
+            [word for name in environment if name not in os.environ for word in ("-u", name)]
+            + [f"{name}={os.environ[name]}" for name in environment if name in os.environ]
+        ),
         started=datetime.now(UTC),
     )
 

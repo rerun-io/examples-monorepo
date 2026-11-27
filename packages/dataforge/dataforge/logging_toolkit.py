@@ -35,6 +35,7 @@ from simplecv.rig import CameraKind, PeerSensorKind
 
 from dataforge import schema
 from dataforge.audio import AudioTrack, read_audio_track
+from dataforge.video_encoding import FFMPEG_ENV
 from dataforge.video_encoding import (
     RAW_PIXEL_FORMATS as RAW_PIXEL_FORMATS,
 )
@@ -361,7 +362,7 @@ def log_video_stream(
     # are documented no-ops. try_gpu turns that unavoidable re-encode into NVENC
     # when the ffmpeg build has it, which not every build does, so DATAFORGE_FFMPEG
     # points at an NVENC-capable binary (e.g. the fleet's ~/.pixi/bin/ffmpeg).
-    ffmpeg_override: str | None = os.environ.get("DATAFORGE_FFMPEG")
+    ffmpeg_override: str | None = os.environ.get(FFMPEG_ENV)
     reader: rr.experimental.Mp4Reader = rr.experimental.Mp4Reader(
         video_path,
         mode="stream",

@@ -60,8 +60,8 @@ LAYERS: tuple[str, ...] = (BASE_LAYER, GT_LAYER, SENSOR_METADATA_LAYER)
 """Common layers; register and view use each dataset's own layer declaration."""
 
 
-RUN_ENVIRONMENT: tuple[str, ...] = ("DATAFORGE_OUTPUT_ROOT", "DATAFORGE_RAW_ROOT")
-"""The environment variables these paths read: a layer's run record keeps them (``simplecv.run_record``)."""
+ENVIRONMENT: tuple[str, ...] = ("DATAFORGE_OUTPUT_ROOT", "DATAFORGE_RAW_ROOT")
+"""The environment variables these paths read."""
 
 
 def output_root() -> Path:

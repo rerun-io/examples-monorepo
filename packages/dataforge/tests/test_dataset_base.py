@@ -126,3 +126,15 @@ def test_pending_layers_without_a_writer_need_together(output_root: Path, tmp_pa
 def test_output_beneath_the_raw_root_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(dataset_defaults, "toy", ToyConfig())
     assert_raw_root_guarded("toy", None, tmp_path, monkeypatch)
+
+
+def test_a_conversion_records_every_environment_input_it_reads(output_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The roots and the encoder's ffmpeg and session count change what a conversion does; a replay needs them."""
+    monkeypatch.setenv("DATAFORGE_FFMPEG", "/opt/ffmpeg-nvenc/bin/ffmpeg")
+    monkeypatch.delenv("DATAFORGE_NVENC_SLOTS", raising=False)
+    monkeypatch.delenv("DATAFORGE_RAW_ROOT", raising=False)
+    ToyDataset(ToyConfig(root=tmp_path / "raw")).convert(IDENTITY, None, force=False)
+    record = recording_properties(read_back(output_root / paths.BASE_LAYER / f"{IDENTITY.recording_id}.rrd"), f"run_{paths.BASE_LAYER}")
+    words: list[str] = str(record["environment"]).split()
+    assert f"DATAFORGE_OUTPUT_ROOT={output_root}" in words and "DATAFORGE_FFMPEG=/opt/ffmpeg-nvenc/bin/ffmpeg" in words
+    assert {"DATAFORGE_RAW_ROOT", "DATAFORGE_NVENC_SLOTS"} <= {words[i + 1] for i, word in enumerate(words) if word == "-u"}
