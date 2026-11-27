@@ -1299,6 +1299,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "canonical-viewer-web"
+version = "0.1.0"
+dependencies = [
+ "canonical-viewer",
+ "re_viewer",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "cargo-platform"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4092,6 +4101,7 @@ dependencies = [
  "re_math",
  "re_tracing",
  "re_viewer",
+ "web-sys",
  "web-time",
  "wgpu",
 ]
@@ -12896,8 +12906,6 @@ checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 [[package]]
 name = "wgpu"
 version = "30.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d8f4bd44d92da5270f03409dba9f952dab24f128e05d6a554926101d1bf9114"
 dependencies = [
  "arrayvec",
  "bitflags 2.13.1",

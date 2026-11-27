@@ -10,6 +10,8 @@ use canonical_viewer_extension::{Extension, wgpu};
 /// Every extension in the canonical viewer. Adding one = its crate in Cargo.toml + one line here.
 pub const EXTENSIONS: &[Extension] = &[
     gsplat_viewer::setup::EXTENSION,
+    // Native only: its AV1 decoder (re_rav1d) does not build for wasm32.
+    #[cfg(not(target_arch = "wasm32"))]
     depth_video_viewer::EXTENSION,
 ];
 

@@ -11,10 +11,13 @@ use std::sync::Arc;
 pub const EXTENSION: Extension = Extension {
     name: "gsplat",
     device_needs: Some(|offered_features, offered_limits, wanted| {
+        // The device is requested before any App exists, so the page flags are read here.
+        #[cfg(target_arch = "wasm32")]
+        crate::web::enable_profile_from_page();
         apply_compute_needs(
             offered_features,
             offered_limits,
-            gsplat_core::subgroups_allowed(),
+            subgroups_allowed(),
             wanted,
         );
     }),
@@ -25,6 +28,14 @@ pub const EXTENSION: Extension = Extension {
     ],
     register: register_compute_splats,
 };
+
+/// `GSPLAT_NO_SUBGROUPS=1` withholds subgroups natively; on the web, the page flag `force_no_subgroups=1` does.
+fn subgroups_allowed() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    return !crate::web::query_flag("force_no_subgroups");
+    #[cfg(not(target_arch = "wasm32"))]
+    return gsplat_core::subgroups_allowed();
+}
 
 /// Register the compute splat renderer and the `Spatial3DView` visualizers on a stock viewer.
 pub fn register_compute_splats(viewer: &mut re_viewer::App) -> anyhow::Result<()> {

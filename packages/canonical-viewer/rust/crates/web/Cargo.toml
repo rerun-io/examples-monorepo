@@ -1,0 +1,19 @@
+[package]
+name = "canonical-viewer-web"
+description = "The canonical Rerun viewer for the web: the stock re_viewer WebHandle with every extension in EXTENSIONS"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+# wasm32 only: on native targets the crate is empty, so workspace builds and Clippy leave the native binary's features alone.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+canonical-viewer = { path = "../app" }
+# `default_web` = the stock web viewer's views (map, audio) without analytics, as gsplat's web build used.
+re_viewer = { workspace = true, features = ["default_web"] }
+wasm-bindgen = "=0.2.129"
+
+[lints]
+workspace = true

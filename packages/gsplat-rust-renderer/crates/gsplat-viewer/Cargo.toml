@@ -39,6 +39,10 @@ ahash = "0.8"
 # Load-time split of SOG decoding (std Instant panics on wasm32).
 web-time = "1.1"
 
+# The web viewer's page flags (web.rs).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { version = "0.3", features = ["Location", "Navigator", "Window"] }
+
 # Native-only, behind `app`: the binary's gRPC server, crash handler, headless harness and runtime. The web build
 # and the canonical viewer link the lib.
 # Rerun 0.44 uses egui/eframe 0.37, so the headless kittest harness must stay on the same egui family as re_viewer.

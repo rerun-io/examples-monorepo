@@ -20,7 +20,6 @@ re_viewer = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0", default
 re_log = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
 wasm-bindgen = "=0.2.129"
 # The page URL, for ?force_no_subgroups=1.
-web-sys = { version = "0.3", features = ["Location", "Navigator", "Window"] }
 wgpu = "=30.0.0"
 
 # The WebGPU "subgroups" feature mapping that wgpu 30 lacks (patches/wgpu-30.0.0-webgpu-subgroups.patch), and the egui
