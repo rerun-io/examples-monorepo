@@ -8,8 +8,8 @@ is written under a temporary name and published at a unique immutable path. Regi
 remain valid, including when the catalog's reply is lost.
 """
 
-import importlib.util
 import os
+import sys
 import time
 import uuid
 from collections.abc import Generator
@@ -45,9 +45,9 @@ class Config:
     models_dir: Path
     """The ONNX models: ``detnet_full.onnx`` and ``keynet.onnx`` (packages/robocap-live/models/MODELS.md)."""
     device: Literal["auto", "cpu", "cuda"] = "auto"
-    """ONNX Runtime device: CUDA on GPU 0 when its execution provider registers (auto), or forced."""
+    """ONNX Runtime device: CUDA on GPU 0 when its execution provider registers and runs (auto; the CPU on the GB10), or forced."""
     ort_dylib: Path | None = None
-    """``libonnxruntime.so``; default ``ORT_DYLIB_PATH``, else the library of this env's ``onnxruntime`` package."""
+    """``libonnxruntime.so``; default ``ORT_DYLIB_PATH``, else the env's ``lib/libonnxruntime.so``."""
     ort_threads: int = 0
     """ONNX Runtime intra-op threads per session (0 = its default)."""
     overlays: Literal["fit", "debug", "verbose"] = "debug"
@@ -114,9 +114,10 @@ class LayerRun:
 
 
 def default_ort_dylib() -> Path:
-    """``ORT_DYLIB_PATH``, else the ``libonnxruntime.so`` of the env's ``onnxruntime`` package, found without importing it.
+    """``ORT_DYLIB_PATH``, else the env's ``lib/libonnxruntime.so`` (onnxruntime-cpp).
 
-    Importing the package would load its own copy of ONNX Runtime beside the one the core loads.
+    onnxruntime-cpp and the env's Python bindings come from one feedstock build, so a process that also imports
+    ``onnxruntime`` holds one ONNX Runtime build, not two.
 
     Raises:
         ValueError: If neither exists.
@@ -124,13 +125,10 @@ def default_ort_dylib() -> Path:
     from_env: str | None = os.environ.get("ORT_DYLIB_PATH")
     if from_env:
         return Path(from_env)
-    spec = importlib.util.find_spec("onnxruntime")
-    if spec is not None and spec.submodule_search_locations:
-        for location in spec.submodule_search_locations:
-            libraries: list[Path] = sorted((Path(location) / "capi").glob("libonnxruntime.so*"))
-            if libraries:
-                return libraries[-1]
-    raise ValueError("no ONNX Runtime library: pass ort_dylib or set ORT_DYLIB_PATH (or run in the robocap-live env)")
+    library: Path = Path(sys.prefix) / "lib" / "libonnxruntime.so"
+    if library.is_file():
+        return library
+    raise ValueError(f"no ONNX Runtime library at {library}: pass ort_dylib or set ORT_DYLIB_PATH (or run in the robocap-live env)")
 
 
 def segment_layers(dataset: DatasetEntry, segment_id: str) -> list[str]:

@@ -4,8 +4,8 @@ The stage that writes a layer writes its record into the same recording, so a la
 as a layer the flow runner started, and the runner never keeps a second record of what ran. The record is a recording
 property group named ``run_<layer>``: the catalog merges a segment's property columns across its layers and a column
 two layers share keeps only the last registered value (:mod:`simplecv.catalog_layers`), so each layer needs its own
-group. Re-running ``command`` from ``cwd`` in ``pixi_environment`` at ``git_commit`` (with no ``git_dirty_sha256``)
-and the same ``pixi_lock_sha256`` repeats the run.
+group. At ``git_commit`` (with no ``git_dirty_sha256``) and the same ``pixi_lock_sha256``, re-running
+``cd <repository root>/<cwd> && env <environment> pixi run -e <pixi_environment> --frozen <command>`` repeats the run.
 """
 
 import dataclasses
@@ -17,6 +17,7 @@ import shutil
 import socket
 import subprocess
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -44,7 +45,7 @@ class RunRecord:
     command: str
     """The process's command line, as a shell would take it (``python <argv...>``)."""
     cwd: str
-    """The working directory, relative to the repository root when it is inside it."""
+    """The working directory, relative to the root of the stage's repository when it is inside it, else absolute."""
     config: str
     """The stage's resolved configuration (its ``repr``), defaults included: the command alone does not state them."""
     host: str
@@ -67,6 +68,9 @@ class RunRecord:
     gpu: str = ""
     """The GPUs ``nvidia-smi`` reports, with their driver, ``; ``-separated; empty without one, ``unavailable: <why>``
     when the probe failed."""
+    environment: str = ""
+    """The environment variables the stage reads as inputs, as ``env`` words (``shlex``): ``-u NAME`` for an unset one,
+    ``NAME=value`` for a set one; what a replay needs beside ``command`` (an output root, a catalog URL)."""
     peak_torch_gpu_mb: float | None = None
     """Peak GPU memory torch's allocator reserved in the process; None when it used no torch CUDA. Native GPU backends
     (wgpu, TensorRT) allocate outside it, so this is not the process's GPU memory."""
@@ -100,6 +104,8 @@ class RunStart:
     """:attr:`RunRecord.host`."""
     gpu: str
     """:attr:`RunRecord.gpu`."""
+    environment: str
+    """:attr:`RunRecord.environment`."""
     started: datetime
     """When the run started, timezone-aware; a batch process replaces it per item it converts."""
 
@@ -119,6 +125,7 @@ class RunStart:
             pixi_lock_sha256=self.pixi_lock_sha256,
             host=self.host,
             gpu=self.gpu,
+            environment=self.environment,
             started_at=self.started.isoformat(),
             wall_s=(datetime.now(UTC) - self.started).total_seconds(),
             # ru_maxrss is KiB on Linux, bytes on macOS.
@@ -146,8 +153,15 @@ def _dirty_sha256(root: Path) -> str:
         if entry.startswith(b"?? "):
             path: bytes = entry[3:]
             digest.update(path + b"\0")
-            with (root / path.decode()).open("rb") as untracked:
-                while block := untracked.read(HASH_BLOCK_BYTES):
+            untracked: Path = root / path.decode()
+            # Git records a link as its target text; following it could open a directory or a missing file. The type
+            # byte keeps a link apart from a file that holds the same text.
+            if untracked.is_symlink():
+                digest.update(b"l" + os.readlink(untracked).encode())
+                continue
+            digest.update(b"f")
+            with untracked.open("rb") as stream:
+                while block := stream.read(HASH_BLOCK_BYTES):
                     digest.update(block)
     return digest.hexdigest()
 
@@ -166,21 +180,23 @@ def _gpus() -> str:
     return "; ".join(line.strip() for line in result.stdout.splitlines() if line.strip())
 
 
-def start_run(config: object, *, cwd: Path | None = None) -> RunStart:
+def start_run(config: object, *, source: Path, environment: Sequence[str] = ()) -> RunStart:
     """Take this process's run identity, now: call it before the stage starts its work.
 
     Args:
         config: The stage's configuration; its ``repr`` is recorded. Pass it resolved where the stage resolves it
             (defaults from the environment, a catalog URL from a settings file), or replace it later.
-        cwd: The working directory; the process's own by default.
+        source: A file of the stage's own code (its ``__file__``): the repository holding it names the code and the
+            lock, whatever directory the process runs in.
+        environment: The environment variables the stage reads as inputs; each is recorded set or unset.
 
     Returns:
         The identity, started now.
     """
-    directory: Path = (Path.cwd() if cwd is None else cwd).resolve()
+    directory: Path = Path.cwd().resolve()
     root: Path | None = None
     if shutil.which("git") is not None:
-        found = subprocess.run(["git", "-C", str(directory), "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=False)
+        found = subprocess.run(["git", "-C", str(source.resolve().parent), "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=False)
         root = Path(found.stdout.strip()).resolve() if found.returncode == 0 else None
     lock: Path | None = None if root is None else root / "pixi.lock"
     lock_digest = hashlib.sha256()
@@ -198,6 +214,11 @@ def start_run(config: object, *, cwd: Path | None = None) -> RunStart:
         pixi_lock_sha256=lock_digest.hexdigest() if lock is not None and lock.is_file() else "",
         host=socket.gethostname(),
         gpu=_gpus(),
+        # An unset input must stay unset in a replay: a reader's default differs from any value, an empty one included.
+        environment=shlex.join(
+            [word for name in environment if name not in os.environ for word in ("-u", name)]
+            + [f"{name}={os.environ[name]}" for name in environment if name in os.environ]
+        ),
         started=datetime.now(UTC),
     )
 

@@ -106,13 +106,15 @@ def test_released_models_return_aligned_hands() -> None:
         pytest.skip(f"missing one-segment RGB fixture: {image}")
     from PIL import Image
 
+    from posekit.runtimes import OnnxBackendConfig
+
     rgb = np.asarray(Image.open(image).convert("RGB"))
     frames = torch.from_numpy(rgb.copy()).unsqueeze(0).cuda()
     window = Path("/tmp/egohand/window.parquet")
     if not window.is_file():
         pytest.skip(f"missing one-segment calibration fixture: {window}")
     camera = camera_from_window(pq.read_table(window))
-    detections = EgoHandDetectorConfig(required[1]).setup()(frames)
+    detections = EgoHandDetectorConfig(required[1], backend=OnnxBackendConfig()).setup()(frames)
     assert detections.sides == ("left", "right")
     assert float(detections.boxes.xyxy[0, 0]) < float(detections.boxes.xyxy[1, 0])
     model = EgoHandConfig(required[0], weights / "soma").setup()
@@ -135,7 +137,7 @@ def test_accelerated_predictor_retains_mesh_and_joint_parity() -> None:
 
     from PIL import Image
 
-    from posekit.runtimes import TensorRtBackendConfig
+    from posekit.runtimes import OnnxBackendConfig, TensorRtBackendConfig
 
     root = Path("/tmp/egohand")
     required = [
@@ -167,7 +169,7 @@ def test_accelerated_predictor_retains_mesh_and_joint_parity() -> None:
         pytest.skip("requires a CUDA GPU")
     frames = torch.from_numpy(np.asarray(Image.open(required[-1]).convert("RGB")).copy()).cuda().unsqueeze(0).repeat(2, 1, 1, 1)
     camera = camera_from_window(pq.read_table(required[-2]))
-    boxes = EgoHandDetectorConfig(required[3]).setup()(frames)
+    boxes = EgoHandDetectorConfig(required[3], backend=OnnxBackendConfig()).setup()(frames)
     eager = EgoHandConfig(required[0], root / "weights/soma").setup()
     expected = eager(frames, boxes, camera)
     assert expected.keypoints.xyz_camera is not None

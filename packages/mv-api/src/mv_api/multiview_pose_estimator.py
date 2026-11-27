@@ -1,6 +1,6 @@
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypeAlias
 
 import numpy as np
 import rerun as rr
@@ -9,7 +9,7 @@ from jaxtyping import Bool, Float, Float32, Float64, Int, UInt8
 from numpy import ndarray
 from posekit.models import PersonDetector, RtmPoseConfig, TopDownPose2d, YoloxDetectorConfig
 from posekit.predictions import BoxDetections, Keypoints2d
-from posekit.runtimes import TensorRtBackendConfig
+from posekit.runtimes import OnnxBackendConfig, OrtDevice, ResolvedBackendConfig, TensorRtBackendConfig
 from posekit.zoo import PRESETS, PosePreset
 from simplecv.camera_parameters import PinholeParameters
 from simplecv.data.skeleton.coco133_layers import COCO133_PREDICTION_LAYER_TO_PATH, Coco133AnnotationLayer
@@ -80,6 +80,9 @@ class MVHistory:
     """Per-view 2D projections from temporally extrapolated 3D keypoints."""
 
 
+TrackerBackend: TypeAlias = Literal["onnxruntime", "tensorrt"]
+"""What runs the tracker's posekit models: ONNX Runtime (on ``MultiviewBodyTrackerConfig.device``) or TensorRT engines."""
+
 # mv-api mode -> posekit zoo preset (same OpenMMLab weights rtmlib served,
 # maintained in ONE place: posekit.zoo). "lightweight" is a local pairing —
 # yolox-tiny with the balanced rtmpose-m net (posekit carries no rtmpose-s).
@@ -101,14 +104,13 @@ class MultiviewBodyTrackerConfig:
 
     mode: Literal["lightweight", "balanced", "performance", "wholebody"] = "wholebody"
     """Preset selecting detector and pose assets tuned for latency versus accuracy."""
-    backend: Literal["onnxruntime", "tensorrt"] = "tensorrt"
+    backend: TrackerBackend = "tensorrt"
     """Inference backend for the posekit models. tensorrt (default) loads cached dynamic-batch
     engines (~13s deserialize per process; first run on a new GPU builds them, taking minutes);
     onnxruntime skips that fixed cost — better for quick short-clip experiments."""
-    device: Literal["cpu", "cuda"] = "cuda"
-    """Device the frame tensors are staged on before the models. The posekit
-    models themselves are CUDA-resident; ``cpu`` only makes sense with injected
-    CPU-capable test doubles."""
+    device: OrtDevice = "cuda"
+    """Device the frame tensors are staged on, and the posekit models run on: ``cpu`` runs them on ONNX Runtime's CPU
+    provider (``backend="onnxruntime"``), with no GPU; TensorRT needs ``cuda``."""
     keypoint_threshold: float = 0.7
     """Minimum 2D keypoint confidence required for a detection to be kept."""
     cams_for_detection_idx: list[int] | None = None
@@ -119,6 +121,27 @@ class MultiviewBodyTrackerConfig:
     """Whether to extrapolate historical poses to assist detection."""
     verbose: bool = False
     """Enables additional debug logging when True."""
+
+
+def posekit_model_configs(config: MultiviewBodyTrackerConfig) -> tuple[YoloxDetectorConfig, RtmPoseConfig]:
+    """The mode's detector and pose configs on the tracker's backend.
+
+    posekit's own default is ``auto``, so ``onnxruntime`` is set here as explicitly as ``tensorrt``, on the tracker's
+    ``device``: ``cpu`` runs both models on ONNX Runtime's CPU provider, with no GPU.
+
+    Args:
+        config: The tracker options.
+
+    Returns:
+        The detector and the pose config.
+
+    Raises:
+        ValueError: For ``backend="tensorrt"`` with ``device="cpu"``: the frames would be on the CPU and the engines on CUDA.
+    """
+    if config.backend == "tensorrt" and config.device == "cpu":
+        raise ValueError("backend='tensorrt' runs on CUDA; use backend='onnxruntime' with device='cpu'")
+    backend: ResolvedBackendConfig = TensorRtBackendConfig() if config.backend == "tensorrt" else OnnxBackendConfig(device=config.device)
+    return MODE_PRESETS[config.mode].with_backend(backend)
 
 
 class MultiviewBodyTracker:
@@ -144,18 +167,13 @@ class MultiviewBodyTracker:
                 Sapiens2, a TensorRT-backed RTMW, ...).
         """
         self.config: MultiviewBodyTrackerConfig = config
-        preset: PosePreset = MODE_PRESETS[config.mode]
-        det_config = preset.detector
-        pose_config = preset.pose
-        # All mv-api mode presets pair the ONNX-artifact models, whose configs
-        # carry the swappable onnx/tensorrt backend field.
-        assert isinstance(det_config, YoloxDetectorConfig) and isinstance(pose_config, RtmPoseConfig)
-        if config.backend == "tensorrt":
-            trt_backend = TensorRtBackendConfig()
-            det_config = replace(det_config, backend=trt_backend)
-            pose_config = replace(pose_config, backend=trt_backend)
-        self.det_model: PersonDetector = detector if detector is not None else det_config.setup()
-        self.pose_model: TopDownPose2d = pose if pose is not None else pose_config.setup()
+        # The tracker's backend applies to the models it builds, not to injected ones.
+        if detector is None or pose is None:
+            configs: tuple[YoloxDetectorConfig, RtmPoseConfig] = posekit_model_configs(config)
+            detector = detector if detector is not None else configs[0].setup()
+            pose = pose if pose is not None else configs[1].setup()
+        self.det_model: PersonDetector = detector
+        self.pose_model: TopDownPose2d = pose
         self.num_keypoints: int = self.pose_model.skeleton.num_keypoints
         self.filter_body_idxes: Int[ndarray, "idx"] = (
             filter_body_idxes if filter_body_idxes is not None else np.arange(self.num_keypoints, dtype=np.intp)

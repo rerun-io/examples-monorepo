@@ -1,17 +1,19 @@
-from typing import Any, cast
-
 import numpy as np
 import pytest
 import torch
 from jaxtyping import Float32, Float64, UInt8
 from numpy import ndarray
+from posekit.models import PersonDetector, TopDownPose2d
+from posekit.models.rtmpose import RtmPoseConfig
+from posekit.models.yolox import YoloxDetectorConfig
 from posekit.predictions import BoxDetections, Keypoints2d
+from posekit.runtimes import OnnxBackendConfig, OrtDevice, ResolvedBackendConfig, TensorRtBackendConfig
 from posekit.skeletons import COCO_133
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 from torch import Tensor
 
 from mv_api import multiview_pose_estimator as estimator_module
-from mv_api.multiview_pose_estimator import MultiviewBodyTracker, MultiviewBodyTrackerConfig, MVHistory
+from mv_api.multiview_pose_estimator import MultiviewBodyTracker, MultiviewBodyTrackerConfig, MVHistory, TrackerBackend, posekit_model_configs
 
 
 def test_compute_hand_bbox_expands_square_and_clips_to_image() -> None:
@@ -53,13 +55,13 @@ def _fake_pinhole(name: str) -> PinholeParameters:
     return PinholeParameters(name=name, intrinsics=intrinsics, extrinsics=extrinsics)
 
 
-class _FailingDetector:
+class _FailingDetector(PersonDetector):
     def __call__(self, frames_rgb: UInt8[Tensor, "b h w 3"]) -> BoxDetections:
         del frames_rgb
         raise AssertionError("tracking should provide the selected-view bbox without running detection")
 
 
-class _RecordingPoseModel:
+class _RecordingPoseModel(TopDownPose2d):
     def __init__(self) -> None:
         self.seen_pixel_values: list[int] = []
         self.skeleton = COCO_133
@@ -94,9 +96,9 @@ def test_multiview_tracker_filters_images_and_pinholes_for_selected_detection_ca
     tracker.config = MultiviewBodyTrackerConfig(cams_for_detection_idx=[1], perform_tracking=True, device="cpu")
     tracker.num_keypoints = 133
     tracker.filter_body_idxes = np.arange(133, dtype=np.intp)
-    tracker.det_model = cast(Any, _FailingDetector())
+    tracker.det_model = _FailingDetector()
     pose_model: _RecordingPoseModel = _RecordingPoseModel()
-    tracker.pose_model = cast(Any, pose_model)
+    tracker.pose_model = pose_model
     tracker.hand_keypoint_engine = None
 
     xyzc_t: Float32[ndarray, "133 4"] = np.zeros((133, 4), dtype=np.float32)
@@ -120,3 +122,32 @@ def test_multiview_tracker_filters_images_and_pinholes_for_selected_detection_ca
     assert pose_model.seen_pixel_values == [20]
     assert output_state.uvc_t is not None
     assert output_state.uvc_t.shape == (1, 133, 3)
+
+
+@pytest.mark.parametrize(
+    ("backend", "device", "expected"),
+    [
+        ("onnxruntime", "cuda", OnnxBackendConfig(device="cuda")),
+        ("onnxruntime", "cpu", OnnxBackendConfig(device="cpu")),
+        ("tensorrt", "cuda", TensorRtBackendConfig()),
+    ],
+)
+def test_the_tracker_backend_is_set_on_both_posekit_models(backend: TrackerBackend, device: OrtDevice, expected: ResolvedBackendConfig) -> None:
+    """posekit's own default is ``auto``, so ``onnxruntime`` has to be asked for explicitly, as ``tensorrt`` is, on the
+    tracker's device."""
+    configs: tuple[YoloxDetectorConfig, RtmPoseConfig] = posekit_model_configs(MultiviewBodyTrackerConfig(backend=backend, device=device))
+    assert [config.backend for config in configs] == [expected, expected]
+
+
+def test_tensorrt_on_cpu_frames_is_refused() -> None:
+    with pytest.raises(ValueError, match="device='cpu'"):
+        posekit_model_configs(MultiviewBodyTrackerConfig(backend="tensorrt", device="cpu"))
+
+
+def test_injected_models_need_no_backend_from_the_tracker() -> None:
+    """The tracker's backend (``tensorrt`` by default) builds only the models it creates, so injected CPU doubles run with
+    ``device="cpu"``."""
+    tracker: MultiviewBodyTracker = MultiviewBodyTracker(
+        MultiviewBodyTrackerConfig(device="cpu", use_wilor=False), detector=_FailingDetector(), pose=_RecordingPoseModel()
+    )
+    assert tracker.num_keypoints == 133

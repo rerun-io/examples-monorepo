@@ -8,18 +8,17 @@ components on `pinhole` (`simplecv.rerun_log_utils.log_pinhole`), so the read si
 
 from __future__ import annotations
 
-import os
-import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
 
 import rerun as rr
 from simplecv.camera_parameters import BrownConradyDistortion, Extrinsics, Fisheye62Parameters, Intrinsics, KannalaBrandtDistortion, PinholeParameters
+from simplecv.catalog_layers import atomic_recording
 from simplecv.rerun_log_utils import log_pinhole
 
 from colsfm.catalog import CALIBRATION_PROPERTY, CatalogCameraModel
-from colsfm.rerun_layer import IMAGE_PLANE_DISTANCE, open_layer
+from colsfm.rerun_layer import APPLICATION_ID, IMAGE_PLANE_DISTANCE
 
 CALIBRATION_ENTITY: Final[str] = "/world/runs/colsfm_calibrate/rig"
 """Where `colsfm calibrate` writes its cameras, one child per camera name."""
@@ -69,23 +68,8 @@ def write_calibration_layer(
         ValueError: When a camera's distortion does not fit its projection (nothing is written).
     """
     models: list[PinholeParameters | Fisheye62Parameters] = [simplecv_camera(camera) for camera in cameras]
-    rrd_path.parent.mkdir(parents=True, exist_ok=True)
-    # A staging file of this call's own, beside the destination, so `os.replace` stays on one file system and two
-    # writers of the same layer never share one.
-    descriptor, name = tempfile.mkstemp(prefix=f".{rrd_path.name}.", suffix=".partial", dir=rrd_path.parent)
-    os.close(descriptor)
-    staging: Path = Path(name)
-    try:
-        recording: rr.RecordingStream = open_layer(staging, segment)
-        try:
-            recording.log(root, rr.AnyValues(metric_scale=metric_scale), static=True)
-            for model in models:
-                log_pinhole(model, Path(f"{root}/{model.name}"), image_plane_distance=IMAGE_PLANE_DISTANCE, static=True, recording=recording)
-            recording.send_property(CALIBRATION_PROPERTY, properties)
-            recording.flush()
-        finally:
-            recording.disconnect()
-        staging.chmod(0o644)  # mkstemp's 0600 would follow the file; a layer is read by other users' catalog servers
-        os.replace(staging, rrd_path)
-    finally:
-        staging.unlink(missing_ok=True)
+    with atomic_recording(rrd_path, application_id=APPLICATION_ID, recording_id=segment, send_properties=False) as recording:
+        recording.log(root, rr.AnyValues(metric_scale=metric_scale), static=True)
+        for model in models:
+            log_pinhole(model, Path(f"{root}/{model.name}"), image_plane_distance=IMAGE_PLANE_DISTANCE, static=True, recording=recording)
+        recording.send_property(CALIBRATION_PROPERTY, properties)

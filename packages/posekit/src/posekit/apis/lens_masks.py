@@ -1,22 +1,28 @@
-"""FullCircle operator masks for a dual-fisheye base recording: a ``people_mask`` layer on both lenses.
+"""The lens mask layer of a dual-fisheye base recording: FullCircle's operator and bystanders, and every tracked person.
 
-Reads the lens videos, their Mei calibrations and the accelerometer of a dataforge Insta360 base recording from its
+One step, one process, the ``lens_mask`` layer: reads the lens videos, their Mei calibrations and the accelerometer of a dataforge Insta360 base recording from its
 catalog segment (both lenses in one read; the decoders get the packets of the run window), runs
 :class:`~posekit.models.fullcircle.FullCircleMasker` in FullCircle's two passes (detect the operator direction on
 every tracked frameset, fill the gaps from the nearest frameset, then track and map back), adds the bystanders found
 on the same level faces (:class:`~posekit.models.fullcircle_people.FacePeople`, ``--people.no-enabled`` for the
-operator only) and writes the mask layer contract (track 3, v2): per lens ``<camera>/pinhole/people_mask``, a
+operator only), tracks every person with SAM 3 + EfficientTAM on the same decoded frames of the second pass
+(:class:`~posekit.apis.people_tracks.PeopleTracker`, ``--no-people-tracks`` for FullCircle alone), ORs the two on the
+GPU and writes the mask layer contract (track 3, v2): per lens ``<camera>/pinhole/people_mask``, a
 ``SegmentationImage`` (uint8, 1 = operator or bystander)
 at the resolution it is computed at, with one static ``Transform3D(scale=[W_img / W_mask, H_img / H_mask, 1])``,
-stamped with that lens's frame times, every ``stride``-th frameset; the dilation is already applied.
+stamped with that lens's frame times, every ``stride``-th frameset; the dilation is already applied. The layer is one
+atomic file ``<output_dir>/<segment>.rrd`` with the segment's recording id and its run record
+(:mod:`simplecv.run_record`); a catalog segment gets it registered as its ``lens_mask`` layer.
 
 The rig frame of the masker is lens 0's camera frame (+Y down when the camera is held upright, so the cube faces and
 the synthetic view are upright); lens 1 enters through its rotation relative to lens 0 (the baseline is ignored:
 scene at infinity, as in a stitched panorama).
 """
 
+import os
 import time
 from collections.abc import Iterator
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -25,18 +31,21 @@ import pyarrow as pa
 import rerun as rr
 import torch
 from datafusion import col
-from jaxtyping import Float64, Int64, UInt8
+from jaxtyping import Bool, Float64, Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
 from simplecv.camera_parameters import MeiParameters
 from simplecv.catalog_calibration import CatalogCameraCalibration, read_camera_models
+from simplecv.catalog_layers import LocalSegment, atomic_recording, register_layer, serve_local_segment
 from simplecv.catalog_video_decode import PrefetchedChunks
 from simplecv.catalog_video_reader import CatalogVideoReader, StreamIndex, read_video_index
-from simplecv.rerun_log_utils import RerunTyroConfig
+from simplecv.run_record import RunStart, start_run, write_run_record
 from torch import Tensor
 
+from posekit.apis.people_masks import MaskOptions
+from posekit.apis.people_tracks import PeopleTracker, TrackOptions
 from posekit.cube_layer import CubeSampling, cube_sampling, sampled_framesets
-from posekit.mask_layer import MASK_ANNOTATION, MASK_NAME, MASKED_CLASS_ID
+from posekit.mask_layer import LENS_MASK_LAYER, MASK_ANNOTATION, MASK_NAME, MASKED_CLASS_ID
 from posekit.models.fullcircle import (
     FaceBoxes,
     FullCircleConfig,
@@ -51,19 +60,22 @@ from posekit.models.fullcircle import (
     view_up,
 )
 from posekit.models.fullcircle_people import FacePeople, FacePeopleConfig, FacePeopleMasks
+from posekit.ops.people_masks import dilate_masks, pool_cells
+from posekit.ops.people_tracks import with_lookahead
 from posekit.ops.sphere import MeiCamera
 
 DETECT_FRAMESETS: int = 8
 """Framesets per detector call: 48 faces, the YOLOX engine's batch."""
+LAYER_APPLICATION_ID: str = "posekit"
+"""Application id of the layer file; the catalog stacks it onto the base by its recording id (the segment)."""
 
 
 @dataclass
-class FullCircleMasksConfig:
-    """Write a FullCircle operator-mask layer for the two lenses of an Insta360 base recording."""
+class LensMasksConfig:
+    """Write the lens mask layer (FullCircle's operator and bystanders, and the tracked people) of an Insta360 base recording."""
 
-    rr_config: RerunTyroConfig
-    """Output sink: ``--rr-config.save <layer.rrd> --rr-config.headless --rr-config.recording-id <segment>
-    --rr-config.application-id dataforge``."""
+    output_dir: Path
+    """The layer file is ``<output_dir>/<segment>.rrd``, visible at the same path to the catalog server."""
     dataset: str | None = None
     """Catalog dataset of the base recording (dataforge ``insta360``), read with ``segment`` from ``catalog_url``."""
     segment: str | None = None
@@ -108,16 +120,26 @@ class FullCircleMasksConfig:
     """Tracked framesets between two evidence frames."""
     decode_chunk: int = 16
     """Tracked framesets decoded per NVDEC call (detected :data:`DETECT_FRAMESETS` at a time)."""
+    people_tracks: bool = True
+    """Also track every person (SAM 3 re-detects, EfficientTAM in between) on the tracked framesets and OR their masks in;
+    ``--no-people-tracks``: FullCircle alone."""
+    track: TrackOptions = field(default_factory=TrackOptions)
+    """The people tracker's options; it steps on the tracked framesets, so ``track.stride`` stays unset."""
+    mask: MaskOptions = field(default_factory=lambda: MaskOptions(dilate_px=8))
+    """The people tracker's SAM 3 options and the dilation of its masks at lens resolution (8 px: the Casa Loma runs')."""
 
     def __post_init__(self) -> None:
-        """Refuse bystanders without YOLOX boxes.
+        """Refuse bystanders without YOLOX boxes, and a tracker stride of its own.
 
         Raises:
             ValueError: If ``people`` is enabled with the SAM 3 operator detector: the bystander candidates are YOLOX
                 boxes that SAM 3 must confirm, so SAM 3 boxes would confirm themselves, and a second SAM 3 would load.
+                If ``track.stride`` is set: the tracker steps on FullCircle's framesets, one decode for both.
         """
         if self.people.enabled and self.masker.detector != "yolox":
             raise ValueError("--people needs the YOLOX operator detector (--masker.detector yolox) or --people.no-enabled")
+        if self.track.stride is not None:
+            raise ValueError("--track.stride: the people tracker steps on the tracked framesets (--stride)")
 
 
 def read_lens_sources(
@@ -177,32 +199,40 @@ def read_level_rotations(
     return [level_rotation(cam0_R_rig @ down) for down in down_rig]
 
 
-def main(config: FullCircleMasksConfig) -> None:
-    """Write the operator-mask layer from the catalog, or from ``rrd`` served in-process.
+def main(config: LensMasksConfig) -> None:
+    """Write the lens mask layer from the catalog and register it there, or from ``rrd`` served in-process.
 
     Raises:
         ValueError: Unless exactly one of ``rrd`` and ``dataset`` + ``segment`` names the base.
     """
+    run: RunStart = start_run(config, source=Path(__file__))
     if (config.rrd is None) == (config.dataset is None or config.segment is None):
         raise ValueError("name the base recording with --dataset and --segment, or with --rrd")
     if config.rrd is None:
         assert config.dataset is not None and config.segment is not None
-        write_masks(config, CatalogClient(config.catalog_url).get_dataset(name=config.dataset), config.segment)
+        dataset: DatasetEntry = CatalogClient(config.catalog_url).get_dataset(name=config.dataset)
+        output: Path = write_masks(config, dataset, config.segment, run)
+        register_layer(dataset, [output], LENS_MASK_LAYER)
+        print(f"registered {output} as layer {LENS_MASK_LAYER} of {config.segment}")
         return
-    with rr.server.Server(datasets={"base": [str(config.rrd)]}) as server:
-        dataset: DatasetEntry = server.client().get_dataset("base")
-        segments: list[str] = list(dataset.segment_ids())
-        if len(segments) != 1:
-            raise ValueError(f"{config.rrd} holds {len(segments)} recordings; expected one")
-        write_masks(config, dataset, segments[0])
+    local: LocalSegment
+    with serve_local_segment(config.rrd, {}, dataset="base") as local:
+        write_masks(config, local.dataset, local.segment, run)
 
 
-def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id: str) -> None:
-    """Write the operator-mask layer of one segment and print per-step timings."""
+def write_masks(config: LensMasksConfig, dataset: DatasetEntry, segment_id: str, run: RunStart) -> Path:
+    """Write the lens mask layer of one segment and print per-step timings; returns the layer file."""
     process_start: float = time.perf_counter()
-    if config.rr_config.recording_id != segment_id:
-        raise ValueError(f"pass --rr-config.recording-id {segment_id} so the mask layer joins the base recording")
+    if Path(segment_id).name != segment_id:
+        raise ValueError(f"segment id {segment_id!r} must not contain path separators")
+    output: Path = config.output_dir.resolve() / f"{segment_id}.rrd"
+    # The atomic write replaces whatever file is at ``output``; a link to an input counts as the input.
+    inputs: list[Path] = [path for path in (config.rrd, config.cube_rrd) if path is not None and path.exists()]
+    if output.exists() and any(os.path.samefile(output, path) for path in inputs):
+        raise ValueError(f"{output} is an input recording: the mask layer would replace it; pass another --output-dir")
     sources, cam0_R_rig = read_lens_sources(dataset, segment_id, config.cameras, config.mask_downscale)
+    if config.people_tracks and any(s.mask_scale != (config.mask_downscale, config.mask_downscale) for s in sources):
+        raise ValueError(f"mask_downscale {config.mask_downscale} does not divide the lenses {[s.image_hw for s in sources]}")
     print(", ".join(f"lens {s.image_hw} -> mask {s.mask_hw}" for s in sources))
     device: torch.device = torch.device(config.masker.device)
     entities: list[str] = [f"{camera}/pinhole/video" for camera in config.cameras]
@@ -290,18 +320,31 @@ def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id
     print(f"view up hint (level frame) {up_level.tolist()}")
 
     targets: list[str] = [f"{camera}/pinhole/{MASK_NAME}" for camera in config.cameras]
-    for target, source in zip(targets, sources, strict=True):
-        rr.log(target, MASK_ANNOTATION, static=True)
-        rr.log(target, rr.Transform3D(scale=[*source.mask_scale, 1.0]), static=True)
     people: FacePeople | None = FacePeople(config.people, masker) if config.people.enabled else None
     if debug is not None:
         debug.log("synthetic/mask", rr.AnnotationContext([(0, "keep", (0, 0, 0, 0)), (MASKED_CLASS_ID, "operator", (255, 0, 0, 160))]), static=True)
         debug.log("people", rr.AnnotationContext([(0, "keep", (0, 0, 0, 0)), (MASKED_CLASS_ID, "bystander", (255, 200, 0, 160))]), static=True)
     bystander_framesets: int = 0
+    # Each tracked frameset once, flagged at its chunk's end, with the one redetect_every later for SAM 3's lookahead.
+    framesets_iter: Iterator[tuple[int, int, list[UInt8[Tensor, "h w 3"]], bool]] = (
+        (position, index, lens_frames, column == len(chunk) - 1)
+        for begin, chunk, frames in decoded_chunks()
+        for column, (position, index, lens_frames) in enumerate(zip(range(begin, begin + len(chunk)), chunk, frames, strict=True))
+    )
     track_start: float = time.perf_counter()
-    for begin, chunk, frames in decoded_chunks():
+    with (
+        # A layer of a minutes-long clip fits in memory (480 px masks), and per-frameset logging leaves many small chunks.
+        atomic_recording(output, application_id=LAYER_APPLICATION_ID, recording_id=segment_id, send_properties=False, optimize=True) as recording,
+        PeopleTracker(config.track, config.mask, str(device)) if config.people_tracks else nullcontext(None) as tracker,
+        torch.cuda.stream(tracker.track_stream if tracker is not None else torch.cuda.current_stream()),
+    ):
+        for target, source in zip(targets, sources, strict=True):
+            recording.log(target, MASK_ANNOTATION, static=True)
+            recording.log(target, rr.Transform3D(scale=[*source.mask_scale, 1.0]), static=True)
         chunk_masks: list[list[Tensor]] = [[] for _ in targets]
-        for position, (index, lens_frames) in enumerate(zip(chunk, frames, strict=True), start=begin):
+        chunk_indices: list[int] = []
+        ahead: int = config.track.redetect_every if config.people_tracks and config.track.lookahead else 0
+        for (position, index, lens_frames, chunk_end), upcoming in with_lookahead(framesets_iter, ahead):
             result: OperatorMasks = masker.track(lens_frames, filled[position], levels[position] @ up_level)
             masks: list[Tensor] = result.source_masks
             bystanders: FacePeopleMasks | None = None
@@ -309,8 +352,14 @@ def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id
                 bystanders = people(lens_frames, face_boxes[position], levels[position], result)
                 masks = [operator | other for operator, other in zip(masks, bystanders.source_masks, strict=True)]
                 bystander_framesets += bool(bystanders.face_masks.any())
+            if tracker is not None:
+                upcoming_frames: UInt8[Tensor, "s h w 3"] | None = torch.stack(upcoming[2]) if upcoming is not None and tracker.wants_upcoming else None
+                persons: Bool[Tensor, "s h w"] = tracker.step(torch.stack(lens_frames), upcoming_frames)
+                cells: Bool[Tensor, "s hm wm"] = pool_cells(dilate_masks(persons, config.mask.dilate_px), config.mask_downscale)
+                masks = [mask | lens_cells for mask, lens_cells in zip(masks, cells, strict=True)]
             for lens_masks, mask in zip(chunk_masks, masks, strict=True):
                 lens_masks.append(mask)
+            chunk_indices.append(index)
             if debug is not None and position % config.debug_every == 0:
                 debug.set_time("frameset", sequence=index)
                 debug.log("synthetic", rr.Image(result.synthetic_rgb.cpu().numpy()).compress(90))
@@ -324,19 +373,20 @@ def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id
                         debug.log(f"people/face_{face}/mask", rr.SegmentationImage(face_mask.to(torch.uint8).cpu().numpy()))
                         boxes: ndarray = bystanders.candidates[bystanders.candidate_faces == face] * scale
                         debug.log(f"people/face_{face}/candidates", rr.Boxes2D(array=boxes, array_format=rr.Box2DFormat.XYXY, colors=(255, 200, 0)))
-        # One host copy per lens and chunk.
-        for lens, (target, lens_masks) in enumerate(zip(targets, chunk_masks, strict=True)):
-            host: UInt8[ndarray, "n mh mw"] = (torch.stack(lens_masks).to(torch.uint8) * MASKED_CLASS_ID).cpu().numpy()
-            for index, mask in zip(chunk, host, strict=True):
-                rr.set_time(config.timeline, duration=np.timedelta64(int(times[lens][index].view(np.int64)), "ns"))
-                rr.log(target, rr.SegmentationImage(mask))
-        elapsed: float = time.perf_counter() - track_start
-        if begin % (config.decode_chunk * 25) == 0:
-            done: int = begin + len(chunk)
-            print(f"frameset {chunk[-1]}: {done} tracked, {done / elapsed:.1f} framesets/s")
-    recording: rr.RecordingStream | None = rr.get_data_recording()
-    assert recording is not None
-    recording.flush()
+            if not chunk_end:
+                continue
+            # One host copy per lens and chunk.
+            for lens, (target, lens_masks) in enumerate(zip(targets, chunk_masks, strict=True)):
+                host: UInt8[ndarray, "n mh mw"] = (torch.stack(lens_masks).to(torch.uint8) * MASKED_CLASS_ID).cpu().numpy()
+                for chunk_index, mask in zip(chunk_indices, host, strict=True):
+                    recording.set_time(config.timeline, duration=np.timedelta64(int(times[lens][chunk_index].view(np.int64)), "ns"))
+                    recording.log(target, rr.SegmentationImage(mask))
+            chunk_masks = [[] for _ in targets]
+            chunk_indices = []
+            elapsed: float = time.perf_counter() - track_start
+            if (position + 1) % (config.decode_chunk * 25) < config.decode_chunk:
+                print(f"frameset {index}: {position + 1} tracked, {(position + 1) / elapsed:.1f} framesets/s")
+        write_run_record(recording, run.finish(LENS_MASK_LAYER, segment_id))
     if debug is not None:
         debug.flush()
     track_wall: float = time.perf_counter() - track_start
@@ -350,5 +400,11 @@ def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id
             if people is not None
             else ""
         )
-        + f"peak GPU allocated {torch.cuda.max_memory_allocated() / 1e9:.1f} GB; total {total:.1f} s for {len(tracked) * 2} lens masks"
+        + (
+            f"people tracker: {tracker.redetects} SAM 3 re-detects, SAM 3 {tracker.detect_seconds:.1f} s (waited {tracker.wait_seconds:.1f} s); "
+            if tracker is not None
+            else ""
+        )
+        + f"peak GPU allocated {torch.cuda.max_memory_allocated() / 1e9:.1f} GB; total {total:.1f} s for {len(tracked) * 2} lens masks -> {output}"
     )
+    return output

@@ -113,7 +113,7 @@ def test_read_lens_sources_puts_lens_1_in_lens_0_frame(tmp_path, unified: bool) 
     from scipy.spatial.transform import Rotation
     from simplecv.rerun_custom_types import CameraDistortion, PinholeWithDistortion
 
-    from posekit.apis.fullcircle_masks import read_lens_sources
+    from posekit.apis.lens_masks import read_lens_sources
     from posekit.ops.sphere import MeiCamera
 
     coefficients: list[float] = [2.3, 1.745, 0.94, -1.68, 2.19, 3.86, 0.0, -0.005, 0.0016, -0.0033, 0.004, 0.0083, -0.0013, 0.024, -0.0014]

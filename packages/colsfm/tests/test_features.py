@@ -185,21 +185,26 @@ def test_only_selected_keyframes_reach_the_extractor(
         assert database.num_frames() == 1
 
 
-def test_cuda_extraction_survives_onnxruntime_imported_after_colsfm(galileo_input: FramesMeta, galileo_input_dir: Path, tmp_path: Path) -> None:
-    """The env also installs PyPI onnxruntime-gpu; importing it before COLMAP's first CUDA session used to segfault there.
+@pytest.mark.parametrize(
+    "imports", ["import onnxruntime; import colsfm.features as features", "import colsfm.features as features; import onnxruntime"], ids=["onnxruntime-first", "colsfm-first"]
+)
+def test_cuda_extraction_survives_onnxruntime_in_either_import_order(galileo_input: FramesMeta, galileo_input_dir: Path, tmp_path: Path, imports: str) -> None:
+    """COLMAP's CUDA session works whichever ONNX Runtime module loads the provider bridge first.
 
-    A fresh process, because which ONNX Runtime build loaded its provider bridge first is process state: in one pytest
-    run, collecting `test_flexglue_trt.py` imported onnxruntime, and the first extraction after it crashed.
+    Both load ``libonnxruntime_providers_shared.so`` with RTLD_GLOBAL, and the first one serves every CUDA provider in the
+    process. With two builds in the env (conda's for pycolmap, PyPI onnxruntime-gpu) the first extraction after
+    ``import onnxruntime`` segfaulted; with one build (ci/tests/test_one_onnxruntime.py) the order does not matter. A
+    fresh process, because which bridge loaded first is process state.
     """
     if importlib.util.find_spec("onnxruntime") is None:
-        pytest.skip("needs the PyPI onnxruntime package next to pycolmap's ONNX Runtime")
+        pytest.skip("needs the onnxruntime module next to pycolmap's ONNX Runtime")
     if resolve_device("auto") != "cuda":
         pytest.skip("needs COLMAP's CUDA provider: a CUDA build of pycolmap, a CUDA device and cuDNN")
     keyframe = galileo_input.keyframes[0]
     database_path: Path = tmp_path / "one.db"
     create_database(database_path, galileo_input.filtered([keyframe.keyframe_id]))
     script: str = (
-        "import sys; from pathlib import Path; import colsfm.features as features; import onnxruntime; "
+        f"import sys; from pathlib import Path; {imports}; "
         "features.extract_features(Path(sys.argv[1]), Path(sys.argv[2]), [sys.argv[3]], "
         f"features.FeatureOptions(device='cuda', max_image_size={FAST_IMAGE_SIZE}, max_num_features=256))"
     )

@@ -68,6 +68,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal, TypeAlias
 
+from trtkit import OnnxDynamicRuntime
+
 from colsfm.database import keypoint_counts
 from colsfm.features import RacoEngineChoice, TensorRTExtraction
 from colsfm.features_native import (
@@ -80,6 +82,7 @@ from colsfm.features_native import (
     run_native_extraction,
 )
 from colsfm.frames import FrameSource, ImageFolderFrames
+from colsfm.inference import InferenceRuntime, frames_device
 from colsfm.keypoint_masks import MaskSource
 from colsfm.model_assets import RACO_DYNAMIC_ONNX_PATH, RACO_ONNX_PATH
 from colsfm.tensorrt_runtime import ShapeProfile, resolve_engine
@@ -367,7 +370,12 @@ def _size_groups(tasks: Sequence[ImageTask]) -> dict[tuple[int, int], list[Image
 
 
 def extraction_groups(
-    tasks: Sequence[ImageTask], *, native_resolution: bool, choice: RacoEngineChoice, batch_pixels: int | None = None
+    tasks: Sequence[ImageTask],
+    *,
+    native_resolution: bool,
+    choice: RacoEngineChoice,
+    batch_pixels: int | None = None,
+    inference_runtime: InferenceRuntime,
 ) -> list[ExtractionGroup]:
     """Decide which engine runs which images, and at what size.
 
@@ -384,6 +392,8 @@ def extraction_groups(
             fixed graph's declared 1920x1200.
         choice: Which engine serves a group; see `select_raco_engine`.
         batch_pixels: The dynamic engines' pixel budget per execution; see `select_raco_engine`.
+        inference_runtime: `tensorrt` resolves each group's engine; `onnxruntime` hands the group its ONNX graph, builds
+            nothing, and runs one image at a time.
 
     Returns:
         One group per network size, first-seen size first; empty when there is
@@ -395,13 +405,16 @@ def extraction_groups(
         if not group:
             continue
         engine: RacoEngine = select_raco_engine(network_size, choice, batch_pixels)
+        # ONNX Runtime already spreads one image over the cores; a batch of 1920x1200 images there only multiplies the
+        # activations it holds (about 2.4 GB each).
+        on_onnxruntime: bool = inference_runtime == "onnxruntime"
         groups.append(
             ExtractionGroup(
-                engine_path=engine_file(engine),
+                engine_path=engine.onnx_path if on_onnxruntime else engine_file(engine),
                 tasks=group,
                 network_height=engine.network_height,
                 network_width=engine.network_width,
-                maximum_batch_size=engine.maximum_batch_size,
+                maximum_batch_size=MINIMUM_BATCH_SIZE if on_onnxruntime else engine.maximum_batch_size,
             )
         )
     return groups
@@ -420,6 +433,7 @@ def extract_raco(
     frames: FrameSource | None = None,
     masks: MaskSource | None = None,
     batch_pixels: int | None = None,
+    inference_runtime: InferenceRuntime,
 ) -> TensorRTExtraction:
     """Run the batched RaCo-ALIKED engine over the named images and store the features.
 
@@ -441,10 +455,11 @@ def extract_raco(
         raco_engine: Which engine serves a size group; see `select_raco_engine`.
             Read only when `native_resolution` is on — the stretch is the fixed
             engine by definition.
-        frames: Where the pixels come from as GPU tensors (`colsfm.frames`); None reads
-            the image files under `image_root` through an `ImageFolderFrames`.
+        frames: Where the pixels come from (`colsfm.frames`): GPU tensors for TensorRT, CPU tensors for ONNX Runtime;
+            None reads the image files under `image_root` through an `ImageFolderFrames` on the runtime's device.
         masks: Per-image keypoint masks (`colsfm.keypoint_masks`); None = unmasked.
         batch_pixels: The dynamic engines' pixel budget per execution; see `select_raco_engine`.
+        inference_runtime: TensorRT engines, or the same graphs on ONNX Runtime's CPU provider, one image at a time.
 
     Returns:
         Keypoints stored per `image_id`, and the wall time of the whole pass
@@ -466,13 +481,16 @@ def extract_raco(
     tasks: list[ImageTask] = image_tasks(database_path, image_names)
     run_native_extraction(
         database_path,
-        extraction_groups(tasks, native_resolution=native_resolution, choice=engine_choice, batch_pixels=batch_pixels),
+        extraction_groups(
+            tasks, native_resolution=native_resolution, choice=engine_choice, batch_pixels=batch_pixels, inference_runtime=inference_runtime
+        ),
         RACO_MODEL,
-        frames if frames is not None else ImageFolderFrames(image_root),
+        frames if frames is not None else ImageFolderFrames(image_root, frames_device(inference_runtime)),
         min_score=min_score,
         max_num_features=max_num_features,
         batch_size=batch_size,
         masks=masks,
+        open_runtime=OnnxDynamicRuntime if inference_runtime == "onnxruntime" else None,
     )
     elapsed_seconds: float = time.perf_counter() - started
     return keypoint_counts(database_path, [task.image_id for task in tasks]), elapsed_seconds

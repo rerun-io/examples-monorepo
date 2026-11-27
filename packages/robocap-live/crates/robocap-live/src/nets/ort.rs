@@ -2,11 +2,11 @@
 //!
 //! Built only with the `ort` cargo feature, so the cap build carries no ONNX Runtime. The library is loaded at run time
 //! (`load-dynamic`, as kornia-rs's `examples/onnx` does): from [`OrtConfig::dylib`], else from `ORT_DYLIB_PATH`. On
-//! a CUDA host both the library and the CUDA libraries come from the monorepo's `robocap-live` pixi env, which composes
-//! `cuda` with onnxruntime-gpu (no pip). The `robocap-live-demo` task sets both:
+//! a CUDA host both the library and the CUDA libraries come from the monorepo's `robocap-live` pixi env: onnxruntime-cpp,
+//! the same conda-forge build as the env's Python bindings, and `cuda`'s libraries. The `robocap-live-demo` task sets both:
 //!
 //! ```text
-//! ORT_DYLIB_PATH=<libonnxruntime.so* in the env's onnxruntime/capi/>
+//! ORT_DYLIB_PATH=$CONDA_PREFIX/lib/libonnxruntime.so
 //! LD_LIBRARY_PATH=$CONDA_PREFIX/lib   # cuDNN 9, cuBLAS, cudart 13 for libonnxruntime_providers_cuda.so
 //! ```
 //!
@@ -35,9 +35,9 @@ const FRAME_LEN: usize = DETNET_WIDTH * DETNET_HEIGHT;
 /// Where the graphs run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OrtDevice {
-    /// CUDA on this GPU; an error if the CUDA execution provider cannot be registered.
+    /// CUDA on this GPU; an error if the CUDA execution provider cannot be registered or cannot run the graphs.
     Cuda(i32),
-    /// CUDA on GPU 0 when it registers, else the CPU.
+    /// CUDA on GPU 0 when it registers and runs both graphs, else the CPU (the GB10).
     Auto,
     /// The CPU.
     Cpu,
@@ -105,7 +105,7 @@ impl OrtNets {
     /// # Errors
     ///
     /// [`NetsError::Load`] when no library path is given or it cannot be loaded, when a graph cannot be read, or when
-    /// [`OrtDevice::Cuda`] was asked for and the CUDA execution provider does not register.
+    /// [`OrtDevice::Cuda`] was asked for and the CUDA execution provider does not register or cannot run the graphs.
     pub fn new(models_dir: impl AsRef<Path>, version: DetNetVersion, options: &OrtConfig) -> Result<Self, NetsError> {
         let dylib: PathBuf = match &options.dylib {
             Some(path) => path.clone(),
@@ -118,20 +118,32 @@ impl OrtNets {
         builder.with_name("robocap-live").commit();
         let dir: &Path = models_dir.as_ref();
         let cuda = |device: i32| CUDA::default().with_device_id(device).with_tf32(false).build().error_on_failure();
-        let pair = |providers: &[ExecutionProviderDispatch]| -> Result<(Session, Session), NetsError> {
-            Ok((session(&version.dir(dir).join(DETNET_ONNX), providers, options.intra_threads)?, session(&dir.join(KEYNET_ONNX), providers, options.intra_threads)?))
+        let build = |providers: &[ExecutionProviderDispatch], device: String| -> Result<Self, NetsError> {
+            let detnet: Session = session(&version.dir(dir).join(DETNET_ONNX), providers, options.intra_threads)?;
+            let keynet: Session = session(&dir.join(KEYNET_ONNX), providers, options.intra_threads)?;
+            let description: String = format!("ort {device} fp32 ({DETNET_ONNX} {}, {KEYNET_ONNX}; {})", version.name(), dylib.display());
+            Ok(Self { detnet, keynet, description, frames: Vec::new() })
         };
-        let cpu = || [CPU::default().build()];
-        let ((detnet, keynet), device): ((Session, Session), String) = match options.device {
-            OrtDevice::Cpu => (pair(&cpu())?, "cpu".into()),
-            OrtDevice::Cuda(device) => (pair(&[cuda(device)])?, format!("cuda:{device}")),
-            OrtDevice::Auto => match pair(&[cuda(0)]) {
-                Ok(sessions) => (sessions, "cuda:0".into()),
-                Err(error) => (pair(&cpu())?, format!("cpu (cuda unavailable: {error})")),
-            },
+        // The provider registering is not enough: conda-forge's CUDA 13 build registers on the GB10 (sm_121) but has no
+        // kernel image for it, so a CUDA choice is kept only once both graphs have run.
+        let on_cuda = |device: i32| -> Result<Self, NetsError> {
+            let mut nets: Self = build(&[cuda(device)], format!("cuda:{device}"))?;
+            nets.probe().map_err(|error| load_error(&format!("cuda:{device}"), error))?;
+            Ok(nets)
         };
-        let description: String = format!("ort {device} fp32 ({DETNET_ONNX} {}, {KEYNET_ONNX}; {})", version.name(), dylib.display());
-        Ok(Self { detnet, keynet, description, frames: Vec::new() })
+        match options.device {
+            OrtDevice::Cpu => build(&[CPU::default().build()], "cpu".into()),
+            OrtDevice::Cuda(device) => on_cuda(device),
+            OrtDevice::Auto => on_cuda(0).or_else(|error| build(&[CPU::default().build()], format!("cpu (cuda unavailable: {error})"))),
+        }
+    }
+
+    /// One zero-input call through each net.
+    fn probe(&mut self) -> Result<(), NetsError> {
+        let pixels: Vec<u8> = vec![0; FRAME_LEN];
+        self.detnet(&[NetFrame { pixels: &pixels, top: 0, half_turn: false }])?;
+        self.keynet(&[&[0.0; CROP_LEN]], &[[0.0; 3 * NUM_LANDMARKS]])?;
+        Ok(())
     }
 }
 

@@ -26,7 +26,7 @@ from typing import Annotated, TypeAlias
 import tyro
 from simplecv.run_record import RunStart, start_run
 
-from colsfm import DATA_DIR
+from colsfm import DATA_DIR, MODEL_DIR_ENV
 from colsfm.calibrate import CalibrateOptions, calibrate
 from colsfm.catalog import CatalogInputConfig, PreparedInput, prepare_catalog_input, serve_catalog_input
 from colsfm.frame_manifest import FRAME_SOURCE_FILE, read_manifest
@@ -68,7 +68,7 @@ class CatalogCommand:
 
     def execute(self) -> None:
         """Prepare the input, run the pipeline and write the layer (a local input is served for the whole run)."""
-        run: RunStart = start_run(self)
+        run: RunStart = start_run(self, source=Path(__file__), environment=(MODEL_DIR_ENV,))
         with serve_catalog_input(self.source) as source:
             self._run(source, run)
 

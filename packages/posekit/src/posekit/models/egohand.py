@@ -36,7 +36,15 @@ from posekit.cameras import CalibratedCamera
 from posekit.models.base import HandDetector, TopDownHandPose3d
 from posekit.ops.pil_resize import resize_bilinear_uint8
 from posekit.predictions import BoxDetections, HandDetections, HandPoses3d, HandSide, Keypoints3d, MeshDetail, validate_frames_rgb
-from posekit.runtimes import OnnxBackendConfig, OnnxOrTrtBackendConfig, TensorRuntime, create_runtime_from_onnx, run_chunked
+from posekit.runtimes import (
+    AutoBackendConfig,
+    OnnxBackendConfig,
+    OnnxOrTrtBackendConfig,
+    TensorRuntime,
+    create_runtime_from_onnx,
+    resolve_backend,
+    run_chunked,
+)
 from posekit.skeletons import SOMA_HAND, KeypointSkeleton
 
 # Upstream's EgoHand imports Hydra at module load; environments that only reach posekit.models for other
@@ -130,7 +138,7 @@ class EgoHandDetectorConfig:
     """Path to hand_detector.onnx; None downloads it."""
     threshold: float = 0.5
     """Minimum detector confidence, unrelated to landmark visibility."""
-    backend: OnnxOrTrtBackendConfig = field(default_factory=OnnxBackendConfig)
+    backend: OnnxOrTrtBackendConfig = field(default_factory=AutoBackendConfig)
     """ONNX Runtime reference or cached TensorRT engine, with a dynamic batch."""
     hf_detector_repo_id: str = "nvidia/RT-DETR-Hand-Detector-v1"
     """Hugging Face repo holding hand_detector.onnx."""
@@ -163,22 +171,23 @@ class EgoHandDetector(HandDetector):
 
     def __init__(self, config: EgoHandDetectorConfig) -> None:
         self.config: EgoHandDetectorConfig = config
+        backend: OnnxBackendConfig | TensorRtBackendConfig = resolve_backend(config.backend)
         weights: Path = config.weights_path()
         if config.fp8_calibration is not None:
             from posekit.models.egohand_detector_quantization import quantized_detector_path
 
-            if not isinstance(config.backend, TensorRtBackendConfig):
+            if not isinstance(backend, TensorRtBackendConfig):
                 raise ValueError("The FP8 detector requires a TensorRT backend.")
             if torch.cuda.get_device_capability()[0] < 9:
                 raise ValueError('The FP8 detector needs an FP8 GPU (compute capability 9+); without one use fast_egohand_configs(backbone_precision="bf16").')
-            weights = quantized_detector_path(weights, config.fp8_calibration, config.backend.cache_dir)
+            weights = quantized_detector_path(weights, config.fp8_calibration, backend.cache_dir)
         elif config.fp16_trunk:
             from trtkit.onnx_precision import fp16_trunk
 
-            if not isinstance(config.backend, TensorRtBackendConfig):
+            if not isinstance(backend, TensorRtBackendConfig):
                 raise ValueError("The FP16 detector trunk requires a TensorRT backend.")
-            weights = fp16_trunk(weights, config.backend.cache_dir)
-        self.runtime: TensorRuntime = create_runtime_from_onnx(weights, config.backend)
+            weights = fp16_trunk(weights, backend.cache_dir)
+        self.runtime: TensorRuntime = create_runtime_from_onnx(weights, backend)
 
     def __call__(self, frames_rgb: UInt8[Tensor, "b h w 3"]) -> HandDetections:
         """Detect an ordered RGB sequence; resolve identity before hand mirroring."""

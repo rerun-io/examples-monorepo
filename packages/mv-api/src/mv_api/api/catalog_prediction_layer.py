@@ -16,6 +16,7 @@ import torch
 from einops import rearrange
 from jaxtyping import Bool, Float32, Float64, Int, UInt8
 from numpy import ndarray
+from posekit.runtimes import OrtDevice
 from simplecv.camera_parameters import PinholeParameters
 from simplecv.catalog_rig_layout import CatalogComponent, CatalogRigLayout, SchemaLike, catalog_components, parse_rig_layout
 from simplecv.data.skeleton.coco_133 import COCO_133_IDS
@@ -132,12 +133,14 @@ class CatalogPredictionLayerConfig:
     """Number of samples fetched per Rerun catalog query."""
     tracker_mode: Literal["lightweight", "balanced", "performance", "wholebody"] = "wholebody"
     """MVAPI tracker model preset."""
-    tracker_device: Literal["cpu", "cuda"] = "cuda"
-    """Device requested by the MVAPI ONNX runtime backend."""
+    tracker_device: OrtDevice = "cuda"
+    """Where the tracker stages frames and runs its posekit models (`MultiviewBodyTrackerConfig.device`): ``cpu`` runs
+    them on ONNX Runtime's CPU provider (with ``tracker_backend=onnxruntime``), with no GPU."""
+    # `multiview_pose_estimator.TrackerBackend`, spelled out: that module is imported lazily, below.
     tracker_backend: Literal["onnxruntime", "tensorrt"] = "tensorrt"
     """Inference backend for the posekit models. ``tensorrt`` reuses the cached dynamic-batch
-    engines and is the faster path; ``onnxruntime`` skips the engine build and, since the
-    workspace takes onnxruntime-gpu >= 1.29 from PyPI (sm_121a), also runs on the GB10 Spark."""
+    engines and is the faster path; ``onnxruntime`` skips the engine build. On the GB10 Spark the workspace's
+    conda-forge ONNX Runtime has no sm_121 kernels: there ``onnxruntime`` runs with ``tracker_device=cpu``."""
     keypoint_threshold: float = 0.7
     """Minimum keypoint confidence retained in logged prediction layers."""
     keypoint_subset: KeypointSubset = "upper-body"

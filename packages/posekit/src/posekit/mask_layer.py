@@ -6,6 +6,8 @@ Soft mattes sit beside it: per camera ``<camera>/pinhole/people_matte``, an 8-bi
 
 import rerun as rr
 
+LENS_MASK_LAYER: str = "lens_mask"
+"""Catalog layer of a 360 recording's lens masks (``posekit.apis.lens_masks``), what the SLAM step reads and the face masks remap."""
 MASK_NAME: str = "people_mask"
 """Leaf entity of a mask under ``<camera>/pinhole``."""
 MATTE_NAME: str = "people_matte"

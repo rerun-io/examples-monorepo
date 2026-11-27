@@ -15,11 +15,9 @@ with the frame's own stamp, in the mask layer contract (track 3, v2): ``mask_dow
 """
 
 import time
-from collections import deque
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from itertools import islice
 from pathlib import Path
 
 import numpy as np
@@ -47,8 +45,8 @@ from posekit.apis.people_masks import (
 from posekit.cube_layer import CubeSampling, cube_sampling, sampled_framesets
 from posekit.models.base import SegmentationPrompts
 from posekit.models.sam2_video import Sam2VideoSegmenter, Sam2VideoSegmenterConfig
-from posekit.ops.people_masks import dilate_masks
-from posekit.ops.people_tracks import RedetectPlan, count_misses, mask_iou, plan_redetect
+from posekit.ops.people_masks import dilate_masks, pool_cells
+from posekit.ops.people_tracks import RedetectPlan, count_misses, mask_iou, plan_redetect, with_lookahead
 from posekit.predictions import BoxDetections
 
 
@@ -86,6 +84,15 @@ class TrackOptions:
     """Run SAM 3 for the next re-detect step on a worker thread and its own CUDA stream while the tracker steps before it
     run, the tracker on a high-priority stream (SAM 3 is GEMM-bound, the tracker launch-bound, so they overlap on the
     GPU). Same masks as ``False``, which runs SAM 3 in line on the tracker's stream."""
+
+    def __post_init__(self) -> None:
+        """Refuse a re-detect interval below one step.
+
+        Raises:
+            ValueError: If ``redetect_every`` is below 1: no step would re-detect, and no lookahead window could hold it.
+        """
+        if self.redetect_every < 1:
+            raise ValueError(f"redetect_every must be at least 1; got {self.redetect_every}")
 
 
 @dataclass
@@ -152,6 +159,9 @@ class PeopleTracker:
         self.detect_stream: torch.cuda.Stream | None = torch.cuda.Stream(device=device) if options.lookahead else None
         self.pending: tuple[int, Future[tuple[BoxDetections, float]]] | None = None
         """The tracker step a running SAM 3 call is for, and the call."""
+        # With lookahead the tracker runs on a high-priority stream: its small kernels go ahead of SAM 3's queued GEMM blocks.
+        self.track_stream: torch.cuda.Stream = torch.cuda.Stream(device=device, priority=-1) if options.lookahead else torch.cuda.current_stream()
+        """The stream the caller runs :meth:`step` on (``with torch.cuda.stream(tracker.track_stream)``)."""
 
     def detect_on_stream(self, frames_rgb: UInt8[Tensor, "s h w 3"]) -> tuple[BoxDetections, float]:
         """SAM 3 on the detect stream (worker thread); returns the detections and the call's wall time."""
@@ -197,6 +207,19 @@ class PeopleTracker:
         """Stop the SAM 3 worker thread."""
         if self.detector is not None:
             self.detector.shutdown(cancel_futures=True)
+
+    def __enter__(self) -> "PeopleTracker":
+        """The tracker, closed (:meth:`close`) when the block leaves, by an error too: a pending SAM 3 call holds the GPU."""
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        """Close the tracker."""
+        self.close()
+
+    @property
+    def wants_upcoming(self) -> bool:
+        """Whether the next :meth:`step` starts SAM 3 on its ``upcoming`` frames (lookahead on, a re-detect step)."""
+        return self.detector is not None and self.steps % self.options.redetect_every == 0
 
     def step(self, frames_rgb: UInt8[Tensor, "s h w 3"], upcoming: UInt8[Tensor, "s h w 3"] | None = None) -> Bool[Tensor, "s h w"]:
         """Advance all streams by one tracker step; returns the person mask of each stream.
@@ -348,21 +371,15 @@ def track_segment(
         for chunk, frames in zip(chunks, decoded, strict=True)
         for column, index in enumerate(chunk)
     )
-    ahead: int = config.track.redetect_every
-    # with lookahead the tracker runs on a high-priority stream: its small kernels go ahead of SAM 3's queued GEMM blocks
-    track_stream: torch.cuda.Stream = torch.cuda.Stream(device=config.device, priority=-1) if config.track.lookahead else torch.cuda.current_stream()
-    with torch.cuda.stream(track_stream):
-        window: deque[tuple[int, Tensor, bool]] = deque(islice(steps, ahead))
-        while window:
-            index, frame, chunk_end = window.popleft()
-            window.extend(islice(steps, 1))  # now the steps after this one, up to redetect_every later
-            n_slots, height, width = int(frame.shape[0]), int(frame.shape[1]), int(frame.shape[2])
+    with tracker, torch.cuda.stream(tracker.track_stream):
+        for (index, frame, chunk_end), upcoming in with_lookahead(steps, config.track.redetect_every if config.track.lookahead else 0):
+            height, width = int(frame.shape[1]), int(frame.shape[2])
             if tracker.steps == 0 and (height % factor or width % factor):
                 raise ValueError(f"mask_downscale {factor} does not divide the {width}x{height} frames of {entities}")
-            union: Bool[Tensor, "s h w"] = tracker.step(frame, window[-1][1] if len(window) == ahead else None)
+            union: Bool[Tensor, "s h w"] = tracker.step(frame, None if upcoming is None else upcoming[1])
             if index in outputs:
                 dilated: Bool[Tensor, "s h w"] = dilate_masks(union, config.mask.dilate_px)
-                cells: Bool[Tensor, "s hm wm"] = dilated.reshape(n_slots, height // factor, factor, width // factor, factor).any(dim=4).any(dim=2)
+                cells: Bool[Tensor, "s hm wm"] = pool_cells(dilated, factor)
                 masks: UInt8[ndarray, "s hm wm"] = (cells.to(torch.uint8) * PERSON_CLASS_ID).cpu().numpy()
                 for slot, entity in enumerate(entities):
                     set_frame_time(config.timeline, streams[slot].times[index])
@@ -377,7 +394,6 @@ def track_segment(
                     f"frame {index}: live tracks {live}, events {tracker.counts}, {tracker.steps * len(entities) / elapsed:.1f} images/s, "
                     f"SAM 3 {tracker.detect_seconds:.1f} (waited {tracker.wait_seconds:.1f}) of {elapsed:.1f} s"
                 )
-    tracker.close()
     recording: rr.RecordingStream | None = rr.get_data_recording()
     assert recording is not None
     recording.flush()

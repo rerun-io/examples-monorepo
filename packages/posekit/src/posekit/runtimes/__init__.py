@@ -8,10 +8,14 @@ surface as a plain re-export.
 """
 
 from trtkit import (
+    AutoBackendConfig,
     BackendConfig,
     OnnxBackendConfig,
     OnnxCudaRuntime,
     OnnxOrTrtBackendConfig,
+    OnnxRuntime,
+    OrtDevice,
+    ResolvedBackendConfig,
     RuntimeSpec,
     TensorRtBackendConfig,
     TensorRtRuntime,
@@ -20,17 +24,23 @@ from trtkit import (
     TorchBackendConfig,
     TorchRuntime,
     create_runtime_from_onnx,
+    require_cuda_kernels,
+    resolve_backend,
     run_chunked,
+    tensorrt_available,
     validate_runtime_inputs,
 )
 from trtkit.trt_builder import DEFAULT_TRT_CACHE_DIR, TrtBuildConfig, ensure_engine
 
 __all__ = (
+    "AutoBackendConfig",
     "BackendConfig",
     "DEFAULT_TRT_CACHE_DIR",
     "OnnxBackendConfig",
     "OnnxCudaRuntime",
     "OnnxOrTrtBackendConfig",
+    "OnnxRuntime",
+    "OrtDevice",
     "RuntimeSpec",
     "TensorRtBackendConfig",
     "TensorRtRuntime",
@@ -41,6 +51,10 @@ __all__ = (
     "TrtBuildConfig",
     "create_runtime_from_onnx",
     "ensure_engine",
+    "require_cuda_kernels",
+    "ResolvedBackendConfig",
+    "resolve_backend",
     "run_chunked",
+    "tensorrt_available",
     "validate_runtime_inputs",
 )

@@ -150,7 +150,7 @@ class FullCircleConfig:
     reprompt_every: int = 3
     """Tracked framesets between two re-prompts of the tracker with the detector's box (0: FullCircle's single prompt);
     3 at 3 Hz (every 10th frameset at 30 fps) is once a second. The Insta360 stage sets it from
-    ``reprompt_every_frames`` and ``stride`` (:class:`~posekit.apis.fullcircle_masks.FullCircleMasksConfig`)."""
+    ``reprompt_every_frames`` and ``stride`` (:class:`~posekit.apis.lens_masks.LensMasksConfig`)."""
     direction_gate_deg: float = 30.0
     """Detections whose centre lies within this angle of the previous operator direction make the next direction
     (:func:`operator_directions`); also the radius of a cluster of detections on the sphere."""

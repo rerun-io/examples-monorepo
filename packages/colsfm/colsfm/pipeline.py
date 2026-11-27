@@ -104,6 +104,7 @@ from colsfm.features import ExtractionReport
 from colsfm.frame_manifest import FrameSource
 from colsfm.frames import open_frame_source
 from colsfm.frames_meta import FRAMES_META_NAME, FramesMeta, RigFrame, write_frames_meta
+from colsfm.inference import frames_device
 from colsfm.mapping import MappingOptions, MappingResult
 from colsfm.matching import (
     MatchingOptions,
@@ -310,7 +311,7 @@ def run_pipeline(options: PipelineOptions, observer: PipelineObserver | None = N
     staged: PipelineOptions = replace(options, output_dir=workspace.staging_dir)
     print(f"[colsfm] config {options.config_dir} | input {options.input_dir} | output {options.output_dir}")
     # The run's one frame source: every stage that reads pixels gets it, and it is released however the run ends.
-    frames: FrameSource = open_frame_source(options.input_dir)
+    frames: FrameSource = open_frame_source(options.input_dir, frames_device(options.inference_runtime))
     try:
         watcher.run_started(staged, stages, frames)
         summary: PipelineSummary = _run_stages(options, staged, resolved, workspace.ledger, watcher, started, frames)

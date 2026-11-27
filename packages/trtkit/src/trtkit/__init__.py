@@ -5,7 +5,7 @@ between posekit, wilor-nano, sapiens2-pose / sapiens-coco133-pose, prompt-da,
 and mamma. It splits into two layers (vision-rt's crate layering, in Python):
 
 - **runtime** — the backend-neutral tensor-function contract
-  (:class:`trtkit.base.TensorRuntime`) with torch / ONNX Runtime CUDA /
+  (:class:`trtkit.base.TensorRuntime`) with torch / ONNX Runtime (CUDA or CPU) /
   TensorRT implementations: :mod:`trtkit.base`, :mod:`trtkit.torch_runtime`,
   :mod:`trtkit.onnx_cuda`, :mod:`trtkit.tensorrt_runtime`,
   :mod:`trtkit.backends`.
@@ -20,15 +20,19 @@ pre/postprocessing — stay in the model packages.
 """
 
 from trtkit.backends import (
+    AutoBackendConfig,
     BackendConfig,
     OnnxBackendConfig,
     OnnxOrTrtBackendConfig,
+    ResolvedBackendConfig,
     TensorRtBackendConfig,
     TorchBackendConfig,
     create_runtime_from_onnx,
+    resolve_backend,
+    tensorrt_available,
 )
 from trtkit.base import RuntimeSpec, TensorRuntime, TensorSpec, run_chunked, validate_runtime_inputs
-from trtkit.onnx_cuda import OnnxCudaRuntime
+from trtkit.onnx_cuda import OnnxCudaRuntime, OnnxDynamicRuntime, OnnxRuntime, OrtDevice, require_cuda_kernels
 from trtkit.onnx_export import DynamicDim, DynamicDims, export_onnx, shallow_module_copy, sweep_stale_onnx_exports
 from trtkit.onnx_graph import onnx_static_batch_size
 from trtkit.tensorrt_runtime import TensorRtDynamicRuntime, TensorRtRuntime
@@ -45,6 +49,7 @@ from trtkit.trt_builder import (
 )
 
 __all__ = (
+    "AutoBackendConfig",
     "BackendConfig",
     "DEFAULT_TRT_CACHE_DIR",
     "DynamicDim",
@@ -53,7 +58,11 @@ __all__ = (
     "InputShapeProfile",
     "OnnxBackendConfig",
     "OnnxCudaRuntime",
+    "OnnxDynamicRuntime",
     "OnnxOrTrtBackendConfig",
+    "OnnxRuntime",
+    "OrtDevice",
+    "ResolvedBackendConfig",
     "RuntimeSpec",
     "TensorRtBackendConfig",
     "TensorRtDynamicRuntime",
@@ -70,8 +79,11 @@ __all__ = (
     "export_onnx",
     "onnx_content_hash",
     "onnx_static_batch_size",
+    "require_cuda_kernels",
+    "resolve_backend",
     "run_chunked",
     "shallow_module_copy",
     "sweep_stale_onnx_exports",
+    "tensorrt_available",
     "validate_runtime_inputs",
 )

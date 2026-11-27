@@ -28,10 +28,14 @@ from rerun.catalog import DatasetEntry
 from serde import serde
 from simplecv.run_record import RunStart, start_run, write_run_record
 
-from dataforge import paths, writing
+from dataforge import paths, video_encoding, writing
 from dataforge.identity import SequenceIdentity
 from dataforge.timing import SequenceTimer
 from dataforge.writing import TableFields
+
+RUN_ENVIRONMENT: tuple[str, ...] = (*paths.ENVIRONMENT, *video_encoding.ENVIRONMENT)
+"""The environment variables a conversion reads (output and raw roots, the encoder's ffmpeg and session cap): a layer's
+run record keeps them (``simplecv.run_record``)."""
 
 
 @dataclass
@@ -101,14 +105,14 @@ class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
     def __init__(self, config: ConfigT) -> None:
         self.config: ConfigT = config
         self.timer: SequenceTimer = SequenceTimer()
-        self.run: RunStart | None = None
-        """This process's run identity (``simplecv.run_record.start_run``): the convert command sets it before any
-        work; a dataset used outside it starts one at its first layer."""
         """Stage clock of the sequence being converted.
 
         dataforge-convert installs a fresh one before every sequence; converters
         time stages with self.timer.stage(name) and report self.timer.capture_s.
         """
+        self.run: RunStart | None = None
+        """The convert command's run identity (``simplecv.run_record.start_run``), taken before any sequence and shared by
+        its sequences; None outside it, where each layer takes a fresh one when it opens."""
 
     def targets(self, identity: SequenceIdentity) -> dict[str, Path]:
         """Layer destinations for one sequence; a ``FrameLimitedConfig`` preview lands in its own tree."""
@@ -176,9 +180,8 @@ class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
         sequence's rig). The alternative: stop embedding and save an ``.rbl`` beside local files.
         """
         base: bool = layer == paths.BASE_LAYER
-        if self.run is None:
-            self.run = start_run(self.config)
-        sequence: RunStart = replace(self.run, started=datetime.fromisoformat(self.timer.started_at))
+        run: RunStart = self.run if self.run is not None else start_run(self.config, source=Path(__file__), environment=RUN_ENVIRONMENT)
+        sequence: RunStart = replace(run, started=datetime.fromisoformat(self.timer.started_at))
         with writing.atomic_recording(
             target,
             recording_id=identity.recording_id,

@@ -32,6 +32,7 @@ from colsfm.frames_meta import FRAMES_META_NAME, FramesMeta, read_frames_meta
 from colsfm.geometry import MILLIMETRES_PER_METRE
 from colsfm.matching import MatchingOptions, MatchLimitPolicy
 from colsfm.model_assets import (
+    RACO_DYNAMIC_ONNX_PATH,
     RACO_LIGHTGLUE_ONNX_PATH,
     RACO_ONNX_PATH,
     missing_raco_graphs_message,
@@ -76,26 +77,37 @@ Deliberately below the registered count: 0.5 m spacing leaves five rig samples
 across Galileo's 0.66 m sweep, and the cameras facing away from the overlap
 legitimately see nothing. Measured 26 of 34."""
 
-PYCOLMAP_ABLATION: Final[PipelineOptions] = PipelineOptions(
+ENGINE_FREE_RUN: Final[PipelineOptions] = PipelineOptions(
     input_dir=Path(),
     output_dir=Path(),
     min_inter_frame_distance=SMOKE_MIN_INTER_FRAME_DISTANCE_M,
     min_inter_frame_rotation_degrees=SMOKE_MIN_INTER_FRAME_ROTATION_DEGREES,
-    features_backend="pycolmap",
-    matching_backend="pycolmap",
+    features_backend="raco",
+    matching_backend="flexglue",
+    inference_runtime="onnxruntime",
     ba_backend="ceres",
     optimize_extrinsics=False,
 )
-"""The no-GPU-engine ablation every run in this module takes, minus its two paths.
+"""The run every case in this module takes, minus its two paths: the default RaCo-ALIKED and FlexGlue graphs on ONNX
+Runtime's CPU provider, Ceres bundle adjustment. No GPU and no engine.
 
-`python -m colsfm run` defaults to RaCo, LightGlue+ and CASPAR since 2026-09-06
-(NOTES.md decision 17), which needs the uncommitted graphs under
-`data/cusfm_models/` and a `CASPAR_ENABLED` pycolmap. This module is the *pipeline*
-suite, not a backend suite: what it asserts — the artifacts, the publication
-boundary, the summary — is the same on every backend, so it names the ablation that
-runs on a bare checkout and leaves the engines to `test_raco_backend.py` and
-`test_mapping_ba_backend.py`. Every fixture below is `replace(PYCOLMAP_ABLATION,
-input_dir=..., output_dir=...)`, so the ablation is stated once."""
+This module is the *pipeline* suite, not a backend suite: what it asserts — the artifacts, the publication boundary, the
+summary — is the same on every backend, so it runs the product's own models where no engine has to exist, and leaves the
+engines to `test_raco_backend.py`, `test_onnxruntime_runners.py` and `test_mapping_ba_backend.py`. The graphs are not
+committed: `colsfm-raco-export` and `colsfm-download-flexglue` provide them, and every case skips without them."""
+
+
+PLAN_ONLY: Final[PipelineOptions] = replace(ENGINE_FREE_RUN, features_backend="pycolmap", matching_backend="pycolmap")
+"""For cases that only resolve a plan or stop before the workspace exists: COLMAP's own backends need no graph of ours, so
+these run on a bare checkout. Nothing here extracts or matches."""
+
+
+def engine_free_run() -> PipelineOptions:
+    """`ENGINE_FREE_RUN`, skipping the calling test when the graphs it runs are not in this checkout."""
+    missing: list[Path] = [path for path in required_raco_graphs("raco", "flexglue", "onnxruntime") if not path.is_file()]
+    if missing:
+        pytest.skip(missing_raco_graphs_message(missing))
+    return ENGINE_FREE_RUN
 
 
 @pytest.fixture(scope="module")
@@ -112,9 +124,7 @@ def galileo_run(galileo_input_dir: Path, tmp_path_factory: pytest.TempPathFactor
     input_dir: Path = galileo_input_dir
     if not (input_dir / FRAMES_META_NAME).is_file():
         pytest.skip(f"missing {input_dir / FRAMES_META_NAME}")
-    options: PipelineOptions = replace(
-        PYCOLMAP_ABLATION, input_dir=input_dir, output_dir=tmp_path_factory.mktemp("galileo_colsfm")
-    )
+    options: PipelineOptions = replace(engine_free_run(), input_dir=input_dir, output_dir=tmp_path_factory.mktemp("galileo_colsfm"))
     return run_pipeline(options)
 
 
@@ -207,10 +217,7 @@ def galileo_caspar_run(
     if not (input_dir / FRAMES_META_NAME).is_file():
         pytest.skip(f"missing {input_dir / FRAMES_META_NAME}")
     options: PipelineOptions = replace(
-        PYCOLMAP_ABLATION,
-        input_dir=input_dir,
-        output_dir=tmp_path_factory.mktemp("galileo_colsfm_caspar"),
-        ba_backend="caspar",
+        engine_free_run(), input_dir=input_dir, output_dir=tmp_path_factory.mktemp("galileo_colsfm_caspar"), ba_backend="caspar"
     )
     return run_pipeline(options)
 
@@ -271,10 +278,7 @@ def galileo_refined_run(galileo_input_dir: Path, tmp_path_factory: pytest.TempPa
     if not (input_dir / FRAMES_META_NAME).is_file():
         pytest.skip(f"missing {input_dir / FRAMES_META_NAME}")
     options: PipelineOptions = replace(
-        PYCOLMAP_ABLATION,
-        input_dir=input_dir,
-        output_dir=tmp_path_factory.mktemp("galileo_colsfm_ext"),
-        optimize_extrinsics=True,
+        engine_free_run(), input_dir=input_dir, output_dir=tmp_path_factory.mktemp("galileo_colsfm_ext"), optimize_extrinsics=True
     )
     return run_pipeline(options)
 
@@ -517,7 +521,7 @@ def test_the_unregularised_refinement_stays_on_caspar_only_where_the_rig_probe_s
     """
     plan: ResolvedRun = resolve_run(
         replace(
-            PYCOLMAP_ABLATION,
+            PLAN_ONLY,
             input_dir=galileo_input_dir,
             output_dir=tmp_path / "cusfm",
             ba_backend="caspar",
@@ -540,7 +544,7 @@ def test_refining_the_camera_model_frees_focals_and_the_rig_in_the_mapper(galile
     deg from Spirula's poses; with these freedoms 0.034 deg, the per-face focals within 0.5 px of Spirula's.
     """
     plan: ResolvedRun = resolve_run(
-        replace(PYCOLMAP_ABLATION, input_dir=galileo_input_dir, output_dir=tmp_path / "cusfm", ba_backend="caspar", refine_camera_model=True)
+        replace(PLAN_ONLY, input_dir=galileo_input_dir, output_dir=tmp_path / "cusfm", ba_backend="caspar", refine_camera_model=True)
     )
     assert plan.mapping.refine_focal_length is True
     assert plan.mapping.optimize_extrinsics is True
@@ -549,11 +553,11 @@ def test_refining_the_camera_model_frees_focals_and_the_rig_in_the_mapper(galile
         pytest.skip(f"CASPAR is {capability.availability} in this pycolmap, so the plan falls back for the build, not the rig")
     expected: tuple[str, str | None] = ("caspar", None) if capability.refines_sensor_from_rig else ("ceres", EXTRINSICS_FALLBACK_REASON)
     assert (plan.ba_plan.backend, plan.ba_plan.fallback_reason) == expected
-    assert stage_names(optimize_extrinsics=plan_runs_extrinsic_stage(replace(PYCOLMAP_ABLATION, refine_camera_model=True))) == STAGE_NAMES
+    assert stage_names(optimize_extrinsics=plan_runs_extrinsic_stage(replace(PLAN_ONLY, refine_camera_model=True))) == STAGE_NAMES
 
 
 @pytest.mark.skipif(
-    any(not path.is_file() for path in required_raco_graphs("raco", "flexglue")),
+    any(not path.is_file() for path in required_raco_graphs("raco", "flexglue", "tensorrt")),
     reason="the RaCo or FlexGlue graphs are missing; `colsfm-raco-export` and `colsfm-download-flexglue` provide them",
 )
 def test_the_default_resolves_to_raco_features_and_flexglue_matching(galileo_input_dir: Path, tmp_path: Path) -> None:
@@ -571,10 +575,12 @@ def test_the_default_resolves_to_raco_features_and_flexglue_matching(galileo_inp
 
 def test_the_raco_default_needs_two_graphs_and_the_ablation_needs_none() -> None:
     """Which model files each backend choice requires, before a run creates anything."""
-    assert required_raco_graphs("pycolmap", "pycolmap") == ()
-    assert required_raco_graphs("raco", "pycolmap") == (RACO_ONNX_PATH,)
-    assert required_raco_graphs("pycolmap", "raco") == (RACO_LIGHTGLUE_ONNX_PATH,)
-    assert required_raco_graphs("raco", "raco") == (RACO_ONNX_PATH, RACO_LIGHTGLUE_ONNX_PATH)
+    assert required_raco_graphs("pycolmap", "pycolmap", "tensorrt") == ()
+    assert required_raco_graphs("raco", "pycolmap", "tensorrt") == (RACO_ONNX_PATH,)
+    assert required_raco_graphs("pycolmap", "raco", "tensorrt") == (RACO_LIGHTGLUE_ONNX_PATH,)
+    assert required_raco_graphs("raco", "raco", "tensorrt") == (RACO_ONNX_PATH, RACO_LIGHTGLUE_ONNX_PATH)
+    # ONNX Runtime builds no engine that would name the shape-dynamic graph, so it is asked for up front.
+    assert required_raco_graphs("raco", "pycolmap", "onnxruntime") == (RACO_ONNX_PATH, RACO_DYNAMIC_ONNX_PATH)
 
 
 def test_a_missing_raco_graph_names_the_export_command_and_the_ablation() -> None:
@@ -603,7 +609,7 @@ def test_a_bad_caspar_override_stops_the_run_before_the_workspace_exists(
         pytest.skip(f"missing {galileo_input_dir / FRAMES_META_NAME}")
     output_dir: Path = tmp_path / "never_created"
     options: PipelineOptions = replace(
-        PYCOLMAP_ABLATION,
+        PLAN_ONLY,
         input_dir=galileo_input_dir,
         output_dir=output_dir,
         ba_backend="caspar",
@@ -619,9 +625,7 @@ def test_an_unknown_caspar_override_stops_the_run_too(galileo_input_dir: Path, t
     if not (galileo_input_dir / FRAMES_META_NAME).is_file():
         pytest.skip(f"missing {galileo_input_dir / FRAMES_META_NAME}")
     output_dir: Path = tmp_path / "never_created"
-    options: PipelineOptions = replace(
-        PYCOLMAP_ABLATION, input_dir=galileo_input_dir, output_dir=output_dir, caspar_option=("solver_iterations=10",)
-    )
+    options: PipelineOptions = replace(PLAN_ONLY, input_dir=galileo_input_dir, output_dir=output_dir, caspar_option=("solver_iterations=10",))
     with pytest.raises(ValueError, match="not a numeric CASPAR solver option"):
         run_pipeline(options)
     assert not output_dir.exists()
@@ -629,9 +633,7 @@ def test_an_unknown_caspar_override_stops_the_run_too(galileo_input_dir: Path, t
 
 def test_the_resolved_run_gives_both_match_stages_one_matcher(galileo_input_dir: Path, tmp_path: Path) -> None:
     """Stage 4 and stage 5's batch match take the same resolved `MatchingOptions`."""
-    options: PipelineOptions = replace(
-        PYCOLMAP_ABLATION, input_dir=galileo_input_dir, output_dir=tmp_path / "cusfm", match_cap_mode="image_area"
-    )
+    options: PipelineOptions = replace(PLAN_ONLY, input_dir=galileo_input_dir, output_dir=tmp_path / "cusfm", match_cap_mode="image_area")
     resolved: ResolvedRun = resolve_run(options)
     config: CusfmConfig = read_config_directory(DEFAULT_CONFIG_DIR)
     assert resolved.matching_options(config) == resolved.matching_options(config)
@@ -643,10 +645,10 @@ def test_the_two_spellings_of_an_uncapped_run_resolve_to_the_same_policy(
 ) -> None:
     """`--match-cap-mode off` and `--max-matches-per-pair None` are one state, not two."""
     by_mode: ResolvedRun = resolve_run(
-        replace(PYCOLMAP_ABLATION, input_dir=galileo_input_dir, output_dir=tmp_path / "a", match_cap_mode="off")
+        replace(PLAN_ONLY, input_dir=galileo_input_dir, output_dir=tmp_path / "a", match_cap_mode="off")
     )
     by_budget: ResolvedRun = resolve_run(
-        replace(PYCOLMAP_ABLATION, input_dir=galileo_input_dir, output_dir=tmp_path / "b", max_matches_per_pair=None)
+        replace(PLAN_ONLY, input_dir=galileo_input_dir, output_dir=tmp_path / "b", max_matches_per_pair=None)
     )
     assert by_mode.match_limit == by_budget.match_limit
     assert not by_mode.match_limit.limits
@@ -700,9 +702,7 @@ def test_a_failed_rerun_leaves_the_previous_run_whole(galileo_input_dir: Path, t
     if not (galileo_input_dir / FRAMES_META_NAME).is_file():
         pytest.skip(f"missing {galileo_input_dir / FRAMES_META_NAME}")
     output_dir: Path = tmp_path / "cusfm"
-    good: PipelineOptions = replace(
-        PYCOLMAP_ABLATION, input_dir=galileo_input_dir, output_dir=output_dir, loop_closure=False
-    )
+    good: PipelineOptions = replace(engine_free_run(), input_dir=galileo_input_dir, output_dir=output_dir, loop_closure=False)
     run_pipeline(good)
     before: dict[str, int] = {
         str(path.relative_to(output_dir)): path.stat().st_size for path in sorted(output_dir.rglob("*")) if path.is_file()
@@ -750,7 +750,7 @@ def test_a_library_run_aligns_to_its_prior_before_it_publishes(galileo_input_dir
 
     if not (galileo_input_dir / FRAMES_META_NAME).is_file():
         pytest.skip(f"missing {galileo_input_dir / FRAMES_META_NAME}")
-    options: PipelineOptions = replace(PYCOLMAP_ABLATION, input_dir=galileo_input_dir, output_dir=tmp_path / "run", align_to_prior=True)
+    options: PipelineOptions = replace(engine_free_run(), input_dir=galileo_input_dir, output_dir=tmp_path / "run", align_to_prior=True)
 
     summary: PipelineSummary = run_pipeline(options)
 
@@ -770,7 +770,7 @@ def test_a_failed_prior_alignment_publishes_nothing(galileo_input_dir: Path, tmp
         raise ValueError("no prior")
 
     monkeypatch.setattr(prior_alignment, "fit_prior_alignment", refuse)
-    options: PipelineOptions = replace(PYCOLMAP_ABLATION, input_dir=galileo_input_dir, output_dir=tmp_path / "run", align_to_prior=True)
+    options: PipelineOptions = replace(engine_free_run(), input_dir=galileo_input_dir, output_dir=tmp_path / "run", align_to_prior=True)
 
     with pytest.raises(ValueError, match="no prior"):
         run_pipeline(options)
@@ -786,5 +786,5 @@ def test_the_run_layer_carries_the_run_record_it_is_given(galileo_run: PipelineS
     from colsfm.rerun_layer import DEFAULT_SOURCE, write_run_layer
 
     layer: Path = tmp_path / "colsfm.rrd"
-    write_run_layer(galileo_run.options.output_dir, layer, segment="seg", record=start_run(None).finish(DEFAULT_SOURCE, "seg"))
+    write_run_layer(galileo_run.options.output_dir, layer, segment="seg", record=start_run(None, source=Path(__file__)).finish(DEFAULT_SOURCE, "seg"))
     assert "/__properties/run_colsfm" in {str(chunk.entity_path) for chunk in rrc.RrdReader(layer).stream()}

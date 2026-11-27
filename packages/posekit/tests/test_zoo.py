@@ -1,6 +1,10 @@
 """Registry-consistency tests for the typed model zoo (CPU-only)."""
 
+import pytest
+
 from posekit import skeletons
+from posekit.models import RtmPoseConfig, YoloxDetectorConfig
+from posekit.runtimes import OnnxBackendConfig
 from posekit.zoo import PRESETS, ZOO, preset
 
 KNOWN_SKELETONS: dict[str, skeletons.KeypointSkeleton] = {
@@ -117,3 +121,13 @@ def test_fast_body_cli_can_select_unquantized_backbone() -> None:
     assert isinstance(config, Sam3dBodyFastConfig)
     assert config.backbone_precision == "bf16"
 
+
+def test_a_preset_puts_one_backend_on_both_onnx_models() -> None:
+    backend: OnnxBackendConfig = OnnxBackendConfig(device="cpu")
+    configs: tuple[YoloxDetectorConfig, RtmPoseConfig] = PRESETS["body"].with_backend(backend)
+    assert [config.backend for config in configs] == [backend, backend]
+
+
+def test_a_preset_without_onnx_models_takes_no_backend() -> None:
+    with pytest.raises(TypeError, match="RtDetrDetectorConfig"):
+        PRESETS["body-nmsfree"].with_backend(OnnxBackendConfig(device="cpu"))

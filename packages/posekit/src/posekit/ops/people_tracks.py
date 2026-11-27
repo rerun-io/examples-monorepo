@@ -4,7 +4,10 @@ Pure functions with no model or GPU: matching re-detected instances to live trac
 new instances, dropping duplicates and tracks that stayed empty too long.
 """
 
+from collections import deque
+from collections.abc import Iterator
 from dataclasses import dataclass
+from itertools import islice
 
 import numpy as np
 import torch
@@ -94,3 +97,22 @@ def count_misses(misses: dict[int, int], nonempty: dict[int, bool], *, max_misse
     updated: dict[int, int] = {track: 0 if seen else misses.get(track, 0) + 1 for track, seen in nonempty.items()}
     dropped: list[int] = sorted(track for track, count in updated.items() if count >= max_misses)
     return {track: count for track, count in updated.items() if count < max_misses}, dropped
+
+
+def with_lookahead[StepT](steps: Iterator[StepT], ahead: int) -> Iterator[tuple[StepT, StepT | None]]:
+    """Each step with the step ``ahead`` later (None for the last ``ahead`` steps, and for all with ``ahead`` 0): what
+    SAM 3's lookahead starts on. A window of ``ahead`` steps is held, so 0 holds none.
+
+    Raises:
+        ValueError: If ``ahead`` is negative.
+    """
+    if ahead < 0:
+        raise ValueError(f"lookahead of {ahead} steps")
+    if ahead == 0:
+        yield from ((step, None) for step in steps)
+        return
+    window: deque[StepT] = deque(islice(steps, ahead))
+    while window:
+        step: StepT = window.popleft()
+        window.extend(islice(steps, 1))
+        yield step, window[-1] if len(window) == ahead else None

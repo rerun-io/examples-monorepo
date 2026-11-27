@@ -83,7 +83,6 @@ removes that worktree and its `.pixi` directory automatically.
 | [mv-api](packages/mv-api/) | Full egocentric/exocentric multiview processing for raw HOCap datasets. |
 | [posekit](packages/posekit/) | One model API for human perception networks (detect, pose, segment, re-ID, 3D hands and whole-body 3D with SAM 3D Body) over torch/onnx/tensorrt backends. |
 | [prompt-da](packages/prompt-da/) | Prompt Depth Anything depth completion for Polycam captures and ARKitScenes catalog segments. |
-| [pysfm](packages/pysfm/) | COLMAP/pycolmap structure-from-motion with Rerun visualization. |
 | [pyvrs-viewer](packages/pyvrs-viewer/) | VRS-to-Rerun conversion with compressed video and sensor streams. |
 | [sam2-streaming](packages/sam2-streaming/) | Vendored, inference-only SAM2 fork with frame streaming and bounded-memory banks. |
 | [sam3](packages/sam3/) | Text-conditioned SAM3 image and video segmentation with Rerun. |

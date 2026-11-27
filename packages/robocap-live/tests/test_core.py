@@ -2,6 +2,7 @@
 store rule, the file."""
 
 import gc
+import sys
 import weakref
 from pathlib import Path
 from typing import Literal
@@ -153,4 +154,13 @@ def test_the_onnx_runtime_library_comes_from_the_environment(monkeypatch: pytest
     monkeypatch.setenv("ORT_DYLIB_PATH", str(tmp_path / "libonnxruntime.so"))
     assert default_ort_dylib() == tmp_path / "libonnxruntime.so"
     monkeypatch.delenv("ORT_DYLIB_PATH")
-    assert default_ort_dylib().name.startswith("libonnxruntime.so")
+    # The env's onnxruntime-cpp: the same feedstock build as its Python bindings (ci/tests/test_one_onnxruntime.py).
+    assert default_ort_dylib() == Path(sys.prefix) / "lib" / "libonnxruntime.so"
+    assert default_ort_dylib().is_file()
+
+
+def test_a_missing_onnx_runtime_library_is_named(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("ORT_DYLIB_PATH", raising=False)
+    monkeypatch.setattr(sys, "prefix", str(tmp_path))
+    with pytest.raises(ValueError, match="libonnxruntime.so"):
+        default_ort_dylib()

@@ -48,7 +48,7 @@ from posekit.models.egohand import EgoHandAssetPaths, EgoHandConfig, EgoHandDete
 from posekit.models.egohand_fast import fast_egohand_configs
 from posekit.models.wilor import WilorHandDetectorConfig, WilorHandPoseConfig
 from posekit.predictions import BoxDetections, HandDetections, HandPoses3d
-from posekit.runtimes import TensorRtBackendConfig
+from posekit.runtimes import OnnxBackendConfig, TensorRtBackendConfig
 from posekit.skeletons import HAND_21
 
 ModelName: TypeAlias = Literal["wilor", "egohand", "egohand-fast", "egohand-fast-bf16", "detnet", "detnet-legacy"]
@@ -319,7 +319,8 @@ def model_stack(name: ModelName, assets: Path | None) -> tuple[HandDetector, Top
         return WilorHandDetectorConfig(backend=TensorRtBackendConfig()).setup(), WilorHandPoseConfig(backend=TensorRtBackendConfig()).setup()
     if name == "egohand":
         paths: EgoHandAssetPaths = asset_paths(assets)
-        return EgoHandDetectorConfig(paths.detector).setup(), EgoHandConfig(paths.weights, paths.soma).setup()
+        # The reference keeps the unquantized ONNX Runtime detector it was measured with, not ``auto``.
+        return EgoHandDetectorConfig(paths.detector, backend=OnnxBackendConfig()).setup(), EgoHandConfig(paths.weights, paths.soma).setup()
     detector_config, pose_config = fast_egohand_configs(assets, backbone_precision="bf16" if name == "egohand-fast-bf16" else "nvfp4")
     return detector_config.setup(), pose_config.setup()
 

@@ -5,7 +5,7 @@ This module builds the same two graphs as strongly typed TensorRT engines throug
 the way `colsfm.matching_trt` drives LightGlue+:
 
 * **Descriptor** (`flexglue_descriptor.onnx`): image `[1, 3, 512, 512]` in [0, 1] -> dense features `[1, 256, 64, 64]`.
-  Each image runs once; its features stay in an LRU on the GPU (`FlexGlueTensorRT.features`), like COLMAP's cache.
+  Each image runs once; its features stay in an LRU on the GPU (`FlexGlueRunner.features`), like COLMAP's cache.
 * **Matcher** (`flexglue_matcher_early_stop_fp16.onnx`): two feature maps and two keypoint sets -> `matches0`
   (mutual nearest neighbours on the regressed correspondences, already gated by confidence, distance and pair
   covisibility inside the graph) and `covisibility_score`. Its transformer runs in FP8 (`colsfm.flexglue_fp8`),
@@ -23,6 +23,7 @@ Pre- and post-processing mirror `src/colmap/feature/flexglue.cc` at the recipe's
 
 from __future__ import annotations
 
+import functools
 import itertools
 import time
 from collections import OrderedDict
@@ -40,6 +41,7 @@ import torch
 from numpy import ndarray
 from onnx import TensorProto, helper, numpy_helper
 from torch import Tensor
+from trtkit import OnnxDynamicRuntime
 from trtkit.artifacts import build_once
 from trtkit.tensorrt_runtime import TensorRtDynamicRuntime
 from trtkit.trt_builder import onnx_content_hash
@@ -47,6 +49,7 @@ from trtkit.trt_builder import onnx_content_hash
 from colsfm.database import ImagePair, KeypointsXY
 from colsfm.flexglue_fp8 import check_fp8_graph
 from colsfm.frames import FrameSource, open_frame_source
+from colsfm.inference import frames_device, runtime_device
 from colsfm.matching import (
     FLEXGLUE_MODEL_FILES,
     FlexGlueOptions,
@@ -304,12 +307,7 @@ def prepare_matcher_graph(source: Path, cache_dir: Path, options: FlexGlueOption
     def write(model: onnx.ModelProto) -> onnx.ModelProto:
         attention, gelu = _rewrite(model.graph)
         lowered: int = _lower_early_stop(model.graph)
-        folded: dict[str, float] = {
-            "filter_threshold": options.filter_threshold,
-            "max_distance_px": options.max_distance_px if options.max_distance_px > 0 else float("inf"),
-            "min_covisibility": options.min_covisibility,
-            "early_stop_decay": options.early_stop_decay,
-        }
+        folded: dict[str, float] = options.graph_inputs()
         kept_inputs = [value for value in model.graph.input if value.name not in folded]
         del model.graph.input[:]
         model.graph.input.extend(kept_inputs)
@@ -365,7 +363,7 @@ def descriptor_profile(max_batch: int = DESCRIPTOR_BATCH) -> dict[str, ShapeProf
 
 @dataclass(frozen=True, slots=True)
 class DenseImage:
-    """What the matcher needs of one image, resident on the GPU."""
+    """What the matcher needs of one image, resident on the runner's device."""
 
     features: Tensor
     """Dense features `[1, 256, 64, 64]`."""
@@ -375,30 +373,42 @@ class DenseImage:
     """The same keypoints in image pixels, on the host: what verification needs, kept so it reads nothing again."""
 
 
-class FlexGlueTensorRT:
-    """FlexGlue's engines with everything between them on the GPU.
+class FlexGlueRunner:
+    """FlexGlue's two graphs with everything between them on one device: TensorRT engines on the GPU, or ONNX Runtime on
+    the CPU (`colsfm.inference.InferenceRuntime`), where the same flow runs one matcher and no streams.
 
-    * Images: GPU frames from the run's `colsfm.frames.FrameSource` (NVDEC for a catalog input, nvJPEG for a folder),
-      resized on the GPU with torch's bilinear interpolation (the reference COLMAP's CPU resize mirrors) and encoded
-      `DESCRIPTOR_BATCH` at a time by the fp16 descriptor engine.
-    * Features and scaled keypoints stay in a GPU LRU (`DenseImage`); one upload per image.
+    * Images: frames from the run's `colsfm.frames.FrameSource` on the runner's device (on TensorRT: NVDEC for a catalog
+      input, nvJPEG for a folder), resized with torch's bilinear interpolation (the reference COLMAP's CPU resize
+      mirrors) and encoded `DESCRIPTOR_BATCH` at a time by the fp16 descriptor engine (one at a time on ONNX Runtime).
+    * Features and scaled keypoints stay in an LRU on the device (`DenseImage`); one upload per image.
     * The matcher runs on two CUDA streams in turn (a pair's tail overlaps the next pair's head: 9.7 vs 11.3 ms per
       pair on the 5090) and its matches stay on the GPU until `flush` downloads a whole chunk at once. Each chunk then
       goes to `colsfm.verification.ChunkedVerifier`, whose CPU threads verify it while the GPU matches the next one.
     """
 
-    def __init__(self, descriptor_engine: Path, matcher_engine: Path, *, cache_images: int = FEATURE_CACHE_IMAGES) -> None:
-        """Load the descriptor engine and two matcher runtimes on the same matcher engine.
+    def __init__(
+        self,
+        descriptor: TensorRtDynamicRuntime | OnnxDynamicRuntime,
+        matchers: tuple[TensorRtDynamicRuntime | OnnxDynamicRuntime, ...],
+        *,
+        device: torch.device,
+        cache_images: int = FEATURE_CACHE_IMAGES,
+        matcher_inputs: dict[str, Tensor] | None = None,
+    ) -> None:
+        """Hold opened runtimes; `engines` and `graphs` open them.
 
         Args:
-            descriptor_engine: The batch-dynamic descriptor engine.
-            matcher_engine: The matcher engine (keypoint-count profile).
-            cache_images: Images kept on the GPU (about 4 MB each).
+            descriptor: The descriptor runtime; its declared `image` batch is how many images one call encodes.
+            matchers: One matcher runtime per CUDA stream, or one on the CPU (no streams).
+            device: Where the images, features and matches live: the runtimes' device.
+            cache_images: Images kept on the device (about 4 MB each).
+            matcher_inputs: The matcher graph's scalar inputs; none for an engine, whose graph has them folded in.
         """
-        self.device: torch.device = torch.device("cuda")
-        self.descriptor: TensorRtDynamicRuntime = TensorRtDynamicRuntime(descriptor_engine)
-        self.matchers: tuple[TensorRtDynamicRuntime, ...] = tuple(TensorRtDynamicRuntime(matcher_engine) for _ in range(MATCHER_STREAMS))
-        self.streams: tuple[torch.cuda.Stream, ...] = tuple(torch.cuda.Stream(self.device) for _ in range(MATCHER_STREAMS))
+        self.device: torch.device = device
+        self.descriptor: TensorRtDynamicRuntime | OnnxDynamicRuntime = descriptor
+        self.matchers: tuple[TensorRtDynamicRuntime | OnnxDynamicRuntime, ...] = matchers
+        self.streams: tuple[torch.cuda.Stream, ...] = tuple(torch.cuda.Stream(device) for _ in matchers) if device.type == "cuda" else ()
+        self.matcher_inputs: dict[str, Tensor] = matcher_inputs or {}
         self.cache_images: int = max(cache_images, 2 * DESCRIPTOR_BATCH)
         self.size: Tensor = torch.tensor([[DESCRIPTOR_SIZE, DESCRIPTOR_SIZE]], dtype=torch.float32, device=self.device)
         self.images: OrderedDict[int, DenseImage] = OrderedDict()
@@ -409,11 +419,51 @@ class FlexGlueTensorRT:
         self.descriptor_runs: int = 0
         self.descriptor_images: int = 0
 
+    @classmethod
+    def engines(cls, descriptor: Path, matcher: Path, *, cache_images: int = FEATURE_CACHE_IMAGES) -> FlexGlueRunner:
+        """TensorRT on the GPU: the batch-dynamic descriptor engine, and one matcher runtime per stream.
+
+        Args:
+            descriptor: The batch-dynamic descriptor engine.
+            matcher: The matcher engine (keypoint-count profile).
+            cache_images: Images kept on the device.
+
+        Returns:
+            The runner.
+        """
+        return cls(
+            TensorRtDynamicRuntime(descriptor),
+            tuple(TensorRtDynamicRuntime(matcher) for _ in range(MATCHER_STREAMS)),
+            device=torch.device("cuda"),
+            cache_images=cache_images,
+        )
+
+    @classmethod
+    def graphs(cls, descriptor: Path, matcher: Path, options: FlexGlueOptions, *, cache_images: int = FEATURE_CACHE_IMAGES) -> FlexGlueRunner:
+        """ONNX Runtime on the CPU, on COLMAP's graphs as shipped: one matcher, no streams.
+
+        Args:
+            descriptor: COLMAP's batch-1 descriptor graph.
+            matcher: COLMAP's fp32 matcher graph, contrib attention and early-stop branches included.
+            options: The thresholds the matcher's scalar inputs take (`FlexGlueOptions.graph_inputs`).
+            cache_images: Images kept in host memory.
+
+        Returns:
+            The runner.
+        """
+        return cls(
+            OnnxDynamicRuntime(descriptor),
+            (OnnxDynamicRuntime(matcher),),
+            device=torch.device("cpu"),
+            cache_images=cache_images,
+            matcher_inputs={name: torch.tensor(value, dtype=torch.float32) for name, value in options.graph_inputs().items()},
+        )
+
     def encode(self, batch: Sequence[tuple[int, Tensor, KeypointsXY]]) -> None:
         """Run the descriptor over a batch of decoded images and cache features and scaled keypoints.
 
         Args:
-            batch: `(image_id, RGB uint8 [3, h, w] on the GPU, keypoint pixels)` per image, at most `DESCRIPTOR_BATCH`.
+            batch: `(image_id, RGB uint8 [3, h, w] on the runner's device, keypoint pixels)` per image, at most `DESCRIPTOR_BATCH`.
         """
         resized: list[Tensor] = []
         scales: list[tuple[float, float]] = []
@@ -425,7 +475,10 @@ class FlexGlueTensorRT:
                 )
             )
             scales.append((DESCRIPTOR_SIZE / width, DESCRIPTOR_SIZE / height))
-        features: Tensor = self.descriptor({"image": torch.cat(resized).div_(255.0)})["features"]
+        images: Tensor = torch.cat(resized).div_(255.0)
+        # The engine takes up to `DESCRIPTOR_BATCH` images; COLMAP's graph, which ONNX Runtime runs as shipped, takes one.
+        chunk: int = self.descriptor.max_input_shapes["image"][0]
+        features: Tensor = torch.cat([self.descriptor({"image": images[first : first + chunk]})["features"] for first in range(0, len(batch), chunk)])
         self.descriptor_runs += 1
         self.descriptor_images += len(batch)
         for index, (image_id, _, keypoints) in enumerate(batch):
@@ -437,7 +490,7 @@ class FlexGlueTensorRT:
             self.images.popitem(last=False)
 
     def enqueue(self, pair: ImagePair) -> None:
-        """Launch the matcher for one pair whose images are cached; its matches stay on the GPU until `flush`.
+        """Launch the matcher for one pair whose images are cached; its matches stay on the device until `flush`.
 
         Args:
             pair: The image pair, first image first.
@@ -457,6 +510,18 @@ class FlexGlueTensorRT:
                 )
             )
             return
+        inputs: dict[str, Tensor] = {
+            "features0": first.features,
+            "features1": second.features,
+            "kpts0": first.keypoints,
+            "kpts1": second.keypoints,
+            "image_size0": self.size,
+            "image_size1": self.size,
+            **self.matcher_inputs,
+        }
+        if not self.streams:
+            self._pend(pair, self.matchers[0](inputs), first, second)
+            return
         slot: int = self.calls % MATCHER_STREAMS
         self.calls += 1
         stream: torch.cuda.Stream = self.streams[slot]
@@ -465,19 +530,13 @@ class FlexGlueTensorRT:
             for tensor in (first.features, first.keypoints, second.features, second.keypoints):
                 # The cache may drop these while this stream still reads them; keep the allocator from reusing them early.
                 tensor.record_stream(stream)
-            outputs: dict[str, Tensor] = self.matchers[slot](
-                {
-                    "features0": first.features,
-                    "features1": second.features,
-                    "kpts0": first.keypoints,
-                    "kpts1": second.keypoints,
-                    "image_size0": self.size,
-                    "image_size1": self.size,
-                }
-            )
-            self.pending.append(
-                (pair, outputs["matches0"][0].clone(), outputs["covisibility_score"].reshape(1).float(), first.keypoints_px, second.keypoints_px)
-            )
+            self._pend(pair, self.matchers[slot](inputs), first, second)
+
+    def _pend(self, pair: ImagePair, outputs: dict[str, Tensor], first: DenseImage, second: DenseImage) -> None:
+        """Keep one pair's matches and covisibility until `flush`; the clone outlives the engine's next call on that slot."""
+        self.pending.append(
+            (pair, outputs["matches0"][0].clone(), outputs["covisibility_score"].reshape(1).float(), first.keypoints_px, second.keypoints_px)
+        )
 
     def flush(self) -> list[PairToVerify]:
         """Download every pending pair's matches in one transfer.
@@ -488,9 +547,8 @@ class FlexGlueTensorRT:
         """
         if not self.pending:
             return []
-        current: torch.cuda.Stream = torch.cuda.current_stream(self.device)
         for stream in self.streams:
-            current.wait_stream(stream)
+            torch.cuda.current_stream(self.device).wait_stream(stream)
         lengths: list[int] = [len(matches0) for _, matches0, _, _, _ in self.pending]
         everything: ndarray = torch.cat([matches0 for _, matches0, _, _, _ in self.pending]).cpu().numpy()
         self.nonfinite_pairs += int((~torch.isfinite(torch.cat([covisibility for _, _, covisibility, _, _ in self.pending]))).sum())
@@ -581,32 +639,34 @@ def match_pairs_flexglue(database_path: Path, pairs: Sequence[ImagePair], option
     if options.image_dir is None:
         raise ValueError("the flexglue matcher reads image pixels: MatchingOptions.image_dir is required")
     if not pairs:
-        return MatchReport(device="cuda")
+        return MatchReport(device=runtime_device(options.inference_runtime))
     flexglue_options: FlexGlueOptions = FlexGlueOptions(min_covisibility=options.flexglue_min_covisibility)
     models: Path = options.flexglue_model_dir
-    matcher_graph: Path = prepare_matcher_graph(models / FLEXGLUE_MODEL_FILES["matcher_model_path_fp16"], models / "trt", flexglue_options)
-    # FP8 from Ada (sm_89) on; an older GPU runs the prepared graph, the matcher before the FP8 calibration.
-    matcher_source: Path = check_fp8_graph(models, matcher_graph, flexglue_options) if gpu_has_fp8() else matcher_graph
-    descriptor_graph: Path = prepare_descriptor_graph(models / FLEXGLUE_MODEL_FILES["descriptor_model_path"], models / "trt")
-    descriptor_engine: Path = resolve_engine(descriptor_graph, descriptor_profile(), precision="fp16-trunk")
-    matcher_engine: Path = resolve_engine(matcher_source, matcher_profile(), precision="fp32")
+    runner: Callable[[], FlexGlueRunner]
+    if options.inference_runtime == "onnxruntime":
+        # COLMAP's own graphs, as shipped: the batch rewrite would trip ONNX Runtime's Gemm fusion's fixed reshape.
+        descriptor_onnx: Path = models / FLEXGLUE_MODEL_FILES["descriptor_model_path"]
+        matcher_onnx: Path = models / FLEXGLUE_MODEL_FILES["matcher_model_path"]
+        runner = functools.partial(FlexGlueRunner.graphs, descriptor_onnx, matcher_onnx, flexglue_options)
+    else:
+        descriptor_graph: Path = prepare_descriptor_graph(models / FLEXGLUE_MODEL_FILES["descriptor_model_path"], models / "trt")
+        matcher_graph: Path = prepare_matcher_graph(models / FLEXGLUE_MODEL_FILES["matcher_model_path_fp16"], models / "trt", flexglue_options)
+        # FP8 from Ada (sm_89) on; an older GPU runs the prepared graph, the matcher before the FP8 calibration.
+        matcher_source: Path = check_fp8_graph(models, matcher_graph, flexglue_options) if gpu_has_fp8() else matcher_graph
+        descriptor_engine: Path = resolve_engine(descriptor_graph, descriptor_profile(), precision="fp16-trunk")
+        matcher_engine: Path = resolve_engine(matcher_source, matcher_profile(), precision="fp32")
+        runner = functools.partial(FlexGlueRunner.engines, descriptor_engine, matcher_engine)
     owned: bool = frames is None
-    source: FrameSource = open_frame_source(options.image_dir) if frames is None else frames
+    source: FrameSource = open_frame_source(options.image_dir, frames_device(options.inference_runtime)) if frames is None else frames
     try:
-        return _match_pairs_flexglue(database_path, pairs, options, flexglue_options, descriptor_engine, matcher_engine, source)
+        return _match_pairs_flexglue(database_path, pairs, options, runner, source)
     finally:
         if owned:
             source.close()
 
 
 def _match_pairs_flexglue(
-    database_path: Path,
-    pairs: Sequence[ImagePair],
-    options: MatchingOptions,
-    flexglue_options: FlexGlueOptions,
-    descriptor_engine: Path,
-    matcher_engine: Path,
-    frames: FrameSource,
+    database_path: Path, pairs: Sequence[ImagePair], options: MatchingOptions, runner: Callable[[], FlexGlueRunner], frames: FrameSource
 ) -> MatchReport:
     started: float = time.perf_counter()
     require_no_geometries(database_path, pairs)
@@ -615,7 +675,8 @@ def _match_pairs_flexglue(
     with pycolmap.Database.open(database_path) as database:
         names: dict[int, str] = {image.image_id: image.name for image in database.read_all_images()}
         cameras, sizes = verifier_inputs(database)
-        flexglue: FlexGlueTensorRT = FlexGlueTensorRT(descriptor_engine, matcher_engine)
+        flexglue: FlexGlueRunner = runner()
+
         def encode(batch_ids: list[int]) -> None:
             decoded: list[tuple[str, Tensor]] = list(frames.frames([names[candidate] for candidate in batch_ids]))
             flexglue.encode(
@@ -636,9 +697,11 @@ def _match_pairs_flexglue(
         with ChunkedVerifier(cameras, verification_options(options), spatial_cap(options, sizes), options.verify) as verifier:
             for finished in verifier.verified(downloaded_chunks()):
                 num_capped += write_and_count(database, finished, stats, write_matches=True)
-    report: MatchReport = MatchReport(pair_stats=stats, device="cuda", elapsed_seconds=time.perf_counter() - started)
+    report: MatchReport = MatchReport(
+        pair_stats=stats, device=runtime_device(options.inference_runtime), elapsed_seconds=time.perf_counter() - started
+    )
     print(
-        f"colsfm.matching[flexglue-trt]: {report.summary()} | matching and verification {report.elapsed_seconds:.1f} s for {len(pairs)} pairs, "
+        f"colsfm.matching[flexglue-{options.inference_runtime}]: {report.summary()} | matching and verification {report.elapsed_seconds:.1f} s for {len(pairs)} pairs, "
         f"{flexglue.descriptor_images} images in {flexglue.descriptor_runs} descriptor batches, spatial cap dropped "
         f"{num_capped} inlier matches, {flexglue.nonfinite_pairs} pairs with a non-finite covisibility"
     )

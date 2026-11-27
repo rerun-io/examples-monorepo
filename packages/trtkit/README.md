@@ -6,10 +6,12 @@ sapiens2-pose / sapiens-coco133-pose, prompt-da, and mamma with one
 implementation, split in two layers:
 
 - **runtime** — a backend-neutral tensor-function contract
-  (`trtkit.base.TensorRuntime`: CUDA tensors in, CUDA tensors out, keyed by
-  binding name) with three implementations: `TorchRuntime` (eager module,
-  parity reference and fallback), `OnnxCudaRuntime` (ONNX Runtime CUDA EP with
-  IOBinding onto torch memory — no host copies), and `TensorRtRuntime`
+  (`trtkit.base.TensorRuntime`: tensors in, tensors out on the runtime's device,
+  keyed by binding name) with three implementations: `TorchRuntime` (eager
+  module, parity reference and fallback), `OnnxRuntime` (ONNX Runtime with
+  IOBinding onto torch memory — no host copies — on the CUDA EP or, for hosts
+  without NVIDIA and engine-free tests, the CPU EP; `OnnxCudaRuntime` is its
+  CUDA spelling), and `TensorRtRuntime`
   (persistent buffers via `set_tensor_address`, `execute_async_v3`,
   static-batch zero-padding, optional CUDA-graph capture/replay).
 - **hub** — artifact identity and machine-local caching:
@@ -74,7 +76,12 @@ For CLI-selectable backends, `trtkit.backends` provides tyro subcommand
 unions (`BackendConfig`, `OnnxOrTrtBackendConfig`) and
 `create_runtime_from_onnx(onnx_path, backend)`, which routes one ONNX artifact
 to either the ORT session or a cached TensorRT engine — posekit's model zoo is
-the reference consumer.
+the reference consumer. `AutoBackendConfig` (`auto`, the first subcommand of
+`OnnxOrTrtBackendConfig`) resolves at runtime creation (`resolve_backend`):
+TensorRT where a CUDA device and the TensorRT bindings are present, ONNX Runtime
+on the CPU elsewhere. The GB10's conda-forge ONNX Runtime has no CUDA kernels,
+so `auto` is TensorRT there too; an explicit `onnx` CUDA backend raises at
+construction (`require_cuda_kernels`).
 
 ## Engine cache and identity
 

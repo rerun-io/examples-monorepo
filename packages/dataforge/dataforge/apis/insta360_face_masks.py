@@ -158,7 +158,7 @@ def main(config: Config) -> None:
     Raises:
         ValueError: If a face stamp has no mask on both lenses, or a lens mask and its scale do not cover the lens image.
     """
-    run: RunStart = start_run(config)
+    run: RunStart = start_run(config, source=Path(__file__))
     lenses: LensCameras = cameras_from_recording(config.base)
     faces: dict[int, cube.CubeFace] = faces_from_layer(config.faces, lenses)
     device: torch.device = layer_device(config.device)
