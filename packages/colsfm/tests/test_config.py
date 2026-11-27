@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from colsfm.config import (
     MESSAGE_BY_CONFIG_STEM,
     CusfmConfig,
     KeyframeSelectionConfig,
+    PoseGraphConfig,
     read_config_directory,
     read_config_message,
 )
@@ -171,6 +173,25 @@ def test_the_kitti_profile_verifies_one_loop_candidate_per_rig_frame() -> None:
     """`loop_candidates_per_frame` comes from the profile's own `colsfm.toml`; cuSFM's `num_votes` is not read."""
     assert read_config_directory(RESOURCES_DIR / "configs" / "kitti").pose_graph.loop_candidates_per_frame == 1
     assert read_config_directory(RESOURCES_DIR / "configs" / "loop-closure-fixed").pose_graph.loop_candidates_per_frame == 3
+
+
+def test_the_insta360_cube_profile_is_its_base_with_looser_loop_gates_and_the_prior_bound() -> None:
+    """insta360-cube keeps only what differs from loop-closure-fixed; every other stem is read from that base."""
+    configs: Path = RESOURCES_DIR / "configs"
+    cube: CusfmConfig = read_config_directory(configs / "insta360-cube")
+    base: CusfmConfig = read_config_directory(configs / "loop-closure-fixed")
+    pose_graph: PoseGraphConfig = replace(
+        base.pose_graph, connected_keyframe_num=2, good_loop_threshold=40.0, loop_edge_translation_threshold_meters=3.0,
+        loop_edge_rotation_threshold_degrees=180.0, loop_max_prior_translation_m=1.5, loop_max_prior_rotation_deg=10.0,
+    )
+    assert cube == replace(base, profile="insta360-cube", pose_graph=pose_graph)
+    assert sorted(path.name for path in (configs / "insta360-cube").iterdir()) == ["colsfm.toml", "pose_graph_config.pb.txt"]
+
+
+def test_a_profile_without_a_base_still_needs_every_file(tmp_path: Path) -> None:
+    (tmp_path / "colsfm.toml").write_text("")
+    with pytest.raises(FileNotFoundError, match="keypoint_creation_config"):
+        read_config_directory(tmp_path)
 
 
 def test_a_colsfm_profile_file_with_an_unknown_field_is_refused_naming_the_file(tmp_path: Path) -> None:

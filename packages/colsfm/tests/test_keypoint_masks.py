@@ -136,6 +136,38 @@ def test_storing_a_masked_batch_drops_masked_keypoints_and_keeps_the_other_descr
 
 
 @pytest.mark.integration
+def test_a_mask_stream_is_read_window_by_window_and_each_mask_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Small windows, a stamp on every window's first nanosecond: no mask is lost between windows or read twice."""
+    import rerun as rr
+    from rerun.catalog import CatalogClient
+
+    from colsfm import keypoint_masks
+
+    entity: str = "world/rig_00/cam_02/pinhole/people_mask"
+    stamps: list[int] = list(range(1_000, 5_000, 100))
+    rrd: Path = tmp_path / "masks.rrd"
+    recording = rr.RecordingStream("colsfm-test", recording_id="seg")
+    recording.save(rrd)
+    for index, t_ns in enumerate(stamps):
+        mask: np.ndarray = np.zeros((8, 6), dtype=np.uint8)
+        mask.flat[index] = 1
+        recording.set_time("video_time", duration=np.timedelta64(t_ns, "ns"))
+        recording.log(f"/{entity}", rr.SegmentationImage(mask))
+    recording.flush()
+    recording.disconnect()
+    monkeypatch.setattr(keypoint_masks, "MASK_READ_WINDOW_NS", 300)
+
+    with rr.server.Server(host="127.0.0.1", port=0, datasets={"d": [str(rrd)]}) as server:
+        packed = keypoint_masks.read_packed_masks(CatalogClient(server.url()).get_dataset("d"), "seg", entity, "video_time")
+
+    assert sorted(packed) == stamps
+    for index, t_ns in enumerate(stamps):
+        width, height, bits = packed[t_ns]
+        assert (width, height) == (6, 8)
+        assert np.flatnonzero(np.unpackbits(bits, count=48)).tolist() == [index]
+
+
+@pytest.mark.integration
 def test_catalog_masks_read_a_segmentation_image_per_stamp_from_a_catalog(tmp_path: Path) -> None:
     """Needs a catalog server (an in-process one): the mask layer as the people-mask stage writes it."""
     import rerun as rr
