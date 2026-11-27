@@ -765,7 +765,8 @@ class SegmentFeed:
             if not packets.samples:
                 continue
             # A frame before the stream's first keyframe cannot be decoded; skipping it would misalign every later frame.
-            if first_frame < packets.first + packets.lead:
+            # Only the stream's first chunk has a lead; a later chunk starting past first_frame is the normal case.
+            if packets.first <= first_frame < packets.first + packets.lead:
                 raise ValueError(f"{self.segment_id}: camera {camera.index} starts mid-GOP: frame {first_frame} precedes its first keyframe")
             frame: int = packets.first + packets.lead
             for pair in self._open_decoder(packets.mp4(codec), camera):
