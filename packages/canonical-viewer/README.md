@@ -14,14 +14,20 @@ stock `rerun`) and `--serve-web`.
 # From the repo root.
 pixi run -e canonical-viewer --frozen canonical-viewer-build                 # prepares the patched Rerun checkout, then cargo
 pixi run -e canonical-viewer --frozen rerun-canonical -- recording.rrd       # any `rerun` arguments follow
+# The web viewer, in the stock /rerun-viewer/<version>/ layout (shell files copied from a stock web viewer of the release):
+pixi run -e canonical-viewer-web --frozen canonical-viewer-web-build <stock-0.44.0-dir> <out-dir>
 ```
+
+`rust/crates/web` is the web entry point: it installs the same hooks before JavaScript constructs the stock `WebHandle`,
+so pages keep the stock `@rerun-io/web-viewer` API. gsplat's page flags still work: `force_no_subgroups=1`,
+`profile=1`. The web build is 17.5 MB brotli (stock 0.44.0: 10.6 MB).
 
 ## Extensions
 
 | Extension | Crate | Adds | Goldens |
 |---|---|---|---|
 | `gsplat` | `packages/gsplat-rust-renderer/crates/gsplat-viewer` (`setup::EXTENSION`) | compute Gaussian-splat renderer; `Spatial3DView` visualizers for `GaussianSplats3D` (compute), `Hexels3D`, SOG, SOG LOD and animated SOG; device needs: `SUBGROUP` when offered (not with `GSPLAT_NO_SUBGROUPS=1`), raised compute limits; replaces the stock 3D view's `EyeControls3D` position and look-target fallbacks (default framing on splat and hexel bounds) | `packages/gsplat-rust-renderer/tests/test_viewer_pixels.py` on `rerun-canonical` |
-| `depth-video` | `packages/depth-video-viewer` (`EXTENSION`) | `DepthVideoStream` (depth as AV1 10-bit monochrome lossless video, exact 10-bit codes) in `Spatial2DView` (colormapped image) and `Spatial3DView` (depth cloud under a `Pinhole`); no device needs; native only for now | `packages/depth-video-viewer/tests/test_viewer_pixels.py` on `rerun-canonical`, including the scene with gsplat splats |
+| `depth-video` | `packages/depth-video-viewer` (`EXTENSION`) | `DepthVideoStream` (depth as AV1 10-bit monochrome lossless video, exact 10-bit codes) in `Spatial2DView` (colormapped image) and `Spatial3DView` (depth cloud under a `Pinhole`); no device needs; native only: its decoder (`re_rav1d` 0.1.3) does not build for wasm32 | `packages/depth-video-viewer/tests/test_viewer_pixels.py` on `rerun-canonical`, including the scene with gsplat splats |
 
 ## Kinds of viewer change
 
@@ -46,8 +52,10 @@ Each extension's device needs apply in list order to Rerun's device descriptor. 
 everything already requested and stays within the adapter's offer (`with_device_needs`). An extension that fails to
 register logs an error, and the other extensions still load.
 
-`tools/prepare_rerun.py` checks out the Rerun tag into `target/patch/rerun-<tag>/` and applies the patches (gsplat's web
-build keeps a staged copy of this code until it moves onto the canonical web crate). The Cargo workspace (`rust/`) redirects every Rerun crate
+`tools/prepare_rerun.py` checks out the Rerun tag into `target/patch/rerun-<tag>/` and applies the patches, and prepares
+each patched crates.io crate (`PATCHED_CRATES`: wgpu with the WebGPU subgroups patch, web backend only) into
+`target/patch/<crate>-<version>/` (gsplat's web build keeps a staged copy of this code until PR 7 points
+`recipes/gradio-rerun-src` at this build). The Cargo workspace (`rust/`) redirects every Rerun crate
 there. The checkout sits outside `rust/` because, inside it, cargo passes re_renderer's sources as relative paths and
 re_renderer's embedded shader lookup breaks.
 
@@ -55,7 +63,9 @@ re_renderer's embedded shader lookup breaks.
 
 - Rust unit tests (`canonical-viewer-rust-check`): the device-needs merge (features and limits only), unique extension
   names, one owner per replaced fallback.
-- `tests/test_prepare_rerun.py`: patches apply in order; the checkout is reused until the commit or a patch changes.
+- `tests/test_prepare_rerun.py`: patches apply in order; the checkout is reused until the commit or a patch changes; every
+  patch names the release or crate version it applies to.
+- `tests/test_build_web.py`: the npm module factory and its `deinit`.
 - `tests/test_rerun_canonical.py` (integration): `--version` is the SDK's release; `mcp`, `rrd` and `--help` exist.
 - `tests/test_stock_parity.py` (golden): a 2D + 3D recording with no extension data renders pixel-identical in
   `rerun-canonical` and this environment's stock `rerun`.
