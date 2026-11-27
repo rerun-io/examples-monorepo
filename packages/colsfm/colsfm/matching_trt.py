@@ -56,6 +56,7 @@ import pycolmap
 import torch
 from jaxtyping import Bool, Float32, Int64
 from numpy import ndarray
+from trtkit import OnnxDynamicRuntime
 from trtkit.tensorrt_runtime import TensorRtDynamicRuntime
 
 from colsfm.database import (
@@ -65,6 +66,7 @@ from colsfm.database import (
     MatchIndices,
     database_transaction,
 )
+from colsfm.inference import ResolvedDevice, runtime_device
 from colsfm.matching import (
     MatchingOptions,
     MatchReport,
@@ -210,12 +212,14 @@ def _image_sizes(database: pycolmap.Database) -> dict[int, tuple[int, int]]:
 
 
 def match_one_pair(
-    runtime: TensorRtDynamicRuntime,
+    runtime: TensorRtDynamicRuntime | OnnxDynamicRuntime,
     features: FeatureCache,
     sizes: dict[int, tuple[int, int]],
     pair: ImagePair,
     options: MatchingOptions,
     normalize: KeypointNormalizer = normalize_keypoints,
+    *,
+    device: ResolvedDevice,
 ) -> MatchIndices:
     """Run LightGlue over one pair and return the matches the blob would keep.
 
@@ -224,7 +228,7 @@ def match_one_pair(
     scores as the keypoint response.
 
     Args:
-        runtime: The loaded LightGlue engine (direct binding).
+        runtime: The loaded LightGlue engine (direct binding), or the graph on ONNX Runtime.
         features: The keypoint and descriptor source.
         sizes: `(width, height)` per `image_id`, for the normalisation.
         pair: The image pair, first image first.
@@ -232,6 +236,7 @@ def match_one_pair(
             `num_points_tolerance_fraction` are read.
         normalize: Which normalised keypoint frame the graph's `kpts0`/`kpts1`
             bindings expect; see `KeypointNormalizer`.
+        device: The runtime's device, where the inputs are staged.
 
     Returns:
         Int64 `[num_matches, 2]` keypoint index pairs, first image first.
@@ -251,7 +256,8 @@ def match_one_pair(
     }
     # Keypoints and descriptors come from the database on the host; the matches go back to it on the host.
     outputs: dict[str, ndarray] = {
-        name: value.cpu().numpy() for name, value in runtime({name: torch.from_numpy(array).cuda() for name, array in host_inputs.items()}).items()
+        name: value.cpu().numpy()
+        for name, value in runtime({name: torch.from_numpy(array).to(device) for name, array in host_inputs.items()}).items()
     }
     candidates: MatchIndices = np.asarray(outputs["matches0"], dtype=np.int64).reshape(-1, 2)
     scores: MatchScores = np.asarray(outputs["mscores0"], dtype=np.float32).reshape(-1)
@@ -319,13 +325,19 @@ def match_pairs_tensorrt(
     """
     if not database_path.is_file():
         raise FileNotFoundError(f"No COLMAP database at {database_path}")
+    device: ResolvedDevice = runtime_device(options.inference_runtime)
     if not pairs:
-        return MatchReport(device="cuda")
+        return MatchReport(device=device)
 
-    # LightGlue has no convolutional trunk; its attention stays fp32 (TF32) under the strongly typed build.
-    engine_path: Path = resolve_engine(onnx_path, profile if profile is not None else LIGHTGLUE_PROFILE, precision="fp32")
-    started: float = time.perf_counter()
-    runtime: TensorRtDynamicRuntime = TensorRtDynamicRuntime(engine_path, direct_binding=True)
+    runtime: TensorRtDynamicRuntime | OnnxDynamicRuntime
+    if options.inference_runtime == "onnxruntime":
+        started: float = time.perf_counter()
+        runtime = OnnxDynamicRuntime(onnx_path)
+    else:
+        # LightGlue has no convolutional trunk; its attention stays fp32 (TF32) under the strongly typed build.
+        engine_path: Path = resolve_engine(onnx_path, profile if profile is not None else LIGHTGLUE_PROFILE, precision="fp32")
+        started = time.perf_counter()
+        runtime = TensorRtDynamicRuntime(engine_path, direct_binding=True)
     with pycolmap.Database.open(database_path) as database:
         sizes: dict[int, tuple[int, int]] = _image_sizes(database)
         features: FeatureCache = FeatureCache(database)
@@ -333,10 +345,10 @@ def match_pairs_tensorrt(
         for chunk in itertools.batched(pairs, MATCH_WRITE_CHUNK):
             with database_transaction(database):
                 for pair in chunk:
-                    matches: MatchIndices = match_one_pair(runtime, features, sizes, pair, options, normalize)
+                    matches: MatchIndices = match_one_pair(runtime, features, sizes, pair, options, normalize, device=device)
                     database.write_matches(pair[0], pair[1], matches.astype(np.uint32))
 
     # No spatial cap here: LightGlue+ already ran SSC on its scores before verification (`match_one_pair`).
-    report, _ = verify_and_report(database_path, pairs, options, device="cuda", started=started, cap=False)
+    report, _ = verify_and_report(database_path, pairs, options, device=device, started=started, cap=False)
     print(f"colsfm.matching[{label}]: {report.summary()}")
     return report

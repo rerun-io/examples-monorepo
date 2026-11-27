@@ -44,6 +44,38 @@ _TORCH_TO_NUMPY_DTYPE: dict[torch.dtype, type] = {
 }
 
 
+def _import_ort() -> Any:
+    """The ``onnxruntime`` module, with an error that names the env.
+
+    Raises:
+        RuntimeError: If onnxruntime is not installed.
+    """
+    try:
+        import onnxruntime as ort
+    except ImportError as exc:
+        raise RuntimeError("onnxruntime is not installed in this Pixi environment.") from exc
+    return ort
+
+
+def _session_options(ort: Any) -> Any:
+    """The session options every trtkit ONNX Runtime session takes."""
+    options: Any = ort.SessionOptions()
+    options.log_severity_level = 3
+    return options
+
+
+def _torch_dtype(node: Any) -> torch.dtype:
+    """The torch dtype of an ``onnxruntime.NodeArg``.
+
+    Raises:
+        ValueError: If the dtype is unsupported.
+    """
+    dtype: torch.dtype | None = _ORT_TO_TORCH_DTYPE.get(str(node.type))
+    if dtype is None:
+        raise ValueError(f"Unsupported ONNX tensor type {node.type!r} for {node.name!r}.")
+    return dtype
+
+
 @functools.cache
 def require_cuda_kernels(device_id: int) -> None:
     """Run one Relu on ONNX Runtime's CUDA provider, once per device and process (a failure raises and is not cached).
@@ -58,10 +90,7 @@ def require_cuda_kernels(device_id: int) -> None:
         RuntimeError: If onnxruntime or its CUDA provider is missing, or the provider does not take the session or
             cannot run the kernel.
     """
-    try:
-        import onnxruntime as ort
-    except ImportError as exc:
-        raise RuntimeError("onnxruntime is not installed in this Pixi environment.") from exc
+    ort: Any = _import_ort()
     if "CUDAExecutionProvider" not in ort.get_available_providers():
         raise RuntimeError("onnxruntime CUDAExecutionProvider is unavailable: the env needs the cuda feature's onnxruntime build.")
     from onnx import TensorProto, helper
@@ -73,10 +102,10 @@ def require_cuda_kernels(device_id: int) -> None:
         [helper.make_tensor_value_info("y", TensorProto.FLOAT, [4])],
     )
     model: bytes = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 18)], ir_version=10).SerializeToString()
-    options: Any = ort.SessionOptions()
-    options.log_severity_level = 3
     try:
-        session: Any = ort.InferenceSession(model, sess_options=options, providers=[("CUDAExecutionProvider", {"device_id": device_id})])
+        session: Any = ort.InferenceSession(
+            model, sess_options=_session_options(ort), providers=[("CUDAExecutionProvider", {"device_id": device_id})]
+        )
         # ORT falls back to the CPU provider when the CUDA one cannot be created; a CPU run would prove nothing.
         if session.get_providers()[0] != "CUDAExecutionProvider":
             raise RuntimeError(f"the session fell back to {session.get_providers()}")
@@ -110,14 +139,18 @@ def _open_cuda_session(ort: Any, onnx_path: Path, session_options: Any, device: 
     torch_stream: torch.cuda.Stream = torch.cuda.Stream(device=device)
     provider_options: dict[str, Any] = {"device_id": device_id, "user_compute_stream": str(int(torch_stream.cuda_stream))}
     try:
-        return ort.InferenceSession(str(onnx_path), sess_options=session_options, providers=[("CUDAExecutionProvider", provider_options)]), torch_stream
+        return ort.InferenceSession(
+            str(onnx_path), sess_options=session_options, providers=[("CUDAExecutionProvider", provider_options)]
+        ), torch_stream
     except BeartypeException:
         raise
     except Exception as error:
         # Perf-relevant mode switch: every call will host-sync the caller's
         # stream instead of being stream-ordered — say so, don't hide it.
         print(f"[trtkit] ORT user_compute_stream unavailable ({error}); falling back to a host-synchronized session.")
-        return ort.InferenceSession(str(onnx_path), sess_options=session_options, providers=[("CUDAExecutionProvider", {"device_id": device_id})]), None
+        return ort.InferenceSession(
+            str(onnx_path), sess_options=session_options, providers=[("CUDAExecutionProvider", {"device_id": device_id})]
+        ), None
 
 
 OrtDevice: TypeAlias = Literal["cuda", "cpu"]
@@ -142,18 +175,17 @@ class OnnxRuntime:
             RuntimeError: If onnxruntime or its CUDA provider is unavailable.
             ValueError: If the graph has symbolic non-batch dimensions.
         """
-        try:
-            import onnxruntime as ort
-        except ImportError as exc:
-            raise RuntimeError("onnxruntime is not installed in this Pixi environment.") from exc
-        session_options: Any = ort.SessionOptions()
-        session_options.log_severity_level = 3
+        ort: Any = _import_ort()
+        session_options: Any = _session_options(ort)
         self._device: torch.device = torch.device("cuda", device_id) if device == "cuda" else torch.device("cpu")
         self._session: Any
         # None on the CPU and on the host-synchronized CUDA fallback; else the stream the session is ordered on.
         self._torch_stream: torch.cuda.Stream | None
         if device == "cpu":
-            self._session, self._torch_stream = ort.InferenceSession(str(onnx_path), sess_options=session_options, providers=["CPUExecutionProvider"]), None
+            self._session, self._torch_stream = (
+                ort.InferenceSession(str(onnx_path), sess_options=session_options, providers=["CPUExecutionProvider"]),
+                None,
+            )
         else:
             self._session, self._torch_stream = _open_cuda_session(ort, onnx_path, session_options, self._device)
         spec_and_batch: tuple[RuntimeSpec, int | None] = self._read_spec(max_batch_size)
@@ -230,10 +262,7 @@ class OnnxRuntime:
         specs: list[TensorSpec] = []
         for node, ort_value in zip(output_nodes, binding.get_outputs(), strict=True):
             shape: tuple[int, ...] = tuple(int(dim) for dim in ort_value.shape())
-            dtype: torch.dtype | None = _ORT_TO_TORCH_DTYPE.get(str(node.type))
-            if dtype is None:
-                raise ValueError(f"Unsupported ONNX tensor type {node.type!r} for {node.name!r}.")
-            specs.append(TensorSpec(name=str(node.name), shape=shape[1:], dtype=dtype))
+            specs.append(TensorSpec(name=str(node.name), shape=shape[1:], dtype=_torch_dtype(node)))
         return specs
 
     def __call__(self, inputs: dict[str, Tensor]) -> dict[str, Tensor]:
@@ -340,11 +369,76 @@ def _tensor_spec_from_node(node: Any) -> tuple[TensorSpec, int | None]:
         if not isinstance(dim, int):
             raise ValueError(f"Graph tensor {node.name!r} has symbolic non-batch dim {dim!r}; trtkit requires static per-sample shapes.")
         per_sample.append(int(dim))
-    dtype: torch.dtype | None = _ORT_TO_TORCH_DTYPE.get(str(node.type))
-    if dtype is None:
-        raise ValueError(f"Unsupported ONNX tensor type {node.type!r} for {node.name!r}.")
     static_batch: int | None = int(dims[0]) if dims and isinstance(dims[0], int) else None
-    return TensorSpec(name=str(node.name), shape=tuple(per_sample), dtype=dtype), static_batch
+    return TensorSpec(name=str(node.name), shape=tuple(per_sample), dtype=_torch_dtype(node)), static_batch
+
+
+class OnnxDynamicRuntime:
+    """A graph on ONNX Runtime's CPU provider whose inputs may change any dimension on every call.
+
+    The CPU counterpart of :class:`trtkit.tensorrt_runtime.TensorRtDynamicRuntime`'s contract: a dict of named CPU
+    tensors of the graph's dtypes in (as direct binding takes them: no cast), a dict of named CPU tensors out (fresh
+    arrays, safe to keep), ``max_input_shapes`` with ``-1`` for a dynamic dimension, and a context manager. Engine-free
+    tests and hosts without NVIDIA run the very ONNX graph the TensorRT engine is built from. Unlike
+    :class:`OnnxRuntime`, which lets only the batch change and keeps its buffers bound, nothing here is kept between
+    calls.
+    """
+
+    def __init__(self, onnx_path: Path) -> None:
+        """Load an ONNX graph into a CPU execution-provider session.
+
+        Args:
+            onnx_path: Path to the ONNX model file.
+
+        Raises:
+            RuntimeError: If onnxruntime is not installed.
+            ValueError: If an input has an unsupported dtype.
+        """
+        ort: Any = _import_ort()
+        session_options: Any = _session_options(ort)
+        # Shapes change on every call: the CPU arena keeps each new peak until the session closes, which grew one colsfm
+        # test run past 64 GB. Allocate per call instead.
+        session_options.enable_cpu_mem_arena = False
+        self._session: Any = ort.InferenceSession(str(onnx_path), sess_options=session_options, providers=["CPUExecutionProvider"])
+        self._input_dtypes: dict[str, torch.dtype] = {str(node.name): _torch_dtype(node) for node in self._session.get_inputs()}
+        self._output_names: tuple[str, ...] = tuple(str(node.name) for node in self._session.get_outputs())
+        # Each input's declared shape, -1 where the graph leaves a dimension dynamic (the TensorRT runtime's attribute).
+        self.max_input_shapes: dict[str, tuple[int, ...]] = {
+            str(node.name): tuple(dim if isinstance(dim, int) else -1 for dim in node.shape) for node in self._session.get_inputs()
+        }
+
+    @property
+    def device(self) -> torch.device:
+        """The torch device inputs must live on and outputs are returned on."""
+        return torch.device("cpu")
+
+    def __call__(self, inputs: dict[str, Tensor]) -> dict[str, Tensor]:
+        """Run once.
+
+        Args:
+            inputs: CPU tensors keyed by the graph's input names, in any shape the graph accepts.
+
+        Returns:
+            CPU tensors keyed by the graph's output names.
+
+        Raises:
+            ValueError: If the names differ from the graph's inputs, or an input is not a CPU tensor of its input's dtype.
+        """
+        if set(inputs) != set(self._input_dtypes):
+            raise ValueError(f"Runtime expects inputs {tuple(self._input_dtypes)}, got {tuple(inputs)}.")
+        feeds: dict[str, np.ndarray] = {}
+        for name, tensor in inputs.items():
+            if tensor.device.type != "cpu" or tensor.dtype != self._input_dtypes[name]:
+                raise ValueError(f"Input {name!r} must be a CPU {self._input_dtypes[name]} tensor, got {tensor.dtype} on {tensor.device}.")
+            feeds[name] = tensor.detach().contiguous().numpy()
+        values: list[np.ndarray] = self._session.run(self._output_names, feeds)
+        return {name: torch.from_numpy(value) for name, value in zip(self._output_names, values, strict=True)}
+
+    def __enter__(self) -> "OnnxDynamicRuntime":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self._session = None
 
 
 OnnxCudaRuntime = OnnxRuntime

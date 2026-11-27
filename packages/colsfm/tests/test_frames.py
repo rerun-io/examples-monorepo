@@ -12,7 +12,7 @@ import torch
 
 from colsfm import frames as frames_module
 from colsfm.frame_manifest import FRAME_SOURCE_FILE, FrameSourceManifest, StreamKeyframes, read_manifest, write_manifest
-from colsfm.frames import ImageFolderFrames, VideoStreamFrames, open_frame_source
+from colsfm.frames import FRAME_STORE_CPU_BYTES, ImageFolderFrames, VideoStreamFrames, open_frame_source
 
 
 def _manifest() -> FrameSourceManifest:
@@ -131,6 +131,14 @@ def test_a_request_decodes_only_its_names_and_yields_them_in_its_order(opened: l
     assert [name for name, _ in got] == ["cam0/700", "cam0/30", "cam0/500"]
     assert [int(rgb[0, 0, 0]) for _, rgb in got] == [70, 3, 50]
     assert opened[0].requested == [3, 50, 70]
+
+
+def test_cpu_frames_take_a_fixed_store_budget(opened: list[_FakeVideo]) -> None:
+    """ONNX Runtime runs decode to the CPU, which has no CUDA device properties, and a share of host RAM would be tens of
+    GB that the ONNX Runtime sessions and the mapper need: CPU frames take a fixed budget."""
+    source = VideoStreamFrames(_stream_manifest(), device=torch.device("cpu"))
+    assert [int(rgb[0, 0, 0]) for _, rgb in source.frames(["cam0/30"])] == [3]
+    assert source.budget_bytes == FRAME_STORE_CPU_BYTES
 
 
 def test_an_evicted_frame_is_decoded_again_from_the_video(opened: list[_FakeVideo]) -> None:

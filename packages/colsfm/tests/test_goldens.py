@@ -5,7 +5,7 @@ docs/full-pipeline-results.md):
 
 | Run | Reference |
 |---|---|
-| Galileo, pycolmap + Ceres ablation, no loops, no refinement | ATE vs GT 4.33 mm (cuSFM 5.00 mm), 19.35 s (cuSFM 40.07 s), 225/226 registered, 1.334 px |
+| Galileo, COLMAP ALIKED + LightGlue (pycolmap) + Ceres ablation, no loops, no refinement (the engine-free case before ORT; its bounds carry over) | ATE vs GT 4.33 mm (cuSFM 5.00 mm), 19.35 s (cuSFM 40.07 s), 225/226 registered, 1.334 px |
 | Galileo, default pipeline | ATE vs GT 5.08 mm, 20.0 s (cuSFM with refinement 32.4 s) |
 | KITTI 06, default pipeline, cuVSLAM start | Sim(3) ATE 0.928 m, 155.7 s, 2156 registered (cuSFM 1.328 m, 1596.1 s) |
 
@@ -33,7 +33,7 @@ from colsfm.export import MERGED_POSE_FILE_NAME, OUTPUT_POSES_DIR_NAME
 from colsfm.frames_meta import FRAMES_META_NAME, read_frames_meta
 from colsfm.kitti_eval import Trajectory, TrajectoryReport, evaluate_trajectory, read_kitti_ground_truth
 from colsfm.matching import FLEXGLUE_MODEL_DIR, FLEXGLUE_MODEL_FILES
-from colsfm.model_assets import RACO_DYNAMIC_ONNX_PATH, RACO_ONNX_PATH
+from colsfm.model_assets import RACO_DYNAMIC_ONNX_PATH, RACO_ONNX_PATH, required_raco_graphs
 from colsfm.pipeline import run_pipeline
 from colsfm.run_config import PipelineOptions
 
@@ -48,17 +48,15 @@ KITTI_INPUT_DIR: Final[Path] = DATA_DIR / "kitti" / "06_input"
 KITTI_SEQUENCE_DIR: Final[Path] = DATA_DIR / "kitti" / "06"
 """`times.txt` and `poses_gt_06.txt`."""
 
-CUSFM_GALILEO_SECONDS: Final[float] = 40.07
-"""The cuSFM binary on Galileo, all eight stages (fork NOTES.md, same host)."""
-
 CUSFM_GALILEO_REFINED_SECONDS: Final[float] = 32.4
 """The cuSFM binary on Galileo with loops and extrinsic refinement."""
 
 CUSFM_KITTI_SECONDS: Final[float] = 1596.1
 """The cuSFM binary on KITTI 06, cuVSLAM SLAM start, loops."""
 
-GALILEO_ABLATION_MAX_ATE_MM: Final[float] = 5.495
-"""The fork's acceptance bound: 1.10 x cuSFM's 5.00 mm (fork measured 4.33 mm)."""
+GALILEO_CUSFM_BOUND_ATE_MM: Final[float] = 5.495
+"""The fork's acceptance bound against cuSFM: 1.10 x cuSFM's 5.00 mm. The fork's engine-free ablation (COLMAP's ALIKED +
+LightGlue) measured 4.33 mm; the engine-free run here takes the same bound on RaCo + FlexGlue."""
 
 GALILEO_DEFAULT_MAX_ATE_MM: Final[float] = 5.08 * 1.10
 """Within 10 % of the fork's 5.08 mm."""
@@ -92,18 +90,20 @@ def _galileo_metrics(output_dir: Path) -> RunMetrics:
     return compute_run_metrics(read_run(output_dir, "colsfm"), input_track, read_ground_truth(GALILEO_DIR))
 
 
-def test_galileo_ablation_beats_the_cusfm_binary(tmp_path: Path) -> None:
-    """COLMAP's ALIKED + LightGlue, Ceres, no refinement, no loops: more accurate than cuSFM and faster."""
-    _require(GALILEO_DIR / FRAMES_META_NAME)
-    output_dir: Path = tmp_path / "galileo_ablation"
+def test_galileo_engine_free_run_stays_in_the_cusfm_bounds(tmp_path: Path) -> None:
+    """The default RaCo + FlexGlue graphs on ONNX Runtime's CPU provider, Ceres, no refinement, no loops: within cuSFM's
+    accuracy bounds with no GPU and no engine. No wall-time bound: the claim here is the models without TensorRT, not speed."""
+    _require(GALILEO_DIR / FRAMES_META_NAME, *required_raco_graphs("raco", "flexglue", "onnxruntime"))
+    output_dir: Path = tmp_path / "galileo_engine_free"
     started: float = time.perf_counter()
     run_pipeline(
         PipelineOptions(
             input_dir=GALILEO_DIR,
             output_dir=output_dir,
             min_inter_frame_distance=GALILEO_EVERY_FRAME_M,
-            features_backend="pycolmap",
-            matching_backend="pycolmap",
+            features_backend="raco",
+            matching_backend="flexglue",
+            inference_runtime="onnxruntime",
             ba_backend="ceres",
             optimize_extrinsics=False,
             loop_closure=False,
@@ -113,13 +113,12 @@ def test_galileo_ablation_beats_the_cusfm_binary(tmp_path: Path) -> None:
     metrics: RunMetrics = _galileo_metrics(output_dir)
     assert metrics.vs_ground_truth is not None
     print(
-        f"[golden] galileo ablation: ATE {metrics.vs_ground_truth.rmse_millimeters:.2f} mm, "
+        f"[golden] galileo engine-free: ATE {metrics.vs_ground_truth.rmse_millimeters:.2f} mm, "
         f"{metrics.reconstruction.registered_images} registered, {metrics.reconstruction.mean_reprojection_error_px:.3f} px, {wall:.1f} s"
     )
     assert metrics.reconstruction.registered_images >= GALILEO_MIN_REGISTERED
     assert metrics.reconstruction.mean_reprojection_error_px <= GALILEO_MAX_REPROJECTION_PX
-    assert metrics.vs_ground_truth.rmse_millimeters <= GALILEO_ABLATION_MAX_ATE_MM
-    assert wall < CUSFM_GALILEO_SECONDS
+    assert metrics.vs_ground_truth.rmse_millimeters <= GALILEO_CUSFM_BOUND_ATE_MM
 
 
 def test_galileo_default_pipeline_stays_in_its_band(tmp_path: Path) -> None:

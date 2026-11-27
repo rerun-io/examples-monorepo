@@ -103,8 +103,9 @@ from colsfm.database import (
     count_two_view_geometries,
     read_keypoints_batch,
 )
-from colsfm.features import DeviceChoice, ResolvedDevice, resolve_device
+from colsfm.features import DeviceChoice, resolve_device
 from colsfm.frame_manifest import FrameSource
+from colsfm.inference import InferenceRuntime, ResolvedDevice
 from colsfm.pairs import write_pair_list
 from colsfm.verification import (
     CapFunction,
@@ -155,6 +156,19 @@ class FlexGlueOptions:
         """
         return f"flexglue_matcher_fp8_{self.tag()}.onnx"
 
+    def graph_inputs(self) -> dict[str, float]:
+        """The matcher graph's four scalar inputs, as COLMAP feeds them: folded into the TensorRT graph, fed to ONNX Runtime.
+
+        Returns:
+            Value per graph input name; a non-positive distance gate is infinity, as in COLMAP.
+        """
+        return {
+            "filter_threshold": self.filter_threshold,
+            "max_distance_px": self.max_distance_px if self.max_distance_px > 0 else float("inf"),
+            "min_covisibility": self.min_covisibility,
+            "early_stop_decay": self.early_stop_decay,
+        }
+
 
 FLEXGLUE_FP8_COMMAND: Final[str] = "pixi run -e colsfm colsfm-flexglue-fp8"
 """Calibrates `FlexGlueOptions.fp8_file` on the Galileo frames (`tools/flexglue_fp8.py --image-dirs` for other frames)."""
@@ -181,8 +195,10 @@ MatcherVariant: TypeAlias = Literal["ALIKED_LIGHTGLUE", "ALIKED_BRUTEFORCE"]
 MatchingBackend: TypeAlias = Literal["pycolmap", "raco", "flexglue", "flexglue_ort"]
 """Which matcher runs: COLMAP's own ONNX LightGlue, LightGlue+ on a TensorRT engine, or COLMAP's FlexGlue.
 
-`flexglue` is COLMAP's FlexGlue graphs on TensorRT (`colsfm.flexglue_trt`); `flexglue_ort` is COLMAP's own ONNX Runtime
-FlexGlue, kept as its parity reference. Both ignore the descriptors.
+`flexglue` is COLMAP's FlexGlue graphs run from colsfm's own matching loop (`colsfm.flexglue_trt`): TensorRT engines, or
+with `MatchingOptions.inference_runtime="onnxruntime"` the shipped graphs on ONNX Runtime's CPU provider (Python, colsfm's
+pre/post code). `flexglue_ort` is COLMAP's C++ FlexGlue on COLMAP's own ONNX Runtime session (`pycolmap.match_image_pairs`),
+kept as its parity reference. All ignore the descriptors.
 
 `raco` is `colsfm.matching_trt`, the LightGlue+ that fabio-sim trained against RaCo-ALIKED. It has the per-match
 score COLMAP's bindings hide and therefore runs the blob's real SSC spatial NMS rather than
@@ -369,6 +385,8 @@ class MatchingOptions:
     with the real LightGlue scores, and the post-verification grid subsample does
     not run at all. `MatchLimitPolicy.of` is what turns `--match-cap-mode` and
     `--max-matches-per-pair` into it."""
+    inference_runtime: InferenceRuntime = "tensorrt"
+    """On `raco` and `flexglue`: TensorRT engines on the GPU, or the same graphs on ONNX Runtime's CPU provider."""
     tensorrt_min_score: float = BLOB_MATCH_THRESHOLD
     """LightGlue score gate on the engine (`raco`) backend, applied with `>` as the blob does.
 
@@ -874,7 +892,7 @@ def match_pairs(
         FileNotFoundError: When the database is missing.
         KeyError: When a pair names an image the database does not hold.
         RuntimeError: When `options.device` is `cuda` and CUDA is unusable.
-        ImportError: When `options.backend` is `raco` and TensorRT or
+        ImportError: When `options.backend` is `raco` on TensorRT and TensorRT or
             `cuda-python` is not importable.
     """
     if options.backend == "raco":

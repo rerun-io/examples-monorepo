@@ -35,16 +35,16 @@ def test_a_flexglue_run_requires_its_three_graphs_and_the_fp8_matcher(monkeypatc
     """The pre-flight names the FlexGlue graphs and the calibrated FP8 matcher (TensorRT backend on an FP8 GPU only),
     next to the RaCo extractor; COLMAP's own ONNX Runtime FlexGlue needs no FP8 graph."""
     monkeypatch.setattr(model_assets, "gpu_has_fp8", lambda: True)
-    names = [path.name for path in required_raco_graphs("raco", "flexglue")]
+    names = [path.name for path in required_raco_graphs("raco", "flexglue", "tensorrt")]
     assert names[1:] == [*FLEXGLUE_MODEL_FILES.values(), FlexGlueOptions().fp8_file()]
-    assert FlexGlueOptions().fp8_file() not in [path.name for path in required_raco_graphs("raco", "flexglue_ort")]
+    assert FlexGlueOptions().fp8_file() not in [path.name for path in required_raco_graphs("raco", "flexglue_ort", "tensorrt")]
 
 
 def test_a_gpu_without_fp8_needs_no_fp8_matcher(monkeypatch: pytest.MonkeyPatch) -> None:
     """Below sm_89 (an RTX 3060) TensorRT refuses FP8 Q/DQ graphs: the matcher runs its prepared graph, so the pre-flight
     asks for the three FlexGlue graphs alone."""
     monkeypatch.setattr(model_assets, "gpu_has_fp8", lambda: False)
-    names = [path.name for path in required_raco_graphs("raco", "flexglue")]
+    names = [path.name for path in required_raco_graphs("raco", "flexglue", "tensorrt")]
     assert names[1:] == list(FLEXGLUE_MODEL_FILES.values())
 
 

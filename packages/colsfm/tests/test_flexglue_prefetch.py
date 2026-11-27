@@ -13,7 +13,7 @@ from colsfm.flexglue_trt import DESCRIPTOR_BATCH, descriptor_batch, pair_schedul
 
 class _FakeMatcher:
     """The production pair loop's CPU stand-in: an LRU feature cache, a descriptor call that fills it, an enqueue that
-    refreshes both endpoints (as `FlexGlueTensorRT.enqueue` does) and needs both cached."""
+    refreshes both endpoints (as `FlexGlueRunner.enqueue` does) and needs both cached."""
 
     def __init__(self, capacity: int) -> None:
         self.images: OrderedDict[int, None] = OrderedDict()

@@ -30,7 +30,7 @@ from colsfm.flexglue_fp8 import (
 )
 from colsfm.flexglue_trt import (
     DESCRIPTOR_BATCH,
-    FlexGlueTensorRT,
+    FlexGlueRunner,
     descriptor_profile,
     matcher_profile,
     prepare_descriptor_graph,
@@ -97,7 +97,7 @@ def main(config: Config) -> Path:
         calibration_path: Path = Path(work) / f"{matcher_graph.stem}_calibration.onnx"
         onnx.save(calibration_graph(model, targets), calibration_path)
         # The calibration graph serves as the matcher: encoding needs none, and calibration runs only this graph.
-        flexglue: FlexGlueTensorRT = FlexGlueTensorRT(
+        flexglue: FlexGlueRunner = FlexGlueRunner.engines(
             descriptor_engine, resolve_engine(calibration_path, matcher_profile()), cache_images=len(images)
         )
         for start in range(0, len(images), DESCRIPTOR_BATCH):
