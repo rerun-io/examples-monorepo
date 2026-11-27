@@ -14,7 +14,12 @@ pub const EXTENSION: Extension = Extension {
         // The device is requested before any App exists, so the page flags are read here.
         #[cfg(target_arch = "wasm32")]
         crate::web::enable_profile_from_page();
-        apply_compute_needs(offered_features, offered_limits, subgroups_allowed(), wanted);
+        apply_compute_needs(
+            offered_features,
+            offered_limits,
+            subgroups_allowed(),
+            wanted,
+        );
     }),
     // Default framing on splat and hexel bounds (crate::bounds), which Rerun's spatial views cannot see.
     replaces_fallbacks: &[
