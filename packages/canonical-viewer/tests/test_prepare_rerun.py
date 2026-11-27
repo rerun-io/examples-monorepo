@@ -4,7 +4,7 @@ import io
 import tarfile
 from pathlib import Path
 
-from canonical_viewer.apis.prepare_rerun import PACKAGE_DIR, PATCHED_CRATES, RERUN_PATCHES, RERUN_TAG, prepare_tree
+from canonical_viewer.apis.prepare_rerun import PACKAGE_DIR, PATCHED_CRATES, PATCHED_GIT_CRATES, RERUN_PATCHES, RERUN_TAG, prepare_tree
 
 
 def tar_of(files: dict[str, str]) -> bytes:
@@ -53,4 +53,10 @@ def test_patches_name_the_rerun_tag_and_exist() -> None:
 def test_crate_patches_name_their_crate_version_and_exist() -> None:
     for crate in PATCHED_CRATES:
         assert f"{crate.name}-{crate.version}-" in crate.patch, f"{crate.patch}: a crate patch names the version it applies to"
+        assert (PACKAGE_DIR / crate.patch).is_file()
+
+
+def test_git_crate_patches_name_their_crate_and_exist() -> None:
+    for crate in PATCHED_GIT_CRATES:
+        assert crate.patch.startswith(f"patches/{crate.name}-"), f"{crate.patch}: a crate patch names its crate"
         assert (PACKAGE_DIR / crate.patch).is_file()

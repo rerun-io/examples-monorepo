@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 canonical-viewer-extension.workspace = true
+depth-video-viewer.workspace = true
 gsplat-viewer.workspace = true
 re_log.workspace = true
 re_viewer.workspace = true
@@ -21,8 +22,6 @@ re_viewer.workspace = true
 # The `rerun-canonical` binary (main.rs) and its runtime. The library (EXTENSIONS + hooks) also builds for wasm32, where
 # crates/web links it into the web viewer.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-# re_rav1d 0.1.3 (depth's 10-bit decoder) does not build for wasm32-unknown-unknown (libc has no ptrdiff_t there).
-depth-video-viewer.workspace = true
 mimalloc.workspace = true
 re_build_info.workspace = true
 re_error.workspace = true

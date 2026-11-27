@@ -7150,6 +7150,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d6831663a5098ea164f89cff59c6284e95f4e3c76ce9848d4529f5ccca9bde"
 
 [[package]]
+name = "rav1d-wasm-libc"
+version = "0.1.0"
+
+[[package]]
 name = "raw-cpuid"
 version = "11.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8699,7 +8703,6 @@ dependencies = [
 [[package]]
 name = "re_rav1d"
 version = "0.1.4"
-source = "git+https://github.com/pablo-rerun/re_rav1d.git?rev=dd03865f74aee68b90269ef3b4e33fbb494ffca3#dd03865f74aee68b90269ef3b4e33fbb494ffca3"
 dependencies = [
  "assert_matches",
  "atomig",
@@ -8711,6 +8714,7 @@ dependencies = [
  "nasm-rs",
  "parking_lot",
  "paste",
+ "rav1d-wasm-libc",
  "raw-cpuid",
  "static_assertions",
  "strum 0.26.3",
