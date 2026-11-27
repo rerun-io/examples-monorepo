@@ -33,19 +33,16 @@ from typing import Final, Literal, TypeAlias
 
 import numpy as np
 import pyarrow as pa
-import rerun as rr
 from jaxtyping import Float64, Int64
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
 from scipy.spatial.transform import Rotation
 from serde import serde
 from serde.json import to_json
-from simplecv.camera_parameters import BrownConradyDistortion, Extrinsics, Fisheye62Parameters, Intrinsics, KannalaBrandtDistortion, PinholeParameters
 from simplecv.catalog_calibration import CatalogCameraCalibration, CatalogDistortion, read_camera_models
 from simplecv.catalog_layers import serve_local_segment
 from simplecv.catalog_rig_layout import CatalogCamera, catalog_components, parse_rig_layout
 from simplecv.catalog_video_reader import StreamIndex, read_video_index
-from simplecv.rerun_log_utils import log_pinhole
 from simplecv.rrd_query_utils import first_valid_value
 
 from colsfm import DATA_DIR
@@ -55,7 +52,6 @@ from colsfm.frame_manifest import FRAME_SOURCE_FILE, FrameSourceManifest, Stream
 from colsfm.frame_poses import ViewRigSource
 from colsfm.frames_meta import FRAMES_META_NAME
 from colsfm.geometry import TumPose, interpolate_poses, rigid3d_from_matrix
-from colsfm.rerun_layer import IMAGE_PLANE_DISTANCE, open_layer
 from colsfm.run_lifecycle import STAGING_SUFFIX, publish_directory
 
 DEFAULT_CATALOG_URL: Final[str] = "rerun+http://127.0.0.1:51235"
@@ -64,9 +60,6 @@ DEFAULT_CATALOG_URL: Final[str] = "rerun+http://127.0.0.1:51235"
 DEFAULT_TRAJECTORY_ENTITY: Final[str] = "/world/runs/slam_rs/rig"
 """slam-rs's final run in its `slam_rs` layer (`dataforge.schema.run_path(SLAM_RS_SOURCE)`): `/world/rig_00` belongs to
 the base and the `gt` layer."""
-
-CALIBRATION_ENTITY: Final[str] = "/world/runs/colsfm_calibrate/rig"
-"""Where `colsfm calibrate` writes its cameras (`write_calibration_layer`), one child per camera name."""
 
 DEFAULT_TIMELINE: Final[str] = "video_time"
 """The timeline exoego:v2 segments index their video and poses on."""
@@ -161,7 +154,7 @@ class CatalogInputConfig:
     selected camera must carry it at every keyframe stamp. None = no mask."""
     calibration_entity: str | None = None
     """Read each camera's calibration from `<calibration_entity>/<camera name>` (a calibration layer such as
-    `/world/runs/colsfm_calibrate/rig`, written by `write_calibration_layer`) instead of the segment's camera node.
+    `/world/runs/colsfm_calibrate/rig`, written by `colsfm.calibration_layer.write_calibration_layer`) instead of the segment's camera node.
     None = the camera node's own calibration."""
 
     def __post_init__(self) -> None:
@@ -375,42 +368,6 @@ def read_catalog_cameras(
             )
         )
     return tuple(cameras)
-
-
-def write_calibration_layer(
-    rrd_path: Path, segment: str, cameras: Sequence[CatalogCameraModel], properties: rr.AnyValues, root: str = CALIBRATION_ENTITY
-) -> None:
-    """Write cameras as a calibration layer of `segment`, the inverse of `read_catalog_cameras(..., calibration_entity=root)`.
-
-    Each camera goes to `<root>/<camera name>` the way the segment's own camera nodes carry it: a static `Transform3D`
-    (`cam_T_rig`, child-from-parent) and a static `Pinhole` with simplecv's distortion components on `pinhole`.
-
-    Args:
-        rrd_path: Where the layer goes; parent directories are created.
-        segment: The catalog segment id (the layer's recording id).
-        cameras: The calibration to write.
-        properties: The `colsfm_calibrate` recording property (how the calibration was made).
-        root: The entity the cameras go under.
-    """
-    recording: rr.RecordingStream = open_layer(rrd_path, segment)
-    for camera in cameras:
-        extrinsics: Extrinsics = Extrinsics(world_R_cam=camera.rig_T_cam[:3, :3].copy(), world_t_cam=camera.rig_T_cam[:3, 3].copy())
-        intrinsics: Intrinsics = Intrinsics(camera_conventions="RDF", k_matrix=camera.k_matrix, width=camera.width, height=camera.height)
-        model: PinholeParameters | Fisheye62Parameters
-        if camera.projection == "OPENCV_FISHEYE":
-            k1, k2, k3, k4 = camera.distortion
-            model = Fisheye62Parameters(camera.name, extrinsics, intrinsics, KannalaBrandtDistortion(k1=k1, k2=k2, k3=k3, k4=k4))
-        elif camera.projection == "DISTORTED_PINHOLE":
-            k1, k2, p1, p2, k3, k4, k5, k6 = camera.distortion
-            model = PinholeParameters(
-                camera.name, extrinsics, intrinsics, BrownConradyDistortion(k1=k1, k2=k2, p1=p1, p2=p2, k3=k3, k4=k4, k5=k5, k6=k6)
-            )
-        else:
-            model = PinholeParameters(camera.name, extrinsics, intrinsics)
-        log_pinhole(model, Path(f"{root}/{camera.name}"), image_plane_distance=IMAGE_PLANE_DISTANCE, static=True, recording=recording)
-    recording.send_property("colsfm_calibrate", properties)
-    recording.flush()
-    recording.disconnect()
 
 
 def read_catalog_trajectory(dataset: DatasetEntry, segment: str, entity: str, timeline: str) -> CatalogTrajectory:

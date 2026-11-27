@@ -8,14 +8,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from colsfm.catalog import (
-    CALIBRATION_ENTITY,
-    CatalogCameraModel,
-    CatalogInputConfig,
-    read_catalog_cameras,
-    serve_catalog_input,
-    write_calibration_layer,
-)
+from colsfm.calibration_layer import CALIBRATION_ENTITY, write_calibration_layer
+from colsfm.catalog import CatalogCameraModel, CatalogInputConfig, read_catalog_cameras, serve_catalog_input
 
 
 def _pose(yaw_deg: float, translation: list[float]) -> np.ndarray:
@@ -119,3 +113,17 @@ def test_the_calibration_layer_replaces_the_camera_nodes_calibration(tmp_path: P
             read_catalog_cameras(dataset, served.segment, ("left_front",), "/world/runs/no_such_root/rig")
     _assert_same_cameras(recorded, RECORDED)
     _assert_same_cameras(calibrated, (_calibrated(RECORDED[1]),))
+
+
+def test_a_camera_that_does_not_fit_its_projection_leaves_the_previous_layer_whole(tmp_path: Path) -> None:
+    import rerun as rr
+
+    layer: Path = tmp_path / "calibrate.rrd"
+    write_calibration_layer(layer, "seg", RECORDED, rr.AnyValues(source="first"))
+    before: bytes = layer.read_bytes()
+    broken: CatalogCameraModel = dataclasses.replace(RECORDED[1], distortion=(0.1, 0.2))
+    with pytest.raises(ValueError, match="right_front: DISTORTED_PINHOLE takes 8"):
+        write_calibration_layer(layer, "seg", (RECORDED[0], broken), rr.AnyValues(source="second"))
+    assert layer.read_bytes() == before
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["calibrate.rrd"]
+    assert layer.stat().st_mode & 0o777 == 0o644
