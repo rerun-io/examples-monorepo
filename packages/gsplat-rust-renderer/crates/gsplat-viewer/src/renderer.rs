@@ -309,7 +309,7 @@ impl DrawData for GaussianDrawData {
         let Ok(renderer) = ctx.renderer::<GaussianRenderer>() else {
             return;
         };
-        // Rerun 0.42.0 exposes only the camera position here; the supplied camera is last_eye.
+        // Rerun 0.44.0 exposes only the camera position here; the supplied camera is last_eye.
         // Upstream view_info needs the current full pose, projection, and pixel resolution.
         if matches!(self.prepared, Prepared::Encode)
             && let Err(error) = self
@@ -388,7 +388,7 @@ impl GaussianRenderer {
         ctx: &re_renderer::RenderContext,
         size: gsplat_core::glam::UVec2,
     ) -> TargetImage {
-        // TextureDesc is not exported in 0.42.0; reuse the public 2D descriptor.
+        // TextureDesc is not exported in 0.44.0; reuse the public 2D descriptor.
         let template = ctx.texture_manager_2d.white_texture_unorm();
         let [view, depth, id] = [
             ("gsplat composite", wgpu::TextureFormat::Rgba8Unorm),

@@ -2001,7 +2001,7 @@ xorg-libxinerama = "*"
 xorg-libxrandr = "*"
 
 # Web build of the custom gsplat viewer (crates/gsplat-viewer-web): wasm32 std for the pinned rust, wasm-bindgen-cli
-# pinned to Rerun 0.42's wasm-bindgen =0.2.129, wasm-opt from binaryen. clang (above) compiles the C deps for wasm32.
+# pinned to Rerun 0.44's wasm-bindgen =0.2.129, wasm-opt from binaryen. clang (above) compiles the C deps for wasm32.
 [feature.gsplat-web]
 platforms = ["linux-64", "linux-aarch64"]
 
@@ -2014,7 +2014,7 @@ binaryen = "*"
 args = ["stock_dir", "out_dir"]
 cmd = "python tools/build_web_viewer.py --stock-dir {{ stock_dir }} --out-dir {{ out_dir }}"
 cwd = "packages/gsplat-rust-renderer"
-description = "Build the custom gsplat viewer for the web (wasm32) into a copy of a stock Rerun 0.42.0 web viewer directory"
+description = "Build the custom gsplat viewer for the web (wasm32) into a copy of a stock Rerun 0.44.0 web viewer directory"
 
 [feature.gsplat-rust-renderer.pypi-dependencies]
 gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true }
@@ -2068,7 +2068,7 @@ cwd = "packages/gsplat-rust-renderer"
 description = "Render and evaluate Blender test splits; --checkpoint-only checks bundled predictions"
 
 # Call the env's cargo-fmt/cargo-clippy directly: unless $CARGO_HOME/bin is on PATH, `cargo <sub>` searches it
-# first, where a rustup proxy may run an older toolchain than the pinned rust (Rerun 0.42 requires rustc 1.98).
+# first, where a rustup proxy may run an older toolchain than the pinned rust (Rerun 0.44 requires rustc 1.98).
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-check]
 cmd = "cargo-fmt -p gsplat-core -p gsplat-viewer -p gsplat-cli -p gsplat-train -- --check && cargo-clippy clippy --locked --workspace --all-targets --all-features -- -D warnings && cargo test --locked --workspace --all-features"
 cwd = "packages/gsplat-rust-renderer"
@@ -2114,13 +2114,13 @@ description = "Log a Brush PLY and a hexel PLY side by side on one orbit camera 
 # ═══════════════════════════════════════════════════════════════════════════
 # depth-video-viewer — out-of-tree Rerun viewer that draws DepthVideoStream (AV1 10-bit depth)
 # ═══════════════════════════════════════════════════════════════════════════
-# Same pattern as the gsplat-rust-renderer viewer: crates.io Rerun =0.42.0 crates, no fork.
+# Same pattern as the gsplat-rust-renderer viewer: the Rerun 0.44.0 tag's crates, no fork.
 [feature.depth-video-viewer]
 platforms = ["linux-64", "linux-aarch64"]
 
 [feature.depth-video-viewer.dependencies]
 python = "3.12.*"
-# Pinned Rerun crates share this Rust toolchain (Rerun 0.42 requires rustc 1.98).
+# Pinned Rerun crates share this Rust toolchain (Rerun 0.44 requires rustc 1.98).
 rust = "1.98.*"
 clang = "*"
 cmake = "*"
@@ -3867,7 +3867,7 @@ cwd = "packages/kornia-staging"
 description = "Run Rust workspace tests and doctests"
 
 # Golden parity against third-party reference outputs stored as .rrd on the NAS. `golden/` is a Cargo workspace of its
-# own: the Rerun 0.42 decoder it needs stays out of the staging lock and the gate's build. The env's cargo-clippy is
+# own: the Rerun 0.44 decoder it needs stays out of the staging lock and the gate's build. The env's cargo-clippy is
 # called directly, as `cargo clippy` would pick a rustup one from CARGO_HOME. Skips, naming the asset, when absent.
 [feature.kornia-staging.tasks.kornia-staging-golden]
 cmd = """bash -c 'export CARGO_TARGET_DIR=../target/golden; golden=${KORNIA_STAGING_BASALT_BRIEF:-/mnt/nas/ssd-8tb/scratch/slam-rs-rootslam/fixtures/b1/basalt_brief.rrd}; cargo fmt --check && "$CONDA_PREFIX/bin/cargo-clippy" clippy --locked --all-targets -- -D warnings && if [[ -f $golden ]]; then KORNIA_STAGING_BASALT_BRIEF=$golden cargo test --locked --release -- --ignored --nocapture; else echo "SKIP kornia-staging-golden: Basalt BRIEF golden $golden is absent (set KORNIA_STAGING_BASALT_BRIEF)"; fi'"""

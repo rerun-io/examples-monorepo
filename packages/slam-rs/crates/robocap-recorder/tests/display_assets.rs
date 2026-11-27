@@ -1,5 +1,5 @@
 use re_log_encoding::Decoder;
-use re_log_types::LogMsg;
+use rerun::log::LogMsg;
 use robocap_recorder::{CaptureIdentity, DirectWriter, DisplayAssets};
 use std::{fs::File, io::BufReader, time::Duration};
 

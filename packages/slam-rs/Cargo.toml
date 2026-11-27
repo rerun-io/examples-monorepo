@@ -61,6 +61,13 @@ kornia-algebra = { version = "0.2", default-features = false }
 # The GPU phase (decision D21, D70). CubeCL 0.11 prerelease with the optional
 # wgpu runtime; the default CPU build has no GPU dependency.
 cubecl = "=0.11.0-pre.3"
+# Rerun 0.44.0 is not on crates.io: its release tag.
+rerun = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0", default-features = false }
+re_build_info = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
+re_chunk = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
+re_log_encoding = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
+re_log_types = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
+re_protos = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
 # The estimator must never panic on data: errors are typed and returned.
 [workspace.lints.clippy]
 unwrap_used = "deny"
@@ -94,3 +101,6 @@ codegen-units = 1
 cubecl-wgpu = { path = "../kornia-staging/target/patch/cubecl-wgpu-0.11.0-pre.3" }
 cubecl-common = { path = "../kornia-staging/target/patch/cubecl-common-0.11.0-pre.3" }
 cubecl-spirv = { path = "../kornia-staging/target/patch/cubecl-spirv-0.11.0-pre.3" }
+# The egui crates in the Rerun SDK graph, at the revision in Rerun's 0.44.0 Cargo.lock (Rerun patches them to egui main).
+ecolor = { git = "https://github.com/emilk/egui.git", rev = "90431d979ab1faae2de6d9f736e9d33ca0d31956" }
+emath = { git = "https://github.com/emilk/egui.git", rev = "90431d979ab1faae2de6d9f736e9d33ca0d31956" }

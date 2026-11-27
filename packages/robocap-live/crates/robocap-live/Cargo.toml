@@ -29,8 +29,8 @@ robocap-types = { workspace = true }
 # from ORT_DYLIB_PATH, so the cap build carries no ONNX Runtime).
 ort = { version = "=2.0.0-rc.11", default-features = false, features = ["load-dynamic", "cuda", "std"], optional = true }
 # log: the Rerun SDK at the viewer/Python pin, and the rrd decoder for the display asset (static scene + blueprint).
-re_log_encoding = { version = "=0.38.1", default-features = false, features = ["decoder"] }
-rerun = { version = "=0.38.1", default-features = false, features = ["sdk"] }
+re_log_encoding = { workspace = true, features = ["decoder"] }
+rerun = { workspace = true, features = ["sdk"] }
 rayon = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }

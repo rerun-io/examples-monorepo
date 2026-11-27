@@ -1,7 +1,8 @@
 [workspace]
 members = ["crates/*"]
-# Keep path dependencies in Brush's own workspace for inherited package metadata.
-exclude = ["target/brush-src", "crates/gsplat-viewer-web"]
+# Keep path dependencies in Brush's and Rerun's own workspaces (the web build's Rerun checkout in target/patch) for
+# inherited package metadata.
+exclude = ["target/brush-src", "target/patch", "crates/gsplat-viewer-web"]
 resolver = "3"
 
 [workspace.dependencies]
@@ -27,8 +28,31 @@ brush-process = { path = "target/brush-src/crates/brush-process" }
 brush-train = { path = "target/brush-src/crates/brush-train" }
 brush-dataset = { path = "target/brush-src/crates/brush-dataset" }
 
+# Rerun 0.44.0 is not on crates.io (it builds against unreleased egui): its release tag, with the egui family patched
+# below to the revisions Rerun's own 0.44.0 Cargo.lock uses.
+rerun = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0", default-features = false }
+re_build_info = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
+re_byte_size = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
+re_chunk = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
+re_crash_handler = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
+re_format = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
+re_grpc_server = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
+re_log = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
+re_log_encoding = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
+re_log_msg = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
+re_log_types = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
+re_renderer = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
+re_sdk_types = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
+re_tracing = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
+re_types_core = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
+re_video = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
+# The web build turns off the default features (see gsplat-viewer/Cargo.toml); native users ask for "default".
+re_viewer = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0", default-features = false }
+re_viewer_context = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
+egui_kittest = { version = "0.37.0", features = ["wgpu", "eframe"] }
+
 # Burn and CubeCL are pinned to Brush revisions in Cargo.lock.
-# Rerun 0.42.0 pins wasm-bindgen =0.2.129 (0.38.1: =0.2.126); registry wgpu 30.0.0 still resolves with it.
+# Rerun 0.44.0 pins wasm-bindgen =0.2.129; registry wgpu 30.0.0 still resolves with it.
 # Match Brush: thin LTO; codegen-units keeps Cargo's release default (16).
 # Lint policy copied from Rerun main (Cargo.toml `[workspace.lints.*]`, rerun-io/rerun@151102d); see also clippy.toml.
 [workspace.lints.rust]
@@ -191,3 +215,22 @@ codegen-units = 16
 # Brush sources and observer patch: recipes/brush-src/recipe.yaml.
 # Bump the recipe rev, rebase its patch, re-lock/install Pixi, then resolve Cargo offline.
 # The reference brush-cli task uses its own unpatched upstream workspace.
+
+# The egui family, egui_crates and re_mp4 at the revisions in Rerun's 0.44.0 Cargo.lock (Rerun patches them to their
+# main branches). Bump these with the rerun tag.
+[patch.crates-io]
+ecolor = { git = "https://github.com/emilk/egui.git", rev = "90431d979ab1faae2de6d9f736e9d33ca0d31956" }
+eframe = { git = "https://github.com/emilk/egui.git", rev = "90431d979ab1faae2de6d9f736e9d33ca0d31956" }
+egui = { git = "https://github.com/emilk/egui.git", rev = "90431d979ab1faae2de6d9f736e9d33ca0d31956" }
+egui-wgpu = { git = "https://github.com/emilk/egui.git", rev = "90431d979ab1faae2de6d9f736e9d33ca0d31956" }
+egui-winit = { git = "https://github.com/emilk/egui.git", rev = "90431d979ab1faae2de6d9f736e9d33ca0d31956" }
+egui_extras = { git = "https://github.com/emilk/egui.git", rev = "90431d979ab1faae2de6d9f736e9d33ca0d31956" }
+egui_glow = { git = "https://github.com/emilk/egui.git", rev = "90431d979ab1faae2de6d9f736e9d33ca0d31956" }
+egui_inspection = { git = "https://github.com/emilk/egui.git", rev = "90431d979ab1faae2de6d9f736e9d33ca0d31956" }
+egui_kittest = { git = "https://github.com/emilk/egui.git", rev = "90431d979ab1faae2de6d9f736e9d33ca0d31956" }
+egui_system_font_provider = { git = "https://github.com/emilk/egui.git", rev = "90431d979ab1faae2de6d9f736e9d33ca0d31956" }
+emath = { git = "https://github.com/emilk/egui.git", rev = "90431d979ab1faae2de6d9f736e9d33ca0d31956" }
+epaint = { git = "https://github.com/emilk/egui.git", rev = "90431d979ab1faae2de6d9f736e9d33ca0d31956" }
+egui_table = { git = "https://github.com/rerun-io/egui_crates.git", rev = "54b452e2b09e748511132d7be179c5d5b2ae566d" }
+egui_tiles = { git = "https://github.com/rerun-io/egui_crates.git", rev = "54b452e2b09e748511132d7be179c5d5b2ae566d" }
+re_mp4 = { git = "https://github.com/rerun-io/re_mp4.git", rev = "dd10225b0bcd192e0acaa4efa7d6e41682481d72" }

@@ -27,9 +27,9 @@ serde_json = { workspace = true }
 
 # Same narrow protocol/decoder dependency set as the catalog spike; no DataFusion.
 anyhow = { workspace = true, optional = true }
-arrow = { version = "=58.4.0", default-features = false, optional = true }
-re_protos = { version = "=0.38.1", default-features = false, optional = true }
-re_log_encoding = { version = "=0.38.1", default-features = false, optional = true }
-re_chunk = { version = "=0.38.1", default-features = false, optional = true }
+arrow = { version = "=58.4.1", default-features = false, optional = true }
+re_protos = { workspace = true, optional = true }
+re_log_encoding = { workspace = true, optional = true }
+re_chunk = { workspace = true, optional = true }
 tonic = { version = "=0.14.6", default-features = false, features = ["transport"], optional = true }
 tokio = { version = "1", features = ["rt"], optional = true }

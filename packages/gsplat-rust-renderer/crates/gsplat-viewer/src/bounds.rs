@@ -31,7 +31,7 @@ pub(crate) fn register(registry: &mut ViewSystemRegistrator<'_>) {
         if !radius.is_finite() || radius == 0.0 {
             radius = 1.0;
         }
-        // EyeController is private in 0.42.0; MIN_ORBIT_DISTANCE is twice its 0.01 near plane.
+        // EyeController is private in 0.44.0; MIN_ORBIT_DISTANCE is twice its 0.01 near plane.
         radius = radius.max(0.02);
         let coordinates = state.state_3d.scene_view_coordinates;
         let right = coordinates.right().map(Vec3::from).unwrap_or(Vec3::X);

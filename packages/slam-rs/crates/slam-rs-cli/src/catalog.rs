@@ -54,6 +54,10 @@ fn request<T>(body: T, dataset: &str) -> Result<tonic::Request<T>> {
     Ok(tonic::Request::new(body).with_entry_name(re_protos::EntryName::new(dataset)?))
 }
 
+#[expect(
+    deprecated,
+    reason = "Rerun 0.44 deprecates QueryDataset for FindChunks; the 0.44 server still serves it"
+)]
 async fn query(
     client: &mut Client,
     dataset: &str,
@@ -98,7 +102,7 @@ async fn fetch(
     while let Some(response) = stream.message().await? {
         for message in response.chunks {
             let message = message.to_application(())?;
-            consume(re_chunk::Chunk::from_chunk_record_batch(&message.batch)?)?;
+            consume(re_chunk::Chunk::from_arrow_msg(&message)?)?;
         }
     }
     Ok(())

@@ -1,4 +1,4 @@
-//! Rerun 0.42.0 native renderer path: public PLY conversion, per-frame builder,
+//! Rerun 0.44.0 native renderer path: public PLY conversion, per-frame builder,
 //! per-frame CPU back-to-front sort with a cached seed order, and per-frame uploads.
 //! Rerun math is glam 0.33 (`re_math`); camera poses arrive in Brush's glam 0.30.
 use super::{Adapter, Counts, archetype::decode};

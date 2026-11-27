@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, ensure};
 use re_log_encoding::Decoder;
-use re_log_types::{LogMsg, StoreKind};
+use re_log_types::StoreKind;
+use rerun::log::LogMsg;
 use rerun::{RecordingStream, log::Chunk};
 use std::{fs, path::Path};
 
