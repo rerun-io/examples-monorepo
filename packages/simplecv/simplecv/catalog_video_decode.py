@@ -1,9 +1,8 @@
 """NVDEC decode of a reader's video streams, chunk by chunk, with the next batch decoded on one thread per stream.
 
 ``decode_runs`` plans which samples each decoder reads, so that no sample is decoded twice at any selection of pictures.
-A torchcodec CUDA decoder decodes on any thread that has a current CUDA context (``video_io.bind_cuda_device``), not
-only on the one that created it; here each stream's decoder is created and used on its own thread, which binds the device
-once. Two NVDEC threads decode about twice the frames per second of one thread on the RTX 5090.
+Each stream's decoder decodes on its own thread (``ChunkedVideoDecoder`` binds the CUDA device on the thread that
+decodes). Two NVDEC threads decode about twice the frames per second of one thread on the RTX 5090.
 """
 
 import time
@@ -19,7 +18,6 @@ from numpy import ndarray
 from torch import Tensor
 
 from simplecv.catalog_video_reader import CatalogVideoReader, ChunkedVideoDecoder
-from simplecv.video_io import bind_cuda_device
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,17 +93,11 @@ class PrefetchedChunks:
         self.wait_s: float = 0.0
         streams: range = range(len(reader.streams))
         self.threads: list[ThreadPoolExecutor] = [ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"decode-{slot}") for slot in streams]
-        self.decoders: list[Future[ChunkedVideoDecoder]] = [
-            thread.submit(self._open, reader, slot) for slot, thread in zip(streams, self.threads, strict=True)
-        ]
+        self.decoders: list[ChunkedVideoDecoder] = [ChunkedVideoDecoder(reader, slot, torch.device(device)) for slot in streams]
         self.pending: list[Future[Tensor]] = self._submit(chunks[0]) if chunks else []
 
-    def _open(self, reader: CatalogVideoReader, slot: int) -> ChunkedVideoDecoder:
-        bind_cuda_device(self.device)
-        return ChunkedVideoDecoder(reader, slot, torch.device(self.device))
-
     def _decode(self, slot: int, chunk: list[int]) -> UInt8[Tensor, "n h w 3"]:
-        batch: UInt8[Tensor, "n 3 h w"] = self.decoders[slot].result().get_frames_at(chunk)
+        batch: UInt8[Tensor, "n 3 h w"] = self.decoders[slot].get_frames_at(chunk)
         # NVDEC frames are NHWC in memory (NCHW is a view), so this is a view, not a copy
         frames: UInt8[Tensor, "n h w 3"] = rearrange(batch, "n c h w -> n h w c").contiguous()
         if torch.device(self.device).type == "cuda":

@@ -515,6 +515,11 @@ class ChunkedVideoDecoder:
         count: int = len(self.reader.streams[self.stream].t_ns)
         if wanted.size and (wanted.min() < 0 or wanted.max() >= count):
             raise IndexError(f"{self.reader.streams[self.stream].entity}: sample indices must be in [0, {count})")
+        if self.device.type == "cuda":
+            # NVDEC creates and advances a decoder only on a thread whose CUDA context is current; a fresh worker has none.
+            from simplecv.video_io import bind_cuda_device
+
+            bind_cuda_device(str(self.device))
         unique: Int64[ndarray, " u"] = np.unique(wanted)
         chunk_of: Int64[ndarray, " u"] = np.searchsorted(self.reader.starts[:, self.stream], unique, side="right") - 1
         parts: list[Tensor] = []

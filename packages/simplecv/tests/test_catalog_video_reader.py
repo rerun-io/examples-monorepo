@@ -395,3 +395,32 @@ def test_a_stream_that_starts_mid_gop_decodes_from_its_first_keyframe(tmp_path: 
         assert torch.equal(decoder.get_frames_at(list(range(first_keyframe, len(samples)))), reference)
         with pytest.raises(ValueError, match="before the stream's first keyframe"):
             decoder.get_frame_at(first_keyframe - 1)
+
+
+def test_the_decoder_binds_its_cuda_device_on_the_thread_that_decodes(
+    server: rr.server.Server, index: tuple[StreamIndex, ...], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    import torchcodec.decoders
+
+    import simplecv.video_io
+
+    class _Decoder:
+        cpu_fallback = ""
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def get_frames_at(self, indices: list[int]) -> SimpleNamespace:
+            return SimpleNamespace(data=torch.zeros((len(indices), 3, 2, 2), dtype=torch.uint8))
+
+    bound: list[tuple[str, int]] = []
+    monkeypatch.setattr(torchcodec.decoders, "VideoDecoder", _Decoder)
+    monkeypatch.setattr(simplecv.video_io, "bind_cuda_device", lambda device: bound.append((device, threading.get_ident())))
+    decoder = ChunkedVideoDecoder(CatalogVideoReader(server.client().get_dataset("test"), "segment", index, "video_time", chunk_s=0.5), 0, torch.device("cuda"))
+    worker = threading.Thread(target=decoder.get_frames_at, args=([0, 1],))
+    worker.start()
+    worker.join()
+    # NVDEC needs the CUDA context current on the decoding thread, which a fresh worker thread does not have.
+    assert bound == [("cuda", worker.ident)]
