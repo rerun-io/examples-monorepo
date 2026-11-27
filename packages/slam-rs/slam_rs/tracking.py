@@ -4,12 +4,13 @@ Replay and fleet measurements share this driver so they use the same frame,
 inertial, and timestamp handling. Returned trajectories use the device clock.
 """
 
+import itertools
 import time
 import warnings
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Literal
+from typing import Literal, Protocol, runtime_checkable
 
 import numpy as np
 from jaxtyping import Float64
@@ -21,7 +22,7 @@ from slam_rs.catalog_calibration import ImuCalib
 from slam_rs.catalog_feed import DEFAULT_WINDOW_S, ROBOCAP_RIG, CameraCalib, CatalogSegment, Frameset, SegmentFeed, dataset_rig, open_segment
 from slam_rs.config import SlamConfig, config_text_sha256
 from slam_rs.reference import ReferenceSegment, RobocapSession, resolved_flow_config
-from slam_rs.trajectory import Trajectory, shift_clock
+from slam_rs.trajectory import PoseLog, Trajectory, shift_clock
 
 MAX_HELD_FRAMESETS: int = 2
 """Most framesets the hold may ever carry: one refused, plus the one whose samples unblock it."""
@@ -60,6 +61,8 @@ class Lockstep:
     """Framesets refused for want of IMU, oldest first, waiting for the samples that cover them."""
     imu_samples: int = 0
     """Inertial samples pushed so far."""
+    framesets: int = 0
+    """Framesets pushed so far."""
     retries: int = 0
     """How many framesets were refused for want of IMU, and so had to be tracked a second time."""
     dropped: list[DroppedFrameset] = field(default_factory=list)
@@ -112,6 +115,7 @@ class Lockstep:
                 np.ascontiguousarray(frameset.imu.accel_m_s2),
             )
             self.imu_samples += len(frameset.imu)
+        self.framesets += 1
         self.pending.append(frameset)
         if len(self.pending) > MAX_HELD_FRAMESETS:
             # Every batch runs one sample past its own frame time and therefore
@@ -179,6 +183,23 @@ class Lockstep:
         yield held, result
 
 
+@runtime_checkable
+class RunObserver(Protocol):
+    """What :func:`drive` tells a layer writer while the run goes on (:class:`slam_rs.vio_log.VioStage`)."""
+
+    def consumed(self, frameset: Frameset) -> None:
+        """Called after each frameset's push, whether or not it yielded a pose (an inertial bootstrap attempt may have run)."""
+        ...
+
+    def tracked(self, held: Frameset, result: _core.VioResult) -> None:
+        """Called for each pose, in trajectory order, while the estimator still holds that frame's snapshot."""
+        ...
+
+    def flushed(self) -> None:
+        """Called once after the estimator's flush, before the final trajectory: the map is current."""
+        ...
+
+
 @dataclass(slots=True, frozen=True)
 class SegmentRun:
     """What one clip through the whole pipeline produced, on the absolute device clock."""
@@ -210,7 +231,13 @@ class SegmentRun:
     """Why the global BA failed, when it was asked for and did: ``final`` is then the map after loops and PGO."""
     final: Trajectory | None = None
     """The final trajectory (:func:`final_trajectory`: the global BA, then re-anchoring), at the estimate's timestamps; None with the back end off, where it is the estimate."""
+    map_result: _core.MapResult | None = None
+    """What :meth:`slam_rs._core.Vio.finish_map` returned (the GBA's keyframes, on the estimator's clock); None with the back end off."""
 
+
+    def uncovered(self) -> int:
+        """Framesets that never got the inertial samples that cover them: a run a tool refuses to export."""
+        return sum(drop.reason == DropReason.IMU_ENDED for drop in self.dropped)
 
     def unexplained_loss(self) -> str | None:
         """Describe an incomplete run that cannot replace a published pose layer."""
@@ -279,58 +306,76 @@ def final_trajectory(vio: _core.Vio, estimate: Trajectory, *, run_gba: bool) -> 
     return FinalRun(final=reanchored(estimate, map_result), map_result=map_result, gba_failure=gba_failure)
 
 
+def track(framesets: Iterable[Frameset], lockstep: Lockstep, observer: RunObserver | None = None) -> Iterator[_core.VioResult]:
+    """Push every frameset through the lockstep, then flush it: the one loop every driver of the estimator runs.
+
+    Args:
+        framesets: The framesets, in time order, each with the samples since the previous one.
+        lockstep: The estimator and its IMU hold.
+        observer: Told of each pose, each frameset's push and the flush (:class:`RunObserver`).
+
+    Yields:
+        Each pose's result, in trajectory order.
+    """
+    for frameset in framesets:
+        for held, result in lockstep.push(frameset):
+            yield result
+            if observer is not None:
+                observer.tracked(held, result)
+        if observer is not None:
+            observer.consumed(frameset)
+    for held, result in lockstep.flush():
+        yield result
+        if observer is not None:
+            observer.tracked(held, result)
+    if observer is not None:
+        observer.flushed()
+
+
 def drive(
-    feed: SegmentFeed, lockstep: Lockstep, stop_ns: int | None = None, max_framesets: int | None = None, *, config_sha256: str, calibration: _core.Calibration, run_gba: bool
+    feed: SegmentFeed,
+    lockstep: Lockstep,
+    stop_ns: int | None = None,
+    max_framesets: int | None = None,
+    *,
+    config_sha256: str,
+    calibration: _core.Calibration,
+    run_gba: bool,
+    observer: RunObserver | None = None,
 ) -> SegmentRun:
     """Track framesets with IMU hold/retry; export estimates, the final trajectory (:func:`final_trajectory`) and truth on the device clock.
 
     ``run_gba`` runs the global BA for the final trajectory; callers that score only the raw VIO pass False and never
-    run it. A GBA that fails falls back as :func:`final_trajectory` says and is recorded in ``gba_failure``.
+    run it. A GBA that fails falls back as :func:`final_trajectory` says and is recorded in ``gba_failure``. An
+    ``observer`` sees every frameset, every pose and the flush as they happen (the full result layer); without one
+    nothing but the poses is kept.
     """
-    t_ns: list[int] = []
-    positions: list[Float64[ndarray, " 3"]] = []
-    quaternions: list[Float64[ndarray, " 4"]] = []
-    replayed: int = 0
-
-    def record(result: _core.VioResult) -> None:
-        """Keep one pose without retaining a view of its seven-value buffer."""
-        pose: Float64[ndarray, " 7"] | None = result.world_from_rig
-        assert pose is not None, f"Tracking result at {result.t_ns} has no pose"
-        t_ns.append(result.t_ns)
-        positions.append(pose[0:3].copy())
-        quaternions.append(np.roll(pose[3:7], 1))
-
     # A count is asked of the feed as a time, or it fetches a window nothing here
-    # reads. The in-loop breaks still make the cut, because the feed yields to
+    # reads. The in-loop cuts still make the count, because the feed yields to
     # the end of the window that covers `stop_ns`.
     counted_ns: int | None = feed.stop_ns_after(max_framesets)
     if counted_ns is not None:
         stop_ns = counted_ns if stop_ns is None else min(stop_ns, counted_ns)
+    framesets: Iterator[Frameset] = feed.framesets(stop_ns)
+    if stop_ns is not None:
+        framesets = itertools.takewhile(lambda frameset: frameset.t_ns <= stop_ns, framesets)
+    poses: PoseLog = PoseLog()
     started: float = time.monotonic()
-    for frameset in feed.framesets(stop_ns):
-        if max_framesets is not None and replayed >= max_framesets:
-            break
-        if stop_ns is not None and frameset.t_ns > stop_ns:
-            break
-        replayed += 1
-        for _tracked, result in lockstep.push(frameset):
-            record(result)
-    for _tracked, result in lockstep.flush():
-        record(result)
+    for result in track(itertools.islice(framesets, max_framesets), lockstep, observer):
+        pose: Float64[ndarray, " 7"] | None = result.world_from_rig
+        assert pose is not None, f"Tracking result at {result.t_ns} has no pose"
+        poses.append(result.t_ns, pose[0:3], pose[[6, 3, 4, 5]])
     wall_s: float = time.monotonic() - started
-    estimate: Trajectory = Trajectory(
-        t_ns=np.array(t_ns, dtype=np.int64),
-        position_m=np.array(positions, dtype=np.float64).reshape(-1, 3),
-        quaternion_wxyz=np.array(quaternions, dtype=np.float64).reshape(-1, 4),
-    )
+    estimate: Trajectory = poses.trajectory()
     finished: FinalRun = final_trajectory(lockstep.vio, estimate, run_gba=run_gba)
     # Both an uncovered input and a consumed pre-initialization input lack a pose.
     return SegmentRun(
         estimate=shift_clock(estimate, feed.export_offset_ns),
         final=None if finished.map_result is None else shift_clock(finished.final, feed.export_offset_ns),
+        map_result=finished.map_result,
         gba_failure=finished.gba_failure,
-        framesets=replayed,
-        lost=replayed - len(t_ns),
+        framesets=lockstep.framesets,
+        lost=lockstep.framesets - len(estimate),
         wall_s=wall_s,
         config_sha256=config_sha256,
         calibration_sha256=config_text_sha256(calibration.to_json()),

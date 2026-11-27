@@ -1,15 +1,15 @@
 """What the estimator's Rerun layer promises: the frustum geometry, and what ``log`` writes.
 
 The logging contract is checked against a recording, not against a mock: the test
-drives the whole pipeline over the synthetic rig, saves what
-:class:`slam_rs.vio_log.VioLogger` logged into the global recording (D03: the
-tools own no :class:`rerun.RecordingStream`) and reads the chunks back with
-:class:`rerun.chunk.RrdReader` — the same rows a viewer would receive. An
-entity path or a ``video_time`` value that never reached the file fails here.
+drives the whole pipeline over the synthetic rig the way the tools do
+(:func:`slam_rs.tracking.track` through a :class:`slam_rs.vio_log.VioStage`,
+then :func:`slam_rs.catalog_layer.log_layer`), saves the layer and reads the
+chunks back with :class:`rerun.chunk.RrdReader`: the same rows a viewer would
+receive. An entity path or a ``video_time`` value that never reached the file
+fails here.
 
 The reference trajectories are synthetic straight lines rather than a segment's:
-what is under test is that a reference is drawn up to the cursor and no further,
-which a straight line says as well as a real one and in milliseconds.
+an alignment and an ATE against one say as much as against a real one, in milliseconds.
 
 The rig, the pipeline and the recording reader are :mod:`conftest` fixtures,
 which pytest injects; the aliases below are declared here rather than imported
@@ -21,6 +21,7 @@ import dataclasses
 import itertools
 import re
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
@@ -48,9 +49,12 @@ from simplecv.ops.umeyama import SimilarityTransform
 from simplecv.rerun_walk_path import walk_colors
 
 from slam_rs import _core, vio_log
-from slam_rs.catalog_feed import RIG_ENTITY, TIMELINE, CameraCalib
+from slam_rs.catalog_feed import RIG_ENTITY, TIMELINE, CameraCalib, Frameset, ImuStream
+from slam_rs.catalog_layer import log_layer
+from slam_rs.columns import ColumnLog
 from slam_rs.follow_frame import follow_entity
 from slam_rs.landmark_colors import pack_rgba
+from slam_rs.tracking import Lockstep, SegmentRun, track
 from slam_rs.trajectory import AteResult, Trajectory, ate, empty_trajectory
 from slam_rs.vio_log import (
     FRUSTUM_DEPTH_M,
@@ -69,6 +73,7 @@ from slam_rs.vio_log import (
     VIO_RUN_ENTITY,
     VIO_STATS_ENTITY,
     VioLogger,
+    VioStage,
     dataset_videos,
     display_intrinsics,
     image_from_camera,
@@ -106,6 +111,28 @@ def straight_line(t_ns: Int64[ndarray, " n"]) -> Trajectory:
     )
 
 
+@dataclass(slots=True)
+class KeyframeWatch:
+    """The stage as :func:`slam_rs.tracking.track` sees it, noting the window's newest keyframe at each pose."""
+
+    stage: VioStage
+    """The stage under test."""
+    newest: list[int] = field(default_factory=list)
+    """The window's newest keyframe at each pose (-1 with none)."""
+
+    def consumed(self, frameset: Frameset) -> None:
+        self.stage.consumed(frameset)
+
+    def tracked(self, held: Frameset, result: _core.VioResult) -> None:
+        self.stage.tracked(held, result)
+        snapshot: _core.VioSnapshot | None = self.stage.lockstep.vio.snapshot()
+        assert snapshot is not None
+        self.newest.append(int(snapshot.kf_ids[-1]) if len(snapshot.kf_ids) else -1)
+
+    def flushed(self) -> None:
+        self.stage.flushed()
+
+
 def drive(
     vio: _core.Vio,
     cameras: tuple[CameraCalib, ...],
@@ -114,13 +141,16 @@ def drive(
     output: Path,
     read_rows: RowsReader,
     map_every_ns: tuple[int, int] = (MAP_KEYFRAMES_EVERY_NS, MAP_POINTS_EVERY_NS),
-    finish: Callable[[VioLogger], None] | None = None,
+    final: Callable[[Trajectory], Trajectory] | None = None,
     colors: list[np.ndarray] | None = None,
     animate_base_rig: bool = False,
     video_entities: tuple[str, ...] = (),
-    loops_as_found: bool = True,
+    camera_positions: tuple[int, ...] = (),
+    base_downscale: int = 1,
 ) -> Logged:
-    """Log ``FRAMESETS`` framesets of the synthetic rig and read the recording back.
+    """Run ``FRAMESETS`` framesets of the synthetic rig through the stage as :func:`slam_rs.catalog_layer.track_layer`
+    does (:func:`slam_rs.tracking.track`, :func:`slam_rs.catalog_layer.log_layer`, :meth:`VioStage.finish`), and read
+    the recording back.
 
     Args:
         vio: The pipeline the framesets go through.
@@ -130,62 +160,53 @@ def drive(
         output: Where the ``.rrd`` is written.
         read_rows: Reads the recording back, from :mod:`conftest`.
         map_every_ns: The logger's map-keyframes and map-points cadences.
-        finish: Called with the logger at the last cursor, after the complete paths (what a replay ends with).
+        final: The final run from the raw estimate (what the back end's re-anchoring would give); None: the raw run.
         colors: Each frameset's RGB frames (``Frameset.colors``); None logs without them.
-        animate_base_rig: The logger's :attr:`VioLogger.animate_base_rig`.
-        video_entities: The logger's :attr:`VioLogger.video_entities`.
-        loops_as_found: The logger's :attr:`VioLogger.loops_as_found`.
+        animate_base_rig: :func:`slam_rs.catalog_layer.log_layer`'s ``animate_base_rig``.
+        video_entities: The lens videos the logger's window frusta show; the layer's rig shows them, or the dataset's own.
+        camera_positions: The logger's :attr:`VioLogger.camera_positions`.
+        base_downscale: The logger's :attr:`VioLogger.base_downscale`.
 
     Returns:
         The recording's rows, the framesets that tracked, and the logger.
     """
-    rr.init("slam-rs-vio-log-test", recording_id=f"vio-log-{output.parent.name}")
-    rr.save(output)
     frame_t_ns: Int64[ndarray, " n_frames"] = np.arange(0, FRAMESETS * FRAME_PERIOD_NS, FRAME_PERIOD_NS, dtype=np.int64)
-    logger: VioLogger = VioLogger(
-        cameras=cameras,
-        ground_truth=references,
-        frame_t_ns=frame_t_ns,
-        tracked_resolution=tuple(vio.tracked_resolution),
-        cam_time_offset_ns=0,
-        animate_base_rig=animate_base_rig,
-        video_entities=video_entities,
-        loops_as_found=loops_as_found,
-        map_keyframes_every_ns=map_every_ns[0],
-        map_points_every_ns=map_every_ns[1],
-    )
-    tracked: list[int] = []
-    newest_keyframes: list[int] = []
-    for step in range(FRAMESETS):
-        t_ns: int = step * FRAME_PERIOD_NS
+    framesets: list[Frameset] = []
+    for step, t_ns in enumerate(frame_t_ns.tolist()):
         samples: Int64[ndarray, " n_samples"] = np.arange(t_ns, t_ns + FRAME_PERIOD_NS, IMU_PERIOD_NS, dtype=np.int64)
-        vio.push_imu_batch(samples, *gravity_batch(samples))
-        rr.set_time(TIMELINE, duration=np.timedelta64(t_ns, "ns"))
+        gyro, accel = gravity_batch(samples)
         # Camera 1 is the scene shifted one pixel along the baseline, so the
         # stereo pass matches: a shift across it matches nothing and camera 1
         # would carry no keypoint at all.
-        result: _core.VioResult = vio.track(t_ns, [texture(step, 0), texture(step - 2, 0)])
-        if result.status != _core.VioStatus.Tracking:
-            continue
-        snapshot: _core.VioSnapshot | None = vio.snapshot()
-        frame: _core.FlowFrame | None = vio.flow_frame()
-        assert snapshot is not None
-        assert frame is not None
-        logger.log(result, snapshot, frame, elapsed_ms=1.5, map_delta=logger.read_map(vio, snapshot), colors=colors)
-        tracked.append(t_ns)
-        newest_keyframes.append(int(snapshot.kf_ids[-1]) if len(snapshot.kf_ids) else -1)
-    # What `VioStage.flush` does: flush (which makes the map current), then draw the final map.
-    vio.flush()
-    final_map: _core.MapSnapshot | None = vio.map_snapshot()
-    if final_map is not None and tracked:
-        logger.log_final_map(final_map, tracked[-1])
-    # What a replay ends with, and the other half of the segment form: the rows
-    # above are one segment each, these are the whole paths, at the last cursor.
-    logger.log_complete_paths()
-    if finish is not None:
-        finish(logger)
-    rr.disconnect()
-    return Logged(rows=read_rows(output), tracked=tracked, logger=logger, recording=output, newest_keyframes=newest_keyframes)
+        framesets.append(Frameset(t_ns=t_ns, images=[texture(step, 0), texture(step - 2, 0)], imu=ImuStream(t_ns=samples, gyro_rad_s=gyro, accel_m_s2=accel),
+                                  ground_truth=None, colors=colors))
+    with rr.RecordingStream("slam-rs-vio-log-test", recording_id=f"vio-log-{output.parent.name}") as recording:
+        recording.save(output)
+        logger: VioLogger = VioLogger(
+            cameras=cameras,
+            ground_truth=references,
+            tracked_resolution=tuple(vio.tracked_resolution),
+            cam_time_offset_ns=0,
+            video_entities=video_entities,
+            map_keyframes_every_ns=map_every_ns[0],
+            map_points_every_ns=map_every_ns[1],
+            camera_positions=camera_positions,
+            base_downscale=base_downscale,
+            columns=ColumnLog(recording=recording),
+        )
+        watch: KeyframeWatch = KeyframeWatch(VioStage(Lockstep(vio), logger))
+        tracked: list[int] = [result.t_ns for result in track(framesets, watch.stage.lockstep, watch)]
+        estimate: Trajectory = logger.estimated()
+        final_run: Trajectory = estimate if final is None else final(estimate)
+        run: SegmentRun = SegmentRun(estimate=estimate, final=None if final is None else final_run, framesets=len(estimate), lost=0, wall_s=0.0,
+                                     ground_truth=empty_trajectory(), median_tracker_ms=0.0, config_sha256="test", calibration_sha256="test")
+        # As track_layer: the layer's rig copy always shows the base lens videos.
+        videos: tuple[str, ...] = video_entities or dataset_videos(range(len(cameras)))
+        log_layer(recording, run, clock_offset_ns=0, profile="fast", backend="cpu", animate_base_rig=animate_base_rig,
+                  lenses=tuple(zip(cameras, videos, strict=True)),
+                  walk_span_ns=(int(frame_t_ns[0]), int(frame_t_ns[-1])), strict=False)
+        watch.stage.finish(final_run, None)
+    return Logged(rows=read_rows(output), tracked=tracked, logger=logger, recording=output, newest_keyframes=watch.newest)
 
 
 @pytest.fixture
@@ -236,7 +257,7 @@ def test_every_rig_camera_pins_its_frustum_to_one_size(camera: CameraFactory, tm
     output: Path = tmp_path / "rig.rrd"
     rr.init("slam-rs-vio-log-test", recording_id=f"rig-{tmp_path.name}")
     rr.save(output)
-    log_rig((camera(0, 0.0), camera(1, 0.1)), f"{VIO_RUN_ENTITY}/rig", display=True)
+    log_rig((camera(0, 0.0), camera(1, 0.1)), f"{VIO_RUN_ENTITY}/rig")
     log_rig((camera(0, 0.0), camera(1, 0.1)), RIG_ENTITY)
     rr.disconnect()
     # Float32 in the file, so approximately 0.1 is the most the component can say.
@@ -271,16 +292,14 @@ def test_the_dataset_videos_are_the_fed_cameras_own_streams() -> None:
 def test_the_live_rig_shows_each_lens_frame_in_its_frustum(
     pipeline: PipelineFactory, texture: TextureFactory, camera: CameraFactory, tmp_path: Path, read_rows: RowsReader
 ) -> None:
-    """Told where the dataset's videos are, the run's rig references the current frame of each lens under its
-    ``pinhole`` (camera, pinhole, video: the dataset's own layout), a row a frameset. Told nothing, it logs none."""
+    """The run's rig references the current frame of each lens under its ``pinhole`` (camera, pinhole, video: the
+    dataset's own layout), a row a pose."""
     rig: tuple[CameraCalib, ...] = (camera(0, 0.0), camera(1, 0.1))
     videos: tuple[str, ...] = (f"{RIG_ENTITY}/cam_00/pinhole/video", f"{RIG_ENTITY}/cam_01/pinhole/video")
     shown: Logged = drive(pipeline(2), rig, empty_trajectory(), texture, tmp_path / "shown.rrd", read_rows, video_entities=videos)
     for index in range(2):
         entity: str = f"{VIO_RUN_ENTITY}/rig/cam_{index:02d}/pinhole/video"
         assert video_references(shown.rows, entity) == [(t_ns, t_ns) for t_ns in shown.tracked], entity
-    plain: Logged = drive(pipeline(2), rig, empty_trajectory(), texture, tmp_path / "plain.rrd", read_rows)
-    assert not any(entity.endswith("/video") for entity in plain.rows)
 
 
 def test_a_window_keyframe_shows_both_lenses_at_its_own_time_and_keeps_its_slot(
@@ -345,31 +364,15 @@ def test_the_estimated_path_gains_one_segment_a_frameset(logged: Logged) -> None
     assert len(logged.logger.estimated()) == len(logged.tracked)
 
 
-def test_a_reference_segment_ends_at_the_cursor_and_no_further(logged: Logged) -> None:
-    """A reference known in advance still stops where the estimate has got to."""
-    for entity in (f"{GT_ENTITY}/trail",):
-        rows: list[Row] = logged.rows[entity]
-        # One reference pose every frame interval, from zero, so every cursor
-        # has a row (the first a zero-length segment).
-        assert [t_ns for t_ns, _ in rows] == logged.tracked, entity
-        for t_ns, values in rows:
-            drawn: list = values["LineStrips3D:strips"][0]
-            assert len(drawn) == 2, entity
-            # The reference runs along +x at 1 m/s from zero, so the pose the
-            # segment ends on is the cursor's own time in seconds — never the
-            # one after it.
-            assert drawn[-1][0] == pytest.approx(t_ns / 1e9), entity
-
-
-def test_the_whole_paths_are_logged_once_at_the_last_cursor_and_none_is_static(logged: Logged) -> None:
-    """One ``trajectory`` row per path at the end of the walk, so no whole path stands over a cursor halfway through
-    it; the raw run's start dot and ring are static, its end dot comes with the last cursor."""
-    assert sorted(static_path_lengths(logged.recording)) == [f"{VIO_RUN_ENTITY}/endpoints/start_ring"]
-    vio_full: list[Row] = logged.rows[f"{VIO_RUN_ENTITY}/trajectory"]
-    assert [row.t_ns for row in vio_full] == [logged.tracked[-1]]
-    assert len(vio_full[0].values["LineStrips3D:strips"]) == len(logged.tracked) - 1, "a segment a pose pair, each in its gradient colour"
-    gt_full: list[Row] = logged.rows[f"{GT_ENTITY}/trajectory"]
-    assert [row.t_ns for row in gt_full] == [logged.tracked[-1]] and len(gt_full[0].values["LineStrips3D:strips"]) == FRAMESETS - 1
+def test_each_run_s_whole_path_is_static_and_the_ground_truth_is_left_to_its_layer(logged: Logged) -> None:
+    """Each run's ``trajectory`` is its whole path, static, as every catalog layout draws it at any cursor
+    (:func:`slam_rs.catalog_layer.log_layer`); the start dots and rings are static, the end dots come with the last
+    cursor. Nothing goes under ``/world/runs/gt``: the dataset's gt layer draws its own path."""
+    run_paths: list[str] = [f"{run}/{part}" for run in (RUN_ENTITY, VIO_RUN_ENTITY) for part in ("trajectory", "endpoints/start_ring")]
+    assert sorted(static_path_lengths(logged.recording)) == sorted(run_paths)
+    whole: Float64[ndarray, "s n 3"] | None = static_strips(logged.recording, f"{VIO_RUN_ENTITY}/trajectory")
+    assert whole is not None and len(whole) == len(logged.tracked) - 1, "a segment a pose pair"
+    assert not [entity for entity in logged.rows if entity.startswith(GT_ENTITY)]
     assert [row.t_ns for row in logged.rows[f"{VIO_RUN_ENTITY}/endpoints/end"]] == [logged.tracked[-1]]
 
 
@@ -381,22 +384,21 @@ def test_the_raw_run_s_path_runs_green_to_red_along_the_walk(logged: Logged) -> 
     assert colors == [(int(r) << 24) | (int(g) << 16) | (int(b) << 8) | 255 for r, g, b in expected]
 
 
-def test_a_replay_draws_the_loops_once_at_the_end_and_a_live_run_at_every_map_read(
+def test_the_loops_are_drawn_once_with_the_final_map(
     rig: RigFactory, texture: TextureFactory, camera: CameraFactory, tmp_path: Path, read_rows: RowsReader
 ) -> None:
-    """``loops_as_found`` off (a replay): the loop set only with the final map; on (live): with every keyframes draw.
-    No pose-graph correction moves a keyframe on this run, so no correction is drawn at all."""
+    """The map's keyframes are drawn at every read, its loops once, the final set with the final map: drawn at every
+    read, each loop would stand from its detection on. No pose-graph correction moves a keyframe on this run, so no
+    correction is drawn at all."""
     from slam_rs.map_loops import LOOPS_ENTITY, PGO_CORRECTIONS_ENTITY
 
     t_ns: Int64[ndarray, " n"] = np.arange(0, FRAMESETS * FRAME_PERIOD_NS, FRAME_PERIOD_NS, dtype=np.int64)
     rigs: tuple[CameraCalib, ...] = (camera(0, 0.0), camera(1, 0.1))
-    for as_found in (False, True):
-        vio: _core.Vio = _core.Vio(rig(2), _core.VioConfig().with_backend("offline"), backend="cpu")
-        logged: Logged = drive(vio, rigs, straight_line(t_ns), texture, tmp_path / f"loops-{as_found}.rrd", read_rows, map_every_ns=(0, 0), loops_as_found=as_found)
-        draws: list[int] = [row.t_ns for row in logged.rows[MAP_KEYFRAMES_ENTITY]]
-        assert len(draws) >= 2
-        assert [row.t_ns for row in logged.rows[LOOPS_ENTITY]] == (draws if as_found else [logged.tracked[-1]])
-        assert PGO_CORRECTIONS_ENTITY not in logged.rows
+    vio: _core.Vio = _core.Vio(rig(2), _core.VioConfig().with_backend("offline"), backend="cpu")
+    logged: Logged = drive(vio, rigs, straight_line(t_ns), texture, tmp_path / "loops.rrd", read_rows, map_every_ns=(0, 0))
+    assert len([row.t_ns for row in logged.rows[MAP_KEYFRAMES_ENTITY]]) >= 2
+    assert [row.t_ns for row in logged.rows[LOOPS_ENTITY]] == [logged.tracked[-1]]
+    assert PGO_CORRECTIONS_ENTITY not in logged.rows
 
 
 def test_the_plotted_ate_is_the_estimate_driven_one(
@@ -455,6 +457,25 @@ def test_the_keypoints_land_on_the_camera_images(logged: Logged) -> None:
         assert all(len(values["Points2D:positions"]) > 0 for _, values in logged.rows[entity])
 
 
+def test_a_fed_subset_draws_its_keypoints_on_its_own_base_cameras_in_their_pixels(
+    pipeline: PipelineFactory, texture: TextureFactory, camera: CameraFactory, tmp_path: Path, read_rows: RowsReader
+) -> None:
+    """A rig that feeds rig positions 0 and 4 of its cameras, decoded three times smaller (RoboCap: positions 0, 1, 4, 5
+    at downscale 3), draws each camera's keypoints on that base camera and in the base camera's own pixels: feed index
+    1 must not land on the base's camera 1."""
+    rig: tuple[CameraCalib, ...] = (camera(0, 0.0), camera(1, 0.1))
+    fed: Logged = drive(pipeline(2), rig, empty_trajectory(), texture, tmp_path / "fed.rrd", read_rows)
+    subset: Logged = drive(pipeline(2), rig, empty_trajectory(), texture, tmp_path / "subset.rrd", read_rows, camera_positions=(0, 4), base_downscale=3)
+    keypoints: list[str] = sorted(entity for entity in subset.rows if entity.endswith("/keypoints"))
+    assert keypoints == ["/world/rig_00/cam_00/pinhole/keypoints", "/world/rig_00/cam_04/pinhole/keypoints"]
+    for index, position in ((0, 0), (1, 4)):
+        tracked: list[Row] = fed.rows[f"/world/rig_00/cam_{index:02d}/pinhole/keypoints"]
+        drawn: list[Row] = subset.rows[f"/world/rig_00/cam_{position:02d}/pinhole/keypoints"]
+        assert [row.t_ns for row in drawn] == [row.t_ns for row in tracked]
+        for base, own in zip(drawn, tracked, strict=True):
+            np.testing.assert_allclose(base.values["Points2D:positions"], 3.0 * np.asarray(own.values["Points2D:positions"]), rtol=1e-6)
+
+
 def test_the_rig_rides_the_estimate_only_when_asked(
     pipeline: PipelineFactory, texture: TextureFactory, camera: CameraFactory, tmp_path: Path, read_rows: RowsReader
 ) -> None:
@@ -471,17 +492,13 @@ def test_the_rig_rides_the_estimate_only_when_asked(
 def test_each_run_gets_its_own_level_follow_frame_and_path(
     pipeline: PipelineFactory, texture: TextureFactory, camera: CameraFactory, tmp_path: Path, read_rows: RowsReader
 ) -> None:
-    """The raw VIO run's follow frame rides its poses as they come (a turn about z only); once the final run is known,
-    the final run gets its own follow frame and path segments, at the same times. A follow view of the final run
-    must not centre on the causal VIO: on clip 007 they part by 16 m at 65 s. Run-scoped, so with or without the base rig."""
+    """The raw VIO run's follow frame rides its poses (a turn about z only); the final run gets its own follow frame and
+    path segments, at the same times. A follow view of the final run must not centre on the causal VIO: on clip 007
+    they part by 16 m at 65 s. Run-scoped, so with or without the base rig."""
     rig: tuple[CameraCalib, ...] = (camera(0, 0.0), camera(1, 0.1))
     shift: Float64[ndarray, " 3"] = np.array([5.0, 0.0, 0.0])
-
-    def finish(logger: VioLogger) -> None:
-        estimate: Trajectory = logger.estimated()
-        logger.log_final_run(dataclasses.replace(estimate, position_m=estimate.position_m + shift))
-
-    logged: Logged = drive(pipeline(2), rig, empty_trajectory(), texture, tmp_path / "runs.rrd", read_rows, finish=finish)
+    logged: Logged = drive(pipeline(2), rig, empty_trajectory(), texture, tmp_path / "runs.rrd", read_rows,
+                           final=lambda estimate: dataclasses.replace(estimate, position_m=estimate.position_m + shift))
     vio_follow: str = follow_entity(VIO_RUN_ENTITY)
     final_follow: str = follow_entity(RUN_ENTITY)
     assert vio_follow == "/world/runs/slam_rs_vio/follow" and final_follow == "/world/runs/slam_rs/follow"
@@ -497,8 +514,8 @@ def test_each_run_gets_its_own_level_follow_frame_and_path(
     assert [row.t_ns for row in segments] == logged.tracked, "the final run's path a segment a pose, a trail for a view's time range"
     for row, vio_row in zip(segments, logged.rows[f"{VIO_RUN_ENTITY}/trail"], strict=True):
         np.testing.assert_allclose(np.asarray(row.values["LineStrips3D:strips"][0]) - np.asarray(vio_row.values["LineStrips3D:strips"][0]), [shift, shift], atol=1e-5)
-    assert [row.t_ns for row in logged.rows[f"{RUN_ENTITY}/trajectory"]] == [logged.tracked[-1]]
-    assert static_strips(logged.recording, f"{RUN_ENTITY}/path") is None, "no whole path stands over the walk's cursors"
+    whole: Float64[ndarray, "s n 3"] | None = static_strips(logged.recording, f"{RUN_ENTITY}/trajectory")
+    assert whole is not None and len(whole) == len(logged.tracked) - 1, "the final run's whole path, a segment a pose pair"
 
 
 def static_strips(recording: Path, entity: str) -> Float64[ndarray, "s n 3"] | None:
@@ -527,11 +544,10 @@ def test_landmarks_take_the_colour_of_the_image_under_their_keypoint(
 
 
 def test_a_run_without_references_still_logs_everything_else(pipeline: PipelineFactory, camera: CameraFactory) -> None:
-    """A segment with no ground truth draws neither line, and no ATE."""
+    """A segment with no ground truth builds a logger with no ATE and no alignment."""
     logger: VioLogger = VioLogger(
         cameras=(camera(0, 0.0), camera(1, 0.1)),
         ground_truth=empty_trajectory(),
-        frame_t_ns=np.arange(0, FRAMESETS * FRAME_PERIOD_NS, FRAME_PERIOD_NS, dtype=np.int64),
         tracked_resolution=((FRAME, FRAME), (FRAME, FRAME)),
         cam_time_offset_ns=0,
     )
@@ -625,7 +641,7 @@ def views_of(node: rrb.Container | rrb.View) -> list[rrb.View]:
 
 def test_the_blueprint_covers_the_world_the_cameras_and_the_counters(camera: CameraFactory) -> None:
     """One 3D view, one 2D view per camera, one time-series view per unit, panels collapsed."""
-    blueprint: rrb.Blueprint = vio_blueprint((camera(0, 0.0), camera(1, 0.1)))
+    blueprint: rrb.Blueprint = vio_blueprint((0, 1))
     views: list[rrb.View] = views_of(blueprint.root_container)
     assert [str(view.origin) for view in views] == [
         "/world",
@@ -654,7 +670,7 @@ def test_only_the_three_paths_reach_back_to_the_start_of_the_recording(camera: C
     three entities, every frameset's window frusta and landmarks would be drawn
     at once as well.
     """
-    world: rrb.View = views_of(vio_blueprint((camera(0, 0.0), camera(1, 0.1))).root_container)[0]
+    world: rrb.View = views_of(vio_blueprint((0, 1)).root_container)[0]
     assert sorted(str(entity) for entity in world.visualizer_overrides) == [
         f"{GT_ENTITY}/trail",
         f"{RUN_ENTITY}/trail",
@@ -684,7 +700,7 @@ def test_every_logged_counter_sits_in_exactly_one_time_series_view(logged: Logge
     """
     counters: set[str] = {entity for entity in logged.rows if entity.startswith(VIO_STATS_ENTITY)}
     counters |= {f"{VIO_STATS_ENTITY}/ate_cm/gt"}
-    blueprint: rrb.Blueprint = vio_blueprint((camera(0, 0.0), camera(1, 0.1)))
+    blueprint: rrb.Blueprint = vio_blueprint((0, 1))
     plotted: list[str] = []
     for view in views_of(blueprint.root_container):
         if str(view.origin) != VIO_STATS_ENTITY:
@@ -832,25 +848,21 @@ def test_the_live_run_is_the_raw_vio_and_the_final_run_has_its_own_alignment(
     truth: Trajectory = straight_line(t_ns)
     finals: list[Trajectory] = []
 
-    def finish(logger: VioLogger) -> None:
-        estimate: Trajectory = logger.estimated()
+    def bent(estimate: Trajectory) -> Trajectory:
         # Half a metre off the raw run and bent: its alignment cannot be the raw run's.
         bend: Float64[ndarray, "n 3"] = np.column_stack([np.zeros(len(estimate)), 0.5 + 0.1 * np.arange(len(estimate)) ** 2, np.zeros(len(estimate))])
-        final: Trajectory = Trajectory(t_ns=estimate.t_ns, position_m=estimate.position_m + bend, quaternion_wxyz=estimate.quaternion_wxyz)
-        logger.log_final_run(final)
-        finals.append(final)
+        finals.append(Trajectory(t_ns=estimate.t_ns, position_m=estimate.position_m + bend, quaternion_wxyz=estimate.quaternion_wxyz))
+        return finals[-1]
 
-    logged: Logged = drive(pipeline(2), (camera(0, 0.0), camera(1, 0.1)), truth, texture, tmp_path / "final.rrd", read_rows, finish=finish)
+    logged: Logged = drive(pipeline(2), (camera(0, 0.0), camera(1, 0.1)), truth, texture, tmp_path / "final.rrd", read_rows, final=bent)
     for part in ("rig", "window/00", "landmarks", "trail"):
         assert f"{VIO_RUN_ENTITY}/{part}" in logged.rows, part
-    assert f"{RUN_ENTITY}/rig" not in logged.rows
-    assert sorted(static_path_lengths(logged.recording)) == [f"{VIO_RUN_ENTITY}/endpoints/start_ring"]
 
-    # The final run: its whole path once, at the last cursor, under its own alignment.
+    # The final run: its rig on the final poses, its whole path, under its own alignment from the last cursor on.
     (final,) = finals
-    drawn: list[Row] = logged.rows[f"{RUN_ENTITY}/trajectory"]
-    assert [row.t_ns for row in drawn] == [logged.tracked[-1]]
-    strips: Float64[ndarray, "s 2 3"] = np.asarray(drawn[0].values["LineStrips3D:strips"], dtype=np.float64)
+    np.testing.assert_allclose([row.values["Transform3D:translation"][0] for row in logged.rows[f"{RUN_ENTITY}/rig"]], final.position_m, atol=1e-9)
+    strips: Float64[ndarray, "s 2 3"] | None = static_strips(logged.recording, f"{RUN_ENTITY}/trajectory")
+    assert strips is not None
     np.testing.assert_allclose(np.concatenate([strips[:, 0], strips[-1:, 1]]), final.position_m, atol=1e-6)
     placed: list[Row] = [row for row in logged.rows[RUN_ENTITY] if "Transform3D:translation" in row.values]
     assert [row.t_ns for row in placed] == [logged.tracked[-1]]
@@ -877,4 +889,12 @@ def test_until_the_final_run_the_map_sits_on_the_raw_runs_alignment(
         return [(row.t_ns, row.values["Transform3D:translation"][0]) for row in logged.rows[entity] if "Transform3D:translation" in row.values]
 
     assert placements(VIO_RUN_ENTITY)
-    assert placements(RUN_ENTITY) == placements(VIO_RUN_ENTITY)
+    # Plus one: the final run's own alignment at the last cursor.
+    assert placements(RUN_ENTITY)[:-1] == placements(VIO_RUN_ENTITY)
+    assert placements(RUN_ENTITY)[-1][0] == logged.tracked[-1]
+
+
+def test_the_camera_views_are_the_fed_cameras_own_base_cameras() -> None:
+    """A rig fed at positions 0, 1, 4 and 5 (RoboCap) gets one 2D view per fed base camera, where its keypoints are."""
+    origins: list[str] = [str(view.origin) for view in views_of(vio_blueprint((0, 1, 4, 5)).root_container) if isinstance(view, rrb.Spatial2DView)]
+    assert origins == [f"/world/rig_00/cam_{position:02d}/pinhole" for position in (0, 1, 4, 5)]

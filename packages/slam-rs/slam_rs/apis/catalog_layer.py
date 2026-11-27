@@ -5,6 +5,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import Literal
 
+from dataforge.writing import atomic_recording
 from rerun.catalog import DatasetEntry, OnDuplicateSegmentLayer
 
 from slam_rs import BackendRequest, _core
@@ -20,9 +21,9 @@ from slam_rs.catalog_feed import (
     resolve_catalog_segments,
     select_decode_device,
 )
-from slam_rs.catalog_layer import POSE_SOURCE, write_layer
-from slam_rs.config import SlamConfig, config_text_sha256, load_slam_config
-from slam_rs.tracking import Lockstep, SegmentRun, drive
+from slam_rs.catalog_layer import POSE_SOURCE, LayerDetail, LayerRun, track_layer
+from slam_rs.config import SlamConfig, load_slam_config
+from slam_rs.tracking import SegmentRun
 
 
 @dataclass(slots=True)
@@ -41,6 +42,9 @@ class Config:
     """Frontend: auto runs the GPU when this host can, otherwise the CPU with one warning; gpu fails instead; cpu forces it."""
     decode_device: DecodeRequest = "auto"
     """CUDA/NVDEC when available; CPU retains the reference PyAV grayscale conversion."""
+    detail: LayerDetail = "full"
+    """``full``: the layer also holds what the run saw frameset by frameset (keypoints, window, landmarks, map, counters),
+    from the same single run; ``poses``: both runs' paths alone."""
 
 
 def main(config: Config) -> None:
@@ -72,13 +76,16 @@ def main(config: Config) -> None:
         backend: str = str(_core.gpu_backend) if vio.gpu else "cpu"
         print(f"{config.segment}: profile={config.profile}, backend={backend}, decode={decode_device}, load={load_s:.1f}s, "
               f"{len(feed.frame_t_ns)} framesets, cameras={feed.camera_positions}", flush=True)
-        run: SegmentRun = drive(feed, Lockstep(vio), config_sha256=config_text_sha256(config_text), calibration=calibration, run_gba=True)
+        # Every row goes into the temporary file; a refused run leaves the registered layer as it was.
+        with atomic_recording(output, recording_id=config.segment, send_properties=False) as rec:
+            layer: LayerRun = track_layer(rec, feed, vio, config_text=config_text, calibration=calibration, run_gba=True,
+                                          detail=config.detail, profile=config.profile,
+                                          animate_base_rig=not segment.has_ground_truth, strict=True)
+        run: SegmentRun = layer.run
         if run.gba_failure is not None:
             print(f"global BA: failed: {run.gba_failure}; the final run is re-anchored on the map after loops and PGO", flush=True)
         for drop in run.dropped:
             print(f"Dropped frameset {drop.t_ns}: {drop.reason}", flush=True)
-        write_layer(output, config.segment, run, clock_offset_ns=feed.video_time_offset_ns,
-                    profile=config.profile, backend=backend, decoder=decode_device, animate_base_rig=not segment.has_ground_truth)
     dataset.register([output.as_uri()], layer_name=POSE_SOURCE, on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
     print(f"Registered {len(run.estimate)} poses / {run.framesets} framesets, {len(run.dropped)} explained drops; "
           f"{run.wall_s:.1f} s, {run.framesets / run.wall_s:.1f} framesets/s; {output}")

@@ -15,6 +15,7 @@ from fixture_types import Rows, RowsReader
 from rerun.catalog import DatasetEntry
 from simplecv.rerun_walk_path import TRAIL, TRAJECTORY
 
+from slam_rs import catalog_layer
 from slam_rs.apis import catalog_layer as catalog_layer_api
 from slam_rs.catalog_feed import CatalogSegment
 from slam_rs.catalog_layer import write_layer
@@ -144,10 +145,15 @@ def test_the_shipped_tool_moves_the_base_rig_only_without_ground_truth(
     monkeypatch.setattr(catalog_layer_api, "select_decode_device", lambda _request: "cpu")
     monkeypatch.setattr(catalog_layer_api, "open_segment", lambda *_args, **_kwargs: nullcontext(feed))
     monkeypatch.setattr(catalog_layer_api, "_core", SimpleNamespace(Calibration=_FakeCalibration, VioConfig=_FakeVioConfig, Vio=_FakeVio))
-    monkeypatch.setattr(catalog_layer_api, "Lockstep", lambda vio: vio)
-    monkeypatch.setattr(catalog_layer_api, "drive", lambda *_args, **_kwargs: run)
 
-    catalog_layer_api.main(catalog_layer_api.Config(segment=segment_id, output_dir=tmp_path, catalog="rerun+http://catalog"))
+    def tracked(rec: object, _feed: object, _vio: object, *, animate_base_rig: bool, **_kwargs: object) -> catalog_layer.LayerRun:
+        """The driver's stand-in: the layer's poses as ``track_layer`` writes them, with the tool's base-rig decision."""
+        catalog_layer.log_layer(rec, run, clock_offset_ns=0, profile="fast", backend="cpu", animate_base_rig=animate_base_rig)  # type: ignore[arg-type]
+        return catalog_layer.LayerRun(run=run, stage=None)
+
+    monkeypatch.setattr(catalog_layer_api, "track_layer", tracked)
+
+    catalog_layer_api.main(catalog_layer_api.Config(segment=segment_id, output_dir=tmp_path, catalog="rerun+http://catalog", detail="poses"))
 
     output: Path = tmp_path / f"{segment_id}.rrd"
     entities: set[str] = {chunk.entity_path for chunk in rrc.RrdReader(output).stream().collect().stream()}

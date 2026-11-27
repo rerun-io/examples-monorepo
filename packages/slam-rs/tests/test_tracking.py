@@ -28,7 +28,7 @@ from numpy import ndarray
 from slam_rs import _core, tracking
 from slam_rs.catalog_feed import Frameset, ImuStream
 from slam_rs.config import SlamConfig
-from slam_rs.tracking import MAX_HELD_FRAMESETS, Lockstep, robocap_estimator_files
+from slam_rs.tracking import MAX_HELD_FRAMESETS, Lockstep, robocap_estimator_files, track
 from slam_rs.trajectory import empty_trajectory
 from slam_rs.vio_log import VioLogger, VioStage
 
@@ -139,9 +139,9 @@ def test_a_run_that_never_tracked_still_reports_what_it_held(
 ) -> None:
     """The run that most needs the diagnostic is the one that used to suppress it.
 
-    A replay whose framesets are never covered has no timings, so a summary
+    A run whose framesets are never covered has no timings, so a summary
     guarded on them printed nothing at all — and the held framesets are what the
-    reader needed to see.
+    reader needed to see. The tools refuse such a run (:meth:`SegmentRun.uncovered`).
     """
     rr.init("slam-rs-tracking-test", recording_id="never-tracked")
     rr.save(tmp_path / "never-tracked.rrd")
@@ -151,33 +151,28 @@ def test_a_run_that_never_tracked_still_reports_what_it_held(
         logger=VioLogger(
             cameras=(camera(0, 0.0), camera(1, 0.1)),
             ground_truth=empty_trajectory(),
-            frame_t_ns=np.zeros(1, dtype=np.int64),
             tracked_resolution=tuple(vio.tracked_resolution),
             cam_time_offset_ns=0,
         ),
     )
-    stage.run(frameset(0, texture, np.zeros(0, dtype=np.int64)))
-    stage.flush()
+    assert list(track([frameset(0, texture, np.zeros(0, dtype=np.int64))], stage.lockstep, stage)) == []
     rr.disconnect()
 
-    assert not stage.elapsed_ms
+    assert not stage.lockstep.elapsed_ms
     assert "nothing tracked" in stage.summary()
     assert "NEVER COVERED BY THE IMU at [0]" in stage.summary()
-    with pytest.raises(SystemExit, match="never got the inertial samples"):
-        stage.refuse_lost_framesets()
 
 
 def test_blanking_zeroes_only_the_named_cameras(texture: TextureFactory) -> None:
-    """``--blank-cameras`` wraps the frameset iterator: the named cameras get black images, the others are untouched."""
-    from slam_rs.apis.replay import blank
+    """``--blank-cameras`` is the feed's: the named cameras get black images, the others are untouched."""
+    from slam_rs.catalog_feed import blanked
 
     samples: Int64[ndarray, " n_samples"] = np.array([0, IMU_PERIOD_NS], dtype=np.int64)
-    originals: list[Frameset] = [frameset(step, texture, samples) for step in range(2)]
-    for original, blanked in zip(originals, blank(iter(originals), (1,)), strict=True):
-        assert np.array_equal(blanked.images[0], original.images[0])
-        assert not blanked.images[1].any()
-        assert original.images[1].any()
-    assert all(kept is original for kept, original in zip(blank(iter(originals), ()), originals, strict=True))
+    for original in [frameset(step, texture, samples) for step in range(2)]:
+        images = blanked(original.images, (1,))
+        assert images[0] is original.images[0]
+        assert original.images[1].any() and not images[1].any()
+        assert blanked(original.images, ()) is original.images
 
 
 def test_the_estimator_is_configured_from_basalts_own_two_files(settings: SlamConfig) -> None:

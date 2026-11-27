@@ -12,6 +12,7 @@ from numpy import ndarray
 
 from slam_rs import _core
 from slam_rs.catalog_feed import TIMELINE
+from slam_rs.columns import ColumnLog
 from slam_rs.gba_log import GBA_KEYFRAMES_ENTITY, GBA_PATH_ENTITY, GBA_STATS_ENTITY, GBA_TIMELINE, keyframe_trajectory, log_map_result
 from slam_rs.trajectory import Trajectory
 from slam_rs.vio_log import RUN_ENTITY
@@ -51,11 +52,9 @@ def test_the_gba_keyframes_go_under_the_run_and_its_attempts_on_their_timeline(
     gba: _core.GbaRun | None = result.gba
     assert gba is not None
     output: Path = tmp_path / "gba.rrd"
-    rr.init("slam-rs-gba-log-test", recording_id="gba-log")
-    rr.save(output)
-    rr.set_time(TIMELINE, duration=np.timedelta64(220_000_000, "ns"))
-    log_map_result(result)
-    rr.disconnect()
+    with rr.RecordingStream("slam-rs-gba-log-test", recording_id="gba-log") as recording:
+        recording.save(output)
+        log_map_result(result, ColumnLog(recording=recording), 220_000_000)
     rows: Rows = read_rows(output)
     assert [row.t_ns for row in rows[GBA_KEYFRAMES_ENTITY]] == [220_000_000]
     drawn: Float64[ndarray, "k 3"] = np.asarray(rows[GBA_KEYFRAMES_ENTITY][0].values["Points3D:positions"], dtype=np.float64).reshape(-1, 3)
@@ -73,11 +72,10 @@ def test_the_gba_keyframes_go_under_the_run_and_its_attempts_on_their_timeline(
 def test_nothing_is_drawn_without_the_gba(rig: RigFactory, texture: TextureFactory, tmp_path: Path, read_rows: RowsReader) -> None:
     result: _core.MapResult = _finished(rig, texture, run_gba=False)
     output: Path = tmp_path / "plain.rrd"
-    rr.init("slam-rs-gba-log-test", recording_id="gba-log-plain")
-    rr.save(output)
-    rr.set_time(TIMELINE, duration=np.timedelta64(0, "ns"))
-    log_map_result(result)
-    rr.log("/marker", rr.Points3D([[0.0, 0.0, 0.0]]))
-    rr.disconnect()
+    with rr.RecordingStream("slam-rs-gba-log-test", recording_id="gba-log-plain") as recording:
+        recording.save(output)
+        log_map_result(result, ColumnLog(recording=recording), 0)
+        recording.set_time(TIMELINE, duration=np.timedelta64(0, "ns"))
+        recording.log("/marker", rr.Points3D([[0.0, 0.0, 0.0]]))
     rows: Rows = read_rows(output)
     assert GBA_KEYFRAMES_ENTITY not in rows and GBA_PATH_ENTITY not in rows

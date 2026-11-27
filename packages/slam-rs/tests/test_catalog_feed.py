@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import pyarrow as pa
 import pytest
+import rerun as rr
 from datafusion import SessionContext
 from jaxtyping import Float64, Int64
 from numpy import ndarray
@@ -12,10 +13,8 @@ from numpy import ndarray
 pytest.importorskip("rerun.catalog", reason="requires the rerun.catalog dependency in this environment")
 
 from rerun.catalog import DatasetEntry
-from simplecv.rerun_log_utils import RerunTyroConfig
 
 from slam_rs import _core
-from slam_rs.apis.replay import Config, _replay
 from slam_rs.catalog_feed import (
     CHILD_FROM_PARENT,
     RIG_ENTITY,
@@ -36,11 +35,11 @@ from slam_rs.catalog_feed import (
     check_imu_is_rig_frame,
     open_segment,
 )
+from slam_rs.catalog_layer import LayerRun, track_layer
 from slam_rs.config import SlamConfig
 from slam_rs.reference import SMOKE_SEGMENTS, Benchmarks, ReferenceSegment, resolved_flow_config
-from slam_rs.tracking import Lockstep
+from slam_rs.tracking import SegmentRun
 from slam_rs.trajectory import Trajectory, associate, read_trajectory, shift_clock, write_trajectory
-from slam_rs.vio_log import VioLogger, VioStage
 
 SMOKE_SEGMENT: str = SMOKE_SEGMENTS[1]
 """The 7.6 s two-camera segment the smoke tier runs on."""
@@ -433,36 +432,30 @@ def test_a_replay_export_associates_with_the_catalog_ground_truth(benchmarks: Be
     """
     segment: ReferenceSegment = benchmarks.by_id(SMOKE_SEGMENT)
 
-    config: Config = Config(rr_config=RerunTyroConfig(headless=True), segment=SMOKE_SEGMENT, stage="vio", max_framesets=40)
     with open_segment(
         CatalogSegment(settings.catalog_url, segment.dataset_name, segment.segment_id)
-    ) as feed:
+    ) as feed, rr.RecordingStream("slam-rs-feed-test", recording_id="export") as recording:
+        recording.save(tmp_path / "layer.rrd")
         truth: Trajectory = feed.ground_truth_between(int(feed.frame_t_ns[0]), int(feed.frame_t_ns[-1]))
         assert len(truth)
-        vio: _core.Vio = _core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), resolved_flow_config(settings, segment)[0], backend="cpu")
-        stage: VioStage = VioStage(
-            lockstep=Lockstep(vio=vio),
-            logger=VioLogger(
-                cameras=feed.cameras,
-                ground_truth=truth,
-                frame_t_ns=feed.frame_t_ns,
-                tracked_resolution=tuple(vio.tracked_resolution),
-                cam_time_offset_ns=feed.imu.cam_time_offset_ns,
-            ),
-        )
-        replayed: int = _replay(feed, config, stage)
-        estimate: Trajectory = stage.logger.estimated()
+        calibration: _core.Calibration = _core.Calibration.from_catalog(feed.cameras, feed.imu)
+        vio: _core.Vio = _core.Vio(calibration, resolved_flow_config(settings, segment)[0], backend="cpu")
+        layer: LayerRun = track_layer(recording, feed, vio, config_text="{}", calibration=calibration, run_gba=False, detail="full", profile="fast",
+                                      animate_base_rig=False, strict=False, max_framesets=40)
+        run: SegmentRun = layer.run
+        # The run comes back on the export clock; the estimator's own is what an export without the offset would hold.
+        estimate: Trajectory = shift_clock(run.estimate, -feed.export_offset_ns)
         exported: Path = tmp_path / "slam_rs.csv"
         write_trajectory(exported, shift_clock(estimate, feed.capture_start_time_ns))
         relative_export: Path = tmp_path / "relative.csv"
         write_trajectory(relative_export, estimate)
 
-    assert replayed == 40
-    assert stage.lockstep.imu_samples > 0
+    assert run.framesets == 40
+    assert layer.stage is not None and layer.stage.lockstep.imu_samples > 0
     # One pose per frameset: every frameset's own batch runs past its frame time,
     # and one that did not would be held and tracked again rather than lost (D17).
-    assert len(estimate) == replayed
-    assert not stage.pending
+    assert len(estimate) == run.framesets
+    assert not run.dropped
     sidecar: Trajectory = shift_clock(truth, feed.capture_start_time_ns)
     # All but the first pose, which sits on the capture's start time — 17 ms
     # before the sidecar's first row, so it has nothing to associate with. The
