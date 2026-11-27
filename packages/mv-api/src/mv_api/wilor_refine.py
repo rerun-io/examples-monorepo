@@ -7,6 +7,7 @@ float image); posekit runs the network and the full-image camera lift.
 """
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 import cv2
 import numpy as np
@@ -125,10 +126,16 @@ class RtmPoseHandScorer:
     """The OpenMMLab SDK zip the former wilor_nano.hand_keypoints used."""
 
     def __init__(self) -> None:
-        import onnxruntime as ort
+        from posekit.runtimes import require_cuda_kernels
         from rtmlib.tools.pose_estimation.rtmpose import RTMPose
 
-        device: str = "cuda" if "CUDAExecutionProvider" in ort.get_available_providers() else "cpu"
+        device: Literal["cuda", "cpu"] = "cpu"
+        # The provider can register on a GPU it has no kernels for (the GB10): run one before choosing it.
+        try:
+            require_cuda_kernels(device_id=0)
+            device = "cuda"
+        except RuntimeError as error:
+            print(f"[mv-api] RTMPose hand scorer on the CPU: {error}")
         self.model = RTMPose(onnx_model=self.URL, model_input_size=(256, 256), device=device)
 
     def __call__(self, rgb_hw3: UInt8[ndarray, "h w 3"], xyxy: Float32[ndarray, "4"]) -> Float32[ndarray, "21"]:

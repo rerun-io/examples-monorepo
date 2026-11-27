@@ -136,8 +136,8 @@ class CatalogPredictionLayerConfig:
     """Device requested by the MVAPI ONNX runtime backend."""
     tracker_backend: Literal["onnxruntime", "tensorrt"] = "tensorrt"
     """Inference backend for the posekit models. ``tensorrt`` reuses the cached dynamic-batch
-    engines and is the faster path; ``onnxruntime`` skips the engine build and, since the
-    workspace takes onnxruntime-gpu >= 1.29 from PyPI (sm_121a), also runs on the GB10 Spark."""
+    engines and is the faster path; ``onnxruntime`` skips the engine build, but not on the GB10 Spark: the workspace's
+    conda-forge ONNX Runtime has no sm_121 kernels, so there it stops with a pointer to ``tensorrt``."""
     keypoint_threshold: float = 0.7
     """Minimum keypoint confidence retained in logged prediction layers."""
     keypoint_subset: KeypointSubset = "upper-body"

@@ -234,12 +234,13 @@ KeyNet INT8-mmse is inside those margins: 0.437 net px and a GT cost of +0.032 p
 - **Cap.** `RknnNets::open("/root/robocap-live/models")` dlopens `/usr/lib/librknnrt.so`. The bench:
   `nets_bench rknn /root/robocap-live/models --golden <tests/data/nets> [--heldout <dir> --out <dir>]`.
   The golden test: `ROBOCAP_LIVE_MODELS=… ROBOCAP_LIVE_NETS_GOLDEN=… nets_rknn-<hash>`.
-- **A CUDA host (ort CUDA).** Build with `--features ort`. ONNX Runtime and its CUDA libraries come from the monorepo's
-  `handtrack` pixi env (no pip):
+- **A CUDA host (ort CUDA).** Build with `--features ort`. ONNX Runtime (onnxruntime-cpp) and its CUDA libraries come
+  from the monorepo's `robocap-live` pixi env (no pip):
   ```
-  ENV=<checkout>/.pixi/envs/handtrack
-  ORT_DYLIB_PATH=$ENV/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so.1.29.0 LD_LIBRARY_PATH=$ENV/lib \
+  ENV=<checkout>/.pixi/envs/robocap-live
+  ORT_DYLIB_PATH=$ENV/lib/libonnxruntime.so LD_LIBRARY_PATH=$ENV/lib \
     nets_bench ort <models dir> --device cuda
   ```
-  `<checkout>` is a monorepo checkout with the `handtrack` env installed. `--device cpu` works without a GPU.
+  `<checkout>` is a monorepo checkout with the `robocap-live` env installed. `--device cpu` works without a GPU; the GB10
+  needs it (conda-forge's CUDA 13 build has no sm_121 kernels).
 - **Scoring device outputs.** `rknn_convert.py --work-dir <dir> --calibration-dir <dir> --score-device <out dir> --device-set heldout|s66 --device-label <label>`.

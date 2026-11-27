@@ -7,6 +7,7 @@ current torch CUDA stream (``user_compute_stream``) so execution is fully
 stream-ordered with surrounding torch preprocessing/decode kernels.
 """
 
+import functools
 import sys
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,52 @@ _TORCH_TO_NUMPY_DTYPE: dict[torch.dtype, type] = {
 }
 
 
+@functools.cache
+def require_cuda_kernels(device_id: int) -> None:
+    """Run one Relu on ONNX Runtime's CUDA provider, once per device and process (a failure raises and is not cached).
+
+    Listing the provider is not enough: conda-forge's CUDA 13 build registers on the GB10 (sm_121) and creates
+    sessions there, but has no kernel image for it, so only the first inference fails.
+
+    Args:
+        device_id: CUDA device ordinal.
+
+    Raises:
+        RuntimeError: If onnxruntime or its CUDA provider is missing, or the provider does not take the session or
+            cannot run the kernel.
+    """
+    try:
+        import onnxruntime as ort
+    except ImportError as exc:
+        raise RuntimeError("onnxruntime is not installed in this Pixi environment.") from exc
+    if "CUDAExecutionProvider" not in ort.get_available_providers():
+        raise RuntimeError("onnxruntime CUDAExecutionProvider is unavailable: the env needs the cuda feature's onnxruntime build.")
+    from onnx import TensorProto, helper
+
+    graph = helper.make_graph(
+        [helper.make_node("Relu", ["x"], ["y"])],
+        "cuda_kernel_probe",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [4])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [4])],
+    )
+    model: bytes = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 18)], ir_version=10).SerializeToString()
+    options: Any = ort.SessionOptions()
+    options.log_severity_level = 3
+    try:
+        session: Any = ort.InferenceSession(model, sess_options=options, providers=[("CUDAExecutionProvider", {"device_id": device_id})])
+        # ORT falls back to the CPU provider when the CUDA one cannot be created; a CPU run would prove nothing.
+        if session.get_providers()[0] != "CUDAExecutionProvider":
+            raise RuntimeError(f"the session fell back to {session.get_providers()}")
+        session.run(None, {"x": np.zeros(4, dtype=np.float32)})
+    except BeartypeException:
+        raise
+    except Exception as error:
+        raise RuntimeError(
+            f"ONNX Runtime's CUDA provider cannot run a kernel on CUDA device {device_id} ({error}): run TensorRtBackendConfig "
+            "on this GPU, or ONNX Runtime on the CPU."
+        ) from error
+
+
 class OnnxCudaRuntime:
     """GPU-resident ONNX Runtime session implementing the trtkit runtime contract."""
 
@@ -58,18 +105,9 @@ class OnnxCudaRuntime:
             RuntimeError: If onnxruntime or its CUDA provider is unavailable.
             ValueError: If the graph has symbolic non-batch dimensions.
         """
-        try:
-            import onnxruntime as ort
-        except ImportError as exc:
-            raise RuntimeError("onnxruntime is not installed in this Pixi environment.") from exc
-        # The PyPI wheel dlopens cuDNN/cuBLAS/cudart from the conda prefix. Under
-        # `pixi run` the cuda feature's LD_LIBRARY_PATH covers that; a bare
-        # `.pixi/envs/<env>/bin/python` does not, so point ORT at the prefix
-        # explicitly (its default search only knows torch on Windows and the
-        # nvidia-* pip packages).
-        ort.preload_dlls(directory=str(Path(sys.prefix) / "lib"))
-        if "CUDAExecutionProvider" not in ort.get_available_providers():
-            raise RuntimeError("onnxruntime CUDAExecutionProvider is unavailable; install onnxruntime-gpu.")
+        require_cuda_kernels(device_id)
+        import onnxruntime as ort
+
         self._device: torch.device = torch.device("cuda", device_id)
         # Dedicated session stream, NEVER torch's current stream: the default
         # stream's raw handle is 0, which ORT parses as "no user stream" and

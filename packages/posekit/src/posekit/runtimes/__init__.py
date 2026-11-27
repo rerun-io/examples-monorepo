@@ -20,6 +20,7 @@ from trtkit import (
     TorchBackendConfig,
     TorchRuntime,
     create_runtime_from_onnx,
+    require_cuda_kernels,
     run_chunked,
     validate_runtime_inputs,
 )
@@ -41,6 +42,7 @@ __all__ = (
     "TrtBuildConfig",
     "create_runtime_from_onnx",
     "ensure_engine",
+    "require_cuda_kernels",
     "run_chunked",
     "validate_runtime_inputs",
 )
