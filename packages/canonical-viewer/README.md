@@ -21,6 +21,7 @@ pixi run -e canonical-viewer --frozen rerun-canonical -- recording.rrd       # a
 | Extension | Crate | Adds | Goldens |
 |---|---|---|---|
 | `gsplat` | `packages/gsplat-rust-renderer/crates/gsplat-viewer` (`setup::EXTENSION`) | compute Gaussian-splat renderer; `Spatial3DView` visualizers for `GaussianSplats3D` (compute), `Hexels3D`, SOG, SOG LOD and animated SOG; device needs: `SUBGROUP` when offered (not with `GSPLAT_NO_SUBGROUPS=1`), raised compute limits; replaces the stock 3D view's `EyeControls3D` position and look-target fallbacks (default framing on splat and hexel bounds) | `packages/gsplat-rust-renderer/tests/test_viewer_pixels.py` on `rerun-canonical` |
+| `depth-video` | `packages/depth-video-viewer` (`EXTENSION`) | `DepthVideoStream` (depth as AV1 10-bit monochrome lossless video, exact 10-bit codes) in `Spatial2DView` (colormapped image) and `Spatial3DView` (depth cloud under a `Pinhole`); no device needs; native only for now | `packages/depth-video-viewer/tests/test_viewer_pixels.py` on `rerun-canonical`, including the scene with gsplat splats |
 
 ## Kinds of viewer change
 

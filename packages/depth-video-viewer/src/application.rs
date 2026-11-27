@@ -2,11 +2,9 @@
 //!
 //! Supports live gRPC, saved recordings and headless screenshots with the same registration path.
 
-use crate::visualizer::DepthVideoStreamVisualizer;
-use re_viewer::external::{egui, re_log, re_memory, re_sdk_types, re_viewer_context};
+use re_viewer::external::{egui, re_log, re_memory};
 
 use clap::Parser as _;
-use re_sdk_types::View as _;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
 
@@ -59,12 +57,7 @@ pub fn run() -> anyhow::Result<()> {
             None, // No custom connection registry
             re_viewer::AsyncRuntimeHandle::from_current_tokio_runtime_or_wasmbindgen()?,
         );
-        for view in [
-            re_sdk_types::blueprint::views::Spatial2DView::identifier(),
-            re_sdk_types::blueprint::views::Spatial3DView::identifier(),
-        ] {
-            app.extend_view_class(view, register_depth_video)?;
-        }
+        (crate::EXTENSION.register)(&mut app)?;
         if let Some(limit) = memory_limit {
             app.app_options_mut().memory_limit = limit;
         }
@@ -103,12 +96,6 @@ fn build_info() -> re_build_info::BuildInfo {
         version: re_build_info::CrateVersion::LOCAL,
         ..re_build_info::cargo_build_info!()
     }
-}
-
-fn register_depth_video(
-    registrator: &mut re_viewer_context::ViewSystemRegistrator<'_>,
-) -> Result<(), re_viewer_context::ViewClassRegistryError> {
-    registrator.register_visualizer::<DepthVideoStreamVisualizer>()
 }
 
 #[derive(Clone, Debug, clap::Parser)]
@@ -159,9 +146,6 @@ fn parse_window_size(value: &str) -> anyhow::Result<egui::Vec2> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use re_viewer::external::{parking_lot, re_view_spatial};
-    use re_viewer_context::{IdentifiedViewSystem as _, ViewClass as _, ViewClassRegistry};
-    use std::sync::Arc;
 
     #[test]
     fn startup_arguments_and_sdk_flags() {
@@ -180,43 +164,5 @@ mod tests {
         assert_eq!(cli.port, 4321);
         assert!(cli.headless);
         assert!(Cli::try_parse_from(["viewer", "--window-size=0x1"]).is_err());
-    }
-
-    /// Both spatial views keep their built-in visualizers and gain `DepthVideoStream`.
-    #[test]
-    fn both_spatial_views_get_the_visualizer() {
-        let mut registry = ViewClassRegistry::default();
-        let reflection = Arc::new(parking_lot::RwLock::new(
-            re_sdk_types::reflection::reflection().clone(),
-        ));
-        let options = Default::default();
-        let mut fallbacks = Default::default();
-        registry
-            .add_class::<re_view_spatial::SpatialView2D>(&reflection, &options, &mut fallbacks)
-            .unwrap();
-        registry
-            .add_class::<re_view_spatial::SpatialView3D>(&reflection, &options, &mut fallbacks)
-            .unwrap();
-        for view in [
-            re_view_spatial::SpatialView2D::identifier(),
-            re_view_spatial::SpatialView3D::identifier(),
-        ] {
-            registry
-                .extend_class(
-                    view,
-                    &reflection,
-                    &options,
-                    &mut fallbacks,
-                    register_depth_video,
-                )
-                .unwrap();
-            let visualizers = registry.new_visualizer_collection(view);
-            let ids: Vec<_> = visualizers
-                .iter_with_identifiers()
-                .map(|(id, _)| id)
-                .collect();
-            assert!(ids.contains(&DepthVideoStreamVisualizer::identifier()));
-            assert!(ids.len() > 10, "built-in spatial visualizers remain");
-        }
     }
 }

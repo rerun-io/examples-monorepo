@@ -1279,6 +1279,7 @@ name = "canonical-viewer"
 version = "0.1.0"
 dependencies = [
  "canonical-viewer-extension",
+ "depth-video-viewer",
  "gsplat-viewer",
  "mimalloc",
  "re_build_info",
@@ -2705,6 +2706,21 @@ version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10d60334b3b2e7c9d91ef8150abfb6fa4c1c39ebbcf4a81c2e346aad939fee3e"
 dependencies = [
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "depth-video-viewer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "canonical-viewer-extension",
+ "glam 0.33.11",
+ "re_byte_size",
+ "re_rav1d",
+ "re_tracing",
+ "re_video",
+ "re_viewer",
  "thiserror 2.0.19",
 ]
 
