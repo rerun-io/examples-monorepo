@@ -30,7 +30,10 @@ from colsfm.run_report import PipelineSummary
 from colsfm.walkthrough import WalkthroughConfig, WalkthroughResult, run_walkthrough
 
 SMOKE_MIN_INTER_FRAME_DISTANCE_M: float = 0.5
-"""`feature_extractor_main`'s own default gate; keeps 34 of Galileo's 226 keyframes."""
+"""`feature_extractor_main`'s own default gates, 0.5 m with `SMOKE_MIN_INTER_FRAME_ROTATION_DEGREES`; keep 34 of Galileo's 226 keyframes."""
+
+SMOKE_MIN_INTER_FRAME_ROTATION_DEGREES: float = 5.0
+"""Stated, not inherited: colsfm's own default is 15 deg (`DEFAULT_MIN_INTER_FRAME_ROTATION_DEGREES`), which keeps 14 keyframes."""
 
 EXPECTED_STAGE_NAMES: tuple[str, ...] = (
     "keyframe_selection",
@@ -101,6 +104,7 @@ def walkthrough(galileo_input_dir: Path, tmp_path_factory: pytest.TempPathFactor
         output=root / "galileo_walkthrough.rrd",
         work_dir=root / "cusfm",
         min_inter_frame_distance=SMOKE_MIN_INTER_FRAME_DISTANCE_M,
+        min_inter_frame_rotation_degrees=SMOKE_MIN_INTER_FRAME_ROTATION_DEGREES,
     )
     return run_walkthrough(config)
 
@@ -197,6 +201,7 @@ def extrinsics_walkthrough(galileo_input_dir: Path, tmp_path_factory: pytest.Tem
         output=root / "galileo_walkthrough_extrinsics.rrd",
         work_dir=root / "cusfm",
         min_inter_frame_distance=SMOKE_MIN_INTER_FRAME_DISTANCE_M,
+        min_inter_frame_rotation_degrees=SMOKE_MIN_INTER_FRAME_ROTATION_DEGREES,
         optimize_extrinsics=True,
     )
     return run_walkthrough(config)

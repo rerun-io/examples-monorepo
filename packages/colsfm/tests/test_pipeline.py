@@ -55,7 +55,10 @@ from colsfm.run_report import ExtrinsicChange, LoopEdgeRecord, PipelineSummary
 from colsfm.stages import LoopClosureStageResult, PoseGraphStageResult, run_loop_closure_stage, run_pose_graph_stage
 
 SMOKE_MIN_INTER_FRAME_DISTANCE_M: float = 0.5
-"""`feature_extractor_main`'s own default gate; keeps 34 of Galileo's 226 keyframes."""
+"""`feature_extractor_main`'s own default gates, 0.5 m with `SMOKE_MIN_INTER_FRAME_ROTATION_DEGREES`; keep 34 of Galileo's 226 keyframes."""
+
+SMOKE_MIN_INTER_FRAME_ROTATION_DEGREES: float = 5.0
+"""Stated, not inherited: colsfm's own default is 15 deg (`DEFAULT_MIN_INTER_FRAME_ROTATION_DEGREES`), which keeps 14 keyframes."""
 
 MIN_REGISTERED_IMAGES: int = 30
 """Of the 34 selected keyframes, at least this many must end up registered."""
@@ -77,6 +80,7 @@ PYCOLMAP_ABLATION: Final[PipelineOptions] = PipelineOptions(
     input_dir=Path(),
     output_dir=Path(),
     min_inter_frame_distance=SMOKE_MIN_INTER_FRAME_DISTANCE_M,
+    min_inter_frame_rotation_degrees=SMOKE_MIN_INTER_FRAME_ROTATION_DEGREES,
     features_backend="pycolmap",
     matching_backend="pycolmap",
     ba_backend="ceres",
@@ -652,7 +656,11 @@ def test_the_metadata_stages_need_no_output_directory(galileo_input_dir: Path) -
     fields: set[str] = {field.name for field in dataclasses.fields(SelectionOptions)}
     assert "output_dir" not in fields
     result: StageResult = run_stage(
-        SelectionOptions(input_dir=galileo_input_dir, min_inter_frame_distance=SMOKE_MIN_INTER_FRAME_DISTANCE_M),
+        SelectionOptions(
+            input_dir=galileo_input_dir,
+            min_inter_frame_distance=SMOKE_MIN_INTER_FRAME_DISTANCE_M,
+            min_inter_frame_rotation_degrees=SMOKE_MIN_INTER_FRAME_ROTATION_DEGREES,
+        ),
         "pair_selection",
     )
     assert result.num_selected_keyframes > 0
