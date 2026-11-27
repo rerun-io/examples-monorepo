@@ -8,7 +8,7 @@ import pytest
 import torch
 from frozen_v2 import ENTITY, GOLDEN_REFS, ROOT, SERVED, calib_files, dense, load_keypoint_reference
 
-from selfcap_curate.catalog_io import DATASET_NAME, open_segment, read_catalog_hands, read_time_sync
+from selfcap_curate.catalog_io import DATASET_NAME, aligned_phone_times, open_segment, read_catalog_hands, read_time_sync
 from selfcap_curate.keypoints import read_anchors, read_cameras, triangulate_episode
 from selfcap_curate.keypoints_gpu import detect_keypoints, keypoint_models, plan_episode
 from selfcap_curate.records import read_frozen_sync
@@ -42,15 +42,15 @@ def test_gpu_keypoints_match_frozen_and_served_triangulation(tmp_path: Path, pri
         sync = read_time_sync(dataset, segment)
         plan = plan_episode(handle, expected.rate, sync=sync)
         np.testing.assert_array_equal(plan.times, expected.times)
-        for phone, video in plan.videos.items():
+        for phone, t_ns in aligned_phone_times(plan.videos, sync).items():
             original = plan.indices[phone]
             np.testing.assert_allclose(
-                video.t_ns[original] * 1e-9, frozen.pts_s[phone] + sync.offsets_ms["exo/" + phone] / 1000.0, rtol=0.0, atol=1e-9
+                t_ns[original] * 1e-9, frozen.pts_s[phone] + sync.offsets_ms["exo/" + phone] / 1000.0, rtol=0.0, atol=1e-9
             )
-            fps = round(1e9 / float(np.median(np.diff(video.t_ns))))
+            fps = round(1e9 / float(np.median(np.diff(t_ns))))
             np.testing.assert_array_equal(
                 original,
-                np.rint((frozen.pts_s[phone] + sync.offsets_ms["exo/" + phone] / 1000.0 - video.t_ns[0] * 1e-9) * fps).astype(np.int64),
+                np.rint((frozen.pts_s[phone] + sync.offsets_ms["exo/" + phone] / 1000.0 - t_ns[0] * 1e-9) * fps).astype(np.int64),
             )
         actual = detect_keypoints(handle, *models, rate=expected.rate, sync=sync)
         np.testing.assert_array_equal(actual.times, expected.times)

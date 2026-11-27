@@ -1,9 +1,9 @@
 """The catalog side of the training data: segment listing, our splits, and one segment's rig and hand-pose timeline.
 
 Per segment the stream runs one static query (cameras, lenses, hand profile) and one temporal query on
-``video_time`` (headset pose and both hands' confidence, joint angles and wrist); the video packets come
-through ``simplecv.catalog_video.read_catalog_videos``. Large Arrow columns are read through their list
-offsets into numpy, never with a per-row ``to_pylist`` loop.
+``video_time`` (headset pose and both hands' confidence, joint angles and wrist); the video comes chunk by
+chunk through ``simplecv.catalog_video_reader``. Large Arrow columns are read through their list offsets into
+numpy, never with a per-row ``to_pylist`` loop.
 """
 
 from collections.abc import Sequence

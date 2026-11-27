@@ -12,8 +12,9 @@ import torch
 pytest.importorskip("rerun.catalog", reason="rerun.catalog is required by this test module")
 pytest.importorskip("torchcodec", reason="torchcodec is required by this test module")
 
-from simplecv.catalog_video import CatalogVideo, read_catalog_videos  # noqa: E402
 from video_fixtures import encode_h264  # noqa: E402
+
+from simplecv.catalog_video import CatalogVideo, read_catalog_videos  # noqa: E402
 from simplecv.catalog_video_codec import wrap_mp4  # noqa: E402
 from simplecv.catalog_video_reader import (  # noqa: E402
     CatalogVideoReader,

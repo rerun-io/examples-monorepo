@@ -37,7 +37,6 @@ from numpy import ndarray
 from rerun.catalog import CatalogClient
 from serde import serde, to_dict
 from serde.json import from_json
-from simplecv.catalog_video_codec import wrap_mp4
 from torch import Tensor
 from tqdm.auto import tqdm
 
@@ -334,12 +333,8 @@ def detnet_detector(name: ModelName, dataset: GtDataset, config: HandsEvalConfig
 
 
 def decode_samples(segment: HandGtSegment) -> UInt8[Tensor, "f h w 3"]:
-    """CUDA-decode the evaluation samples of a segment's catalog video."""
-    from torchcodec.decoders import VideoDecoder
-
-    fps: float = 1e9 / float(np.median(np.diff(segment.video.t_ns)))
-    decoder = VideoDecoder(wrap_mp4(segment.video.samples, segment.video.keyframes, round(fps), codec=segment.video.codec), device="cuda", seek_mode="approximate")
-    return rearrange(decoder.get_frames_at(segment.sample_indices.tolist()).data, "n c h w -> n h w c").contiguous()
+    """Decode the evaluation samples of a segment's catalog video (NVDEC whenever CUDA is available)."""
+    return rearrange(segment.video.get_frames_at(segment.sample_indices.tolist()), "n c h w -> n h w c").contiguous()
 
 
 def joint_box(uv: Float32[ndarray, "21 2"], valid: Bool[ndarray, "21"], scale: float) -> Float32[ndarray, "4"]:

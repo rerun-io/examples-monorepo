@@ -40,7 +40,7 @@ def run_ladder(data: SegmentData, labels: ReferenceLabels, stages: dict[tuple[Mo
                frames: int, scale: float, miss_frames: int, identity: str, device: torch.device) -> LadderResult:
     """Each mode owns a tracker/network so temporal memory cannot leak across modes."""
     for video in data.videos:
-        if not np.array_equal(video.t_ns, labels.times):
+        if not np.array_equal(video.index.t_ns, labels.times):
             raise ValueError(f"{data.info.segment_id}: video times differ from A6 label times")
     if not np.array_equal(data.timeline.video_time_ns, labels.times):
         raise ValueError("Shared decode and A6 adapter timeline differ")

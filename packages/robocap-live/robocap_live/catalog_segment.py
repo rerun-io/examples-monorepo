@@ -1,8 +1,8 @@
 """One robocap catalog segment as the hands core's input: the rig, the six cameras' framesets of raw luma, and the SLAM poses.
 
 Everything comes from the Rerun catalog and nothing is written to disk on the way: the six encoded camera streams are
-fetched in one bulk query (simplecv's ``read_catalog_videos``, compressed, a few MB per second of video), decoded on the CPU
-in lockstep and handed to ``robocap_live._core`` one frameset at a time.
+fetched a chunk of whole GOPs at a time (simplecv's ``CatalogVideoReader``, compressed, a few MB per second of video), decoded
+on the CPU in lockstep and handed to ``robocap_live._core`` one frameset at a time.
 
 Decisions that change the numbers. They are the ones a ``robocap-live-dump/1`` dump of the segment carries (``frame.rs``), so the
 layer equals a ``robocap-live --source replay <dump> --slam reference`` run on such a dump:
@@ -37,8 +37,8 @@ from jaxtyping import Bool, Float64, Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
 from scipy.spatial.transform import Rotation
-from simplecv.catalog_video import CatalogVideo, read_catalog_videos
-from simplecv.catalog_video_codec import wrap_mp4
+from simplecv.catalog_video_codec import CatalogCodecName
+from simplecv.catalog_video_reader import CatalogVideoReader, StreamIndex, StreamPackets, iter_chunks, read_video_index
 from simplecv.rrd_query_utils import first_valid_value
 
 from robocap_live import _core
@@ -215,8 +215,12 @@ def _list_rows(column: pa.ChunkedArray, width: int) -> Float64[ndarray, "r w"]:
 # --- decoding ----------------------------------------------------------------------------------------------------------
 
 
-def y_planes(video: CatalogVideo, fps: int, threads: int) -> Iterator[UInt8[ndarray, "h w"]]:
-    """The camera's frames in order as the decoder's Y plane (libavcodec on the CPU, no range conversion).
+def y_planes(chunks: Iterator[StreamPackets], codec: CatalogCodecName, threads: int) -> Iterator[UInt8[ndarray, "h w"]]:
+    """The camera's frames in order, a chunk of whole GOPs at a time, as the decoder's Y plane (libavcodec on the CPU, no
+    range conversion).
+
+    The CPU on purpose: NVDEC (torchcodec) hands out RGB only, so its luma would be a colour conversion of the raw Y plane
+    this layer must equal (see the module docstring).
 
     Each plane is a view of the decoded frame's memory, which the view keeps alive: no copy here and, for a plane without
     row padding (RoboCap's 1920-wide H.264 has none), none in the core either.
@@ -224,17 +228,20 @@ def y_planes(video: CatalogVideo, fps: int, threads: int) -> Iterator[UInt8[ndar
     Raises:
         ValueError: If a frame decodes to a pixel format without a plain luma plane.
     """
-    container: av.container.InputContainer = av.open(BytesIO(wrap_mp4(video.samples, video.keyframes, fps, codec=video.codec)), mode="r")
-    with container:
-        stream: av.video.stream.VideoStream = container.streams.video[0]
-        stream.thread_type = "AUTO"
-        stream.thread_count = threads
-        for frame in container.decode(stream):
-            if frame.format.name not in ("yuv420p", "yuvj420p", "nv12", "gray"):
-                raise ValueError(f"decoded pixel format {frame.format.name}: no plain Y plane")
-            plane: av.video.plane.VideoPlane = frame.planes[0]
-            padded: UInt8[ndarray, "h stride"] = np.frombuffer(plane, dtype=np.uint8).reshape(frame.height, plane.line_size)
-            yield padded[:, : frame.width]
+    for packets in chunks:
+        if not packets.samples:
+            continue
+        container: av.container.InputContainer = av.open(BytesIO(packets.mp4(codec)), mode="r")
+        with container:
+            stream: av.video.stream.VideoStream = container.streams.video[0]
+            stream.thread_type = "AUTO"
+            stream.thread_count = threads
+            for frame in container.decode(stream):
+                if frame.format.name not in ("yuv420p", "yuvj420p", "nv12", "gray"):
+                    raise ValueError(f"decoded pixel format {frame.format.name}: no plain Y plane")
+                plane: av.video.plane.VideoPlane = frame.planes[0]
+                padded: UInt8[ndarray, "h stride"] = np.frombuffer(plane, dtype=np.uint8).reshape(frame.height, plane.line_size)
+                yield padded[:, : frame.width]
 
 
 @dataclass(frozen=True, slots=True)
@@ -263,16 +270,15 @@ class DecodeStats:
 
 @dataclass(slots=True)
 class CatalogSegment:
-    """One segment read from the catalog, ready to decode: the rig, the encoded videos, the frameset index and the poses."""
+    """One segment read from the catalog, ready to decode: the rig, the video readers, the frameset index and the poses."""
 
     segment_id: str
     rig: _core.Rig
-    videos: tuple[CatalogVideo, ...]
+    readers: tuple[CatalogVideoReader, ...]
+    """One per camera: a camera without frames for a while does not hold the others' chunks."""
     index: FramesetIndex
     poses: CatalogPoses
     """Nearest SLAM poses within the tolerance, keyed by matched frameset time."""
-    fps: int
-    """Nominal frame rate for the MP4 wrapper, from the frameset times."""
     read_s: float
     """Wall time of the catalog queries."""
     decode: DecodeStats = field(default_factory=DecodeStats)
@@ -328,8 +334,13 @@ class CatalogSegment:
             thread.join()
 
     def _decode(self, threads: int) -> Iterator[Frameset]:
-        decoders: list[Iterator[UInt8[ndarray, "h w"]]] = [y_planes(video, self.fps, threads) for video in self.videos]
-        decoded: list[int] = [0] * len(self.videos)
+        lengths: list[int] = [len(reader.streams[0].times) for reader in self.readers]
+        decoders: list[Iterator[UInt8[ndarray, "h w"]]] = []
+        for camera, reader in enumerate(self.readers):
+            last: int = int(self.index.frame[:, camera].max())
+            chunks: range = range(reader.chunk_of(0, last) + 1 if last >= 0 else 0)
+            decoders.append(y_planes((chunk.streams[0] for chunk in iter_chunks(reader, chunks)), reader.streams[0].codec, threads))
+        decoded: list[int] = [0] * len(self.readers)
         for row in range(len(self.index.t_ns)):
             luma: list[UInt8[ndarray, "h w"] | None] = []
             for camera, decoder in enumerate(decoders):
@@ -341,7 +352,7 @@ class CatalogSegment:
                     raise ValueError(f"camera {camera}: frameset {row} wants frame {wanted}, the decoder is at {decoded[camera]}")
                 image: UInt8[ndarray, "h w"] | None = next(decoder, None)
                 if image is None:
-                    raise ValueError(f"camera {camera}: the decoder ended after {decoded[camera]} of {len(self.videos[camera].samples)} frames")
+                    raise ValueError(f"camera {camera}: the decoder ended after {decoded[camera]} of {lengths[camera]} frames")
                 decoded[camera] += 1
                 luma.append(image)
             t_ns: int = int(self.index.t_ns[row])
@@ -352,27 +363,27 @@ class CatalogSegment:
                 luma=luma,
             )
         for camera, decoder in enumerate(decoders):
-            if decoded[camera] == len(self.videos[camera].samples) and next(decoder, None) is not None:
-                raise ValueError(f"camera {camera}: more frames decoded than its {len(self.videos[camera].samples)} packets")
+            if decoded[camera] == lengths[camera] and next(decoder, None) is not None:
+                raise ValueError(f"camera {camera}: more frames decoded than its {lengths[camera]} packets")
 
 
 def open_segment(dataset: DatasetEntry, segment_id: str, *, source: str, group_tolerance_ns: int = 3_000_000,
                  pose_tolerance_ns: int = 5_000_000, max_framesets: int | None = None) -> CatalogSegment:
-    """Read one segment's rig, encoded videos and poses from the catalog and group its framesets.
+    """Read one segment's rig, video index and poses from the catalog and group its framesets.
 
     Raises:
         ValueError: If a camera stream is missing or out of order, or the segment has fewer than two framesets.
     """
     started: float = time.perf_counter()
     rig: _core.Rig = read_rig(dataset, segment_id, source)
-    videos: tuple[CatalogVideo, ...] = read_catalog_videos(dataset, segment_id, [f"{camera}/pinhole/video" for camera in CAMERA_ENTITIES], TIMELINE)
+    streams: tuple[StreamIndex, ...] = read_video_index(dataset, segment_id, [f"{camera}/pinhole/video" for camera in CAMERA_ENTITIES], TIMELINE)
     poses: CatalogPoses = read_poses(dataset, segment_id)
     read_s: float = time.perf_counter() - started
-    index: FramesetIndex = group_framesets([video.t_ns for video in videos], group_tolerance_ns)
+    index: FramesetIndex = group_framesets([stream.t_ns for stream in streams], group_tolerance_ns)
     if max_framesets is not None:
         index = index.head(max_framesets)
     if len(index.t_ns) < 2:
         raise ValueError(f"{segment_id}: {len(index.t_ns)} framesets is not a segment")
-    fps: int = max(1, round((len(index.t_ns) - 1) * 1e9 / float(index.t_ns[-1] - index.t_ns[0])))
-    return CatalogSegment(segment_id=segment_id, rig=rig, videos=videos, index=index,
-                          poses=nearest_poses(index.t_ns, poses, pose_tolerance_ns), fps=fps, read_s=read_s)
+    readers: tuple[CatalogVideoReader, ...] = tuple(CatalogVideoReader(dataset, segment_id, [stream], TIMELINE) for stream in streams)
+    return CatalogSegment(segment_id=segment_id, rig=rig, readers=readers, index=index,
+                          poses=nearest_poses(index.t_ns, poses, pose_tolerance_ns), read_s=read_s)

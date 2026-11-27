@@ -30,8 +30,8 @@ from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
 from simplecv.camera_parameters import MeiParameters
 from simplecv.catalog_calibration import CatalogCameraCalibration, read_camera_models
-from simplecv.catalog_video import CatalogVideo, read_catalog_videos
 from simplecv.catalog_video_decode import PrefetchedChunks
+from simplecv.catalog_video_reader import CatalogVideoReader, StreamIndex, read_video_index
 from simplecv.rerun_log_utils import RerunTyroConfig
 from torch import Tensor
 
@@ -108,8 +108,6 @@ class FullCircleMasksConfig:
     """Tracked framesets between two evidence frames."""
     decode_chunk: int = 16
     """Tracked framesets decoded per NVDEC call (detected :data:`DETECT_FRAMESETS` at a time)."""
-    fps: int = 30
-    """Nominal frame rate of the wrapping MP4 track (decoding only)."""
 
     def __post_init__(self) -> None:
         """Refuse bystanders without YOLOX boxes.
@@ -208,9 +206,8 @@ def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id
     print(", ".join(f"lens {s.image_hw} -> mask {s.mask_hw}" for s in sources))
     device: torch.device = torch.device(config.masker.device)
     entities: list[str] = [f"{camera}/pinhole/video" for camera in config.cameras]
-    # Both lenses in one read (a 17.8 min clip: 12 s; the catalog sends whole chunks, so an index-only read costs as much).
-    videos: tuple[CatalogVideo, ...] = read_catalog_videos(dataset, segment_id, entities, config.timeline)
-    times: list[ndarray] = [video.times for video in videos]
+    streams: tuple[StreamIndex, ...] = read_video_index(dataset, segment_id, entities, config.timeline)
+    times: list[ndarray] = [stream.times for stream in streams]
     n_framesets: int = min(len(t) for t in times)
     end: int = n_framesets if config.end is None else min(config.end, n_framesets)
     cube: CubeSampling | None = cube_sampling(dataset, segment_id, config.cube_rrd)
@@ -250,7 +247,7 @@ def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id
         """The tracked framesets ``decode_chunk`` at a time: the position of the first, their indices, and per frameset the
         lens frames. The next chunk decodes on one thread per lens while the caller computes on this one."""
         nonlocal decode_wait_s
-        prefetched = PrefetchedChunks(videos, chunks, config.start, end, str(device), config.fps)
+        prefetched = PrefetchedChunks(CatalogVideoReader(dataset, segment_id, streams, config.timeline), chunks, config.start, end, str(device))
         for position, (chunk, batches) in enumerate(zip(chunks, prefetched, strict=True)):
             yield position * config.decode_chunk, chunk, [[batch[column] for batch in batches] for column in range(len(chunk))]
         decode_wait_s += prefetched.wait_s

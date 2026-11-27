@@ -13,11 +13,10 @@ from jaxtyping import Float16, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from posekit.predictions import BoxDetections, Keypoints2d
 from rerun.catalog import DatasetEntry
-from simplecv.catalog_video import CatalogVideo, read_catalog_videos
-from simplecv.catalog_video_codec import wrap_mp4
+from simplecv.catalog_video_reader import ChunkedVideoDecoder, open_decoders
 from torch import Tensor
 
-from selfcap_curate.catalog_io import Segment, read_phone_videos
+from selfcap_curate.catalog_io import Segment
 from selfcap_curate.records import HAND_LATENCY_MS, HandTrack, OakDetections, PhoneDetections, SelfcapLayout, Side, TimeSync, oak_quest_offset_ms
 
 FRAMES_PER_PHONE: int = 48
@@ -107,17 +106,15 @@ def release_cuda_memory(*, models: bool) -> None:
     torch.cuda.empty_cache()
 
 
-def decode_frames(video: CatalogVideo, indices: Int64[ndarray, "n"], fps: float) -> UInt8[Tensor, "n h w 3"]:
-    """CUDA-decode selected catalog packets on an owned decoder thread."""
-    from torchcodec.decoders import VideoDecoder
-
+def decode_frames(video: ChunkedVideoDecoder, indices: Int64[ndarray, "n"]) -> UInt8[Tensor, "n h w 3"]:
+    """Decode selected catalog samples on the video's device (CUDA) on an owned decoder thread."""
     if not len(indices):
         return torch.empty((0, 0, 0, 3), dtype=torch.uint8)
     def decode() -> UInt8[Tensor, "n h w 3"]:
-        data: bytes = wrap_mp4(video.samples, video.keyframes, round(fps), codec=video.codec)
-        decoder = VideoDecoder(data, device="cuda", seek_mode="approximate")
-        frames = decoder.get_frames_at(indices.tolist())
-        return rearrange(frames.data, "n c h w -> n h w c").contiguous()
+        try:
+            return rearrange(video.get_frames_at(indices.tolist()), "n c h w -> n h w c").contiguous()
+        finally:
+            video.close()  # its chunk decoders die on the thread that made them
 
     with ThreadPoolExecutor(max_workers=1, thread_name_prefix="oak-decode") as pool:
         return pool.submit(decode).result()
@@ -130,18 +127,21 @@ def detect_episode(
     pose: Callable[[Tensor, BoxDetections], Keypoints2d],
 ) -> dict[str, PhoneDetections]:
     """Decode selected catalog packets with CUDA; sample stamps are authoritative."""
-    videos: dict[str, CatalogVideo] = read_phone_videos(segment)
-    if not videos:
+    if not segment.layout.phones:
         raise ValueError(f"{segment.id}: no iPhone videos")
-    first: CatalogVideo = next(iter(videos.values()))
-    fps: float = 1e9 / float(np.median(np.diff(first.t_ns)))
-    indices: Int64[ndarray, "n"] = pick_frames(quest, len(first.samples), fps)
+    entities: list[str] = [video_path(rig, 0) for rig in range(len(segment.layout.phones))]
+    videos: dict[str, ChunkedVideoDecoder] = dict(
+        zip(segment.layout.phones, open_decoders(segment.dataset, segment.id, entities, CAPTURE_TIMELINE, torch.device("cuda")), strict=True)
+    )
+    first: ChunkedVideoDecoder = next(iter(videos.values()))
+    fps: float = 1e9 / float(np.median(np.diff(first.index.t_ns)))
+    indices: Int64[ndarray, "n"] = pick_frames(quest, len(first), fps)
     result: dict[str, PhoneDetections] = {}
     for phone, video in videos.items():
         # Muxing rebases decode PTS only. Detection times retain presented PTS
         # from capture_time, matching torchcodec's raw-file __t after migration.
-        images: UInt8[Tensor, "n h w 3"] = decode_frames(video, indices, fps)
-        result[phone] = detect_frames(images, video.t_ns[indices].astype(np.float64) * 1e-9, detector, pose)
+        images: UInt8[Tensor, "n h w 3"] = decode_frames(video, indices)
+        result[phone] = detect_frames(images, video.index.t_ns[indices].astype(np.float64) * 1e-9, detector, pose)
     return result
 
 
@@ -192,13 +192,13 @@ def detect_oak_hands_gpu(
     layout: SelfcapLayout,
     pose: Callable[[Tensor, BoxDetections], Keypoints2d],
     *,
-    video: CatalogVideo | None = None,
+    video: ChunkedVideoDecoder | None = None,
 ) -> OakDetections:
     """Read only one catalog base, decode picked RGB frames on CUDA, Sapiens2 batch four."""
     segment: str = sync.episode_key.segment
     if video is None:
-        video = read_catalog_videos(dataset, segment, [video_path(layout.oak_rig, 0)], CAPTURE_TIMELINE)[0]
-    fps: float = 1e9 / float(np.median(np.diff(video.t_ns)))
-    indices = pick_oak_frames(quest, len(video.samples), fps, sync)
-    detected = detect_frames(decode_frames(video, indices, fps), video.t_ns[indices].astype(np.float64) * 1e-9, full_frame_boxes, pose)
+        video = open_decoders(dataset, segment, [video_path(layout.oak_rig, 0)], CAPTURE_TIMELINE, torch.device("cuda"))[0]
+    fps: float = 1e9 / float(np.median(np.diff(video.index.t_ns)))
+    indices = pick_oak_frames(quest, len(video), fps, sync)
+    detected = detect_frames(decode_frames(video, indices), video.index.t_ns[indices].astype(np.float64) * 1e-9, full_frame_boxes, pose)
     return OakDetections(sync.oak_rgb_model.video_time_s(detected.times_s), detected.xy, detected.scores)

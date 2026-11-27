@@ -1,8 +1,8 @@
 """The tracker over one catalog segment: read it, decode its cameras in order on NVDEC, track every frame, keep the result.
 
-A segment is read with three catalog queries (statics, the hand timeline, the video packets; ``handtrack.data.catalog``).
-Every camera gets its own torchcodec NVDEC decoder; frames are decoded in chunks of consecutive timeline rows, letterboxed
-to the net frame on the GPU and fed to the tracker one frame at a time. The same decoded chunk can also go through DetNet
+A segment is read with catalog queries for the statics, the hand timeline and the video index (``handtrack.data.catalog``);
+the video packets follow a chunk of whole GOPs at a time. Every camera gets its own NVDEC decoder (the CPU without CUDA);
+frames are decoded in chunks of consecutive timeline rows, letterboxed to the net frame on the GPU and fed to the tracker one frame at a time. The same decoded chunk can also go through DetNet
 on every camera at once (the DetNet-alone evaluation), so one decode serves both.
 """
 
@@ -20,7 +20,7 @@ import torch
 from jaxtyping import Bool, Float32, Int8, Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
-from simplecv.catalog_video import CatalogVideo, read_catalog_videos
+from simplecv.catalog_video_reader import ChunkedVideoDecoder, open_decoders, select_decode_device
 from torch import Tensor, nn
 
 from handtrack.data.catalog import (
@@ -35,7 +35,6 @@ from handtrack.data.catalog import (
     read_statics,
 )
 from handtrack.data.segment_labels import SegmentLabels, segment_labels
-from handtrack.data.stream import FrameDecoder, open_nvdec_decoder
 from handtrack.geometry.camera import CameraRig
 from handtrack.geometry.letterbox import NET_HEIGHT, NET_WIDTH, Letterbox
 from handtrack.hand.pose import HandPose
@@ -50,7 +49,7 @@ DECODE_CHUNK: int = 32
 
 @dataclass(frozen=True, slots=True)
 class SegmentData:
-    """One segment's cameras, ground truth (every timeline row) and compressed video."""
+    """One segment's cameras, ground truth (every timeline row) and video."""
 
     info: SegmentInfo
     rig: CameraRig
@@ -58,8 +57,8 @@ class SegmentData:
     timeline: HandTimeline
     labels: SegmentLabels
     """Ground truth for every timeline row, in row order."""
-    videos: tuple[CatalogVideo, ...]
-    """One per camera, in ``rig.names`` order."""
+    videos: tuple[ChunkedVideoDecoder, ...]
+    """One per camera, in ``rig.names`` order, over one shared reader."""
     camera_angles: tuple[float, ...] = ()
     """Native camera roll for UmeTrack perspective crops (``catalog.camera_angles``). SHOW3D and HOT3D: 0 degrees (UmeTrack gets the native image and its own camera model);
     measured 2026-09-29 on 600 frames of show3d__HLU829: -90 -> L 40 / R 128 mm, 0 -> 28 / 46 mm, +90 -> 64 / 46 mm; the hands prefer
@@ -76,7 +75,9 @@ def read_segment(entry: DatasetEntry, info: SegmentInfo) -> SegmentData:
     rig_letterboxes: tuple[CameraRig, tuple[Letterbox, ...]] = read_rig(statics, info)
     timeline: HandTimeline = read_hand_timeline(entry, info, statics)
     cameras: tuple[str, ...] = layout_for(info.dataset).cameras
-    videos: tuple[CatalogVideo, ...] = read_catalog_videos(entry, info.segment_id, [f"{camera}/pinhole/video" for camera in cameras], TIMELINE)
+    videos: tuple[ChunkedVideoDecoder, ...] = open_decoders(
+        entry, info.segment_id, [f"{camera}/pinhole/video" for camera in cameras], TIMELINE, torch.device(select_decode_device())
+    )
     rows: Int64[ndarray, "f"] = np.arange(len(timeline.video_time_ns), dtype=np.int64)
     labels: SegmentLabels = segment_labels(timeline, rig_letterboxes[0], rig_letterboxes[1], rows, layout_for(info.dataset).pose_gated)
     angles: tuple[float, ...] = (tuple(float(os.environ.get('HT_SHOW3D_ANGLE', '0')) for _ in cameras) if is_show3d(info.dataset)
@@ -106,24 +107,22 @@ def decoded_frames(data: SegmentData, frames: int, device: torch.device) -> Iter
     A camera without a video frame at a row's time gives a black image there.
     """
     times: Int64[ndarray, "f"] = data.timeline.video_time_ns[:frames]
-    decoders: list[FrameDecoder] = []
     positions: list[Int64[ndarray, "f"]] = []
     matched: list[Bool[ndarray, "f"]] = []
     for video in data.videos:
-        decoders.append(open_nvdec_decoder(video, data.info.fps, device))
-        position: Int64[ndarray, "f"] = np.clip(np.searchsorted(video.t_ns, times), 0, len(video.t_ns) - 1)
+        position: Int64[ndarray, "f"] = np.clip(np.searchsorted(video.index.t_ns, times), 0, len(video) - 1)
         positions.append(position)
-        matched.append(video.t_ns[position] == times)
+        matched.append(video.index.t_ns[position] == times)
     for begin in range(0, frames, DECODE_CHUNK):
         end: int = min(begin + DECODE_CHUNK, frames)
         per_camera: list[UInt8[Tensor, "m 480 640"]] = []
         native: list[UInt8[Tensor, "m h w"]] = []
-        for camera, decoder in enumerate(decoders):
+        for camera, decoder in enumerate(data.videos):
             letterbox: Letterbox = data.letterboxes[camera]
             images: UInt8[Tensor, "m h w"] = torch.zeros((end - begin, letterbox.source_height, letterbox.source_width), dtype=torch.uint8, device=device)
             keep: Int64[ndarray, "k"] = np.flatnonzero(matched[camera][begin:end])
             if len(keep):
-                decoded: UInt8[Tensor, "k h w"] = decoder.get_frames_at(positions[camera][begin + keep].tolist()).data[:, 0]
+                decoded: UInt8[Tensor, "k h w"] = decoder.get_frames_at(positions[camera][begin + keep].tolist())[:, 0].to(device)
                 images[torch.from_numpy(keep).to(device)] = decoded
             native.append(images)
             per_camera.append(letterbox.apply(images))

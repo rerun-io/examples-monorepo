@@ -236,7 +236,7 @@ def calibration_call(tmp_path, layer_case, monkeypatch):
     monkeypatch.setattr(api, "oak_lenses", lambda *_args: None)  # no stereo extrinsics: the RGB-only fallback, unless a test sets lenses
     monkeypatch.setattr(api, "release_cuda_memory", lambda **_kwargs: None)
     monkeypatch.setattr(api, "read_ego_cameras", lambda *_args: [])
-    monkeypatch.setattr(api, "read_catalog_videos", lambda *_args: [None])
+    monkeypatch.setattr(api, "open_decoders", lambda *_args: [None])
     monkeypatch.setattr(api, "detect_oak_egohand", lambda *_args, **_kwargs: OakDetections(np.empty(0), np.empty((0, 133, 2)), np.empty((0, 133))))
     config = api.Config(tmp_path / "output", (f"selfcap__{motion.sync.key}",), exo_method="hands")
     return api, config, motion.sync.key.rsplit("__", 1)[0]
@@ -256,7 +256,7 @@ def test_calibrate_egohand_uses_default_path_and_writes_named_layer(calibration_
 
     monkeypatch.setattr(api, "solve_oak", solve)
     monkeypatch.setattr(api, "read_ego_cameras", lambda *_args: [])
-    monkeypatch.setattr(api, "read_catalog_videos", lambda *_args: [None])
+    monkeypatch.setattr(api, "open_decoders", lambda *_args: [None])
     monkeypatch.setattr(api, "detect_oak_egohand", lambda *args, **kwargs: calls.append("egohand") or
                         OakDetections(np.empty(0), np.empty((0, 133, 2)), np.empty((0, 133))))
     monkeypatch.setattr(api, "write_oak_egohand_layer", lambda path, *args: calls.append(path.parent.name))
@@ -387,7 +387,7 @@ def test_egohand_ineligible_gyro_uses_free_fit_and_records_reason(calibration_ca
     monkeypatch.setattr(api, "read_rotations", lambda: RotationTable({}))
     monkeypatch.setattr(api, "release_cuda_memory", lambda **kwargs: None)
     monkeypatch.setattr(api, "read_ego_cameras", lambda *_args: [])
-    monkeypatch.setattr(api, "read_catalog_videos", lambda *_args: [None])
+    monkeypatch.setattr(api, "open_decoders", lambda *_args: [None])
     old_solve = api.solve_oak
 
     def detect(*args, **kwargs):
@@ -429,7 +429,7 @@ def test_calibrate_egohand_fits_the_mount_on_all_three_oak_cameras(calibration_c
     calls = {}
     monkeypatch.setattr(api, "oak_lenses", lambda *_args: lenses)
     monkeypatch.setattr(api, "release_cuda_memory", lambda **kwargs: None)
-    monkeypatch.setattr(api, "read_catalog_videos", lambda _dataset, _segment, entities, timeline: calls.setdefault("videos", (entities, timeline)) and [None] * 3)
+    monkeypatch.setattr(api, "open_decoders", lambda _dataset, _segment, entities, timeline, _device: calls.setdefault("videos", (entities, timeline)) and [None] * 3)
     monkeypatch.setattr(api, "detect_oak_views", lambda _episode, videos, *_args, **_kwargs: calls.setdefault("views", sorted(videos)) and dict.fromkeys(videos, empty))
     monkeypatch.setattr(api, "detect_oak_egohand", lambda *args, **kwargs: pytest.fail("the RGB-only detector must not run"))
     monkeypatch.setattr(api, "solve_oak", lambda *args, **kwargs: pytest.fail("the RGB-only fit must not run"))

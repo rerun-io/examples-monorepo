@@ -18,15 +18,17 @@ def test_people_masker_finds_the_operator_in_a_lens_frame() -> None:
     if BASE_RRD is None or not Path(BASE_RRD).exists():
         pytest.skip(f"asset missing: Insta360 base .rrd (set POSEKIT_PEOPLE_MASKS_RRD; got {BASE_RRD})")
     import rerun as rr
-    from simplecv.catalog_video import read_catalog_videos
+    from simplecv.catalog_video_reader import CatalogVideoReader, read_video_index
 
     from posekit.apis.people_masks import MaskOptions, PeopleMasker, decode_selected
 
     entity: str = "/world/rig_00/cam_00/pinhole/video"
     with rr.server.Server(datasets={"base": [str(BASE_RRD)]}) as server:
         dataset = server.client().get_dataset("base")
-        video = read_catalog_videos(dataset, dataset.segment_ids()[0], [entity], "video_time")[0]
-    decoded = decode_selected(video, [0], "cuda")
+        segment: str = dataset.segment_ids()[0]
+        reader = CatalogVideoReader(dataset, segment, read_video_index(dataset, segment, [entity], "video_time"), "video_time")
+        decoded = decode_selected(reader, 0, [0], "cuda")
+    assert decoded[1].device.type == "cuda"
     masker = PeopleMasker(MaskOptions(dilate_px=4, tiles=2, batch_size=4), "cuda")
 
     detections = masker.detect(decoded[1])
@@ -46,7 +48,7 @@ def test_sam3_tensorrt_engines_match_the_torch_backend() -> None:
     if BASE_RRD is None or not Path(BASE_RRD).exists():
         pytest.skip(f"asset missing: Insta360 base .rrd (set POSEKIT_PEOPLE_MASKS_RRD; got {BASE_RRD})")
     import rerun as rr
-    from simplecv.catalog_video import read_catalog_videos
+    from simplecv.catalog_video_reader import CatalogVideoReader, read_video_index
 
     from posekit.apis.people_masks import decode_selected
     from posekit.models.base import SegmentationPrompts
@@ -55,8 +57,9 @@ def test_sam3_tensorrt_engines_match_the_torch_backend() -> None:
     entities: list[str] = ["/world/rig_00/cam_00/pinhole/video", "/world/rig_00/cam_01/pinhole/video"]
     with rr.server.Server(datasets={"base": [str(BASE_RRD)]}) as server:
         dataset = server.client().get_dataset("base")
-        videos = read_catalog_videos(dataset, dataset.segment_ids()[0], entities, "video_time")
-    frames = torch.cat([decode_selected(video, [0], "cuda")[1] for video in videos])
+        segment: str = dataset.segment_ids()[0]
+        reader = CatalogVideoReader(dataset, segment, read_video_index(dataset, segment, entities, "video_time"), "video_time")
+        frames = torch.cat([decode_selected(reader, lens, [0], "cuda")[1] for lens in range(len(entities))])
     prompts = SegmentationPrompts(frame_indices=torch.zeros(0, dtype=torch.int64), text="person")
     unions: dict[str, list] = {}
     for backend in ("torch", "tensorrt"):

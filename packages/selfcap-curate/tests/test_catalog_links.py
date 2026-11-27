@@ -90,7 +90,7 @@ def test_catalog_links_match_frozen_measurements(key: str, tmp_path: Path, priva
     print(f"{key}: Quest gyro={gyro_offset} ms; old pose-chain={pose_offset} ms", flush=True)
     mismatches: list[str] = []
     video_corrections: dict[str, float] = {
-        name: source_start_s - float(video.t_ns[0]) * 1e-9
+        name: source_start_s - float(video.index.t_ns[0]) * 1e-9
         for name, source_start_s, video in zip(
             ("oak_left", "oak_rgb", "quest_video"),
             (window.video_start_s.oak_left, window.video_start_s.oak_rgb, window.video_start_s.quest_video),

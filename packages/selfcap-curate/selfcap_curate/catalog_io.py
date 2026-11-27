@@ -4,12 +4,13 @@ Uses the same shared rig discovery as exo-calib. This module exposes no
 registration, segment enumeration, or catalog mutation operation.
 """
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 import numpy as np
 import pyarrow as pa
+import torch
 from dataforge.datasets.selfcap_raw import FactoryCalibration
 from dataforge.records import decode
 from dataforge.schema import (
@@ -24,11 +25,11 @@ from dataforge.schema import (
     video_path,
 )
 from dataforge.selfcap_schema import HeadConvention, oak_rig_of, rdf_head
-from jaxtyping import Float64
+from jaxtyping import Float64, Int64
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
 from simplecv.catalog_rig_layout import CatalogRigLayout, catalog_components, parse_rig_layout, read_rig_kinds
-from simplecv.catalog_video import CatalogVideo, read_catalog_videos
+from simplecv.catalog_video_reader import ChunkedVideoDecoder, open_decoders, select_decode_device
 from simplecv.rrd_query_utils import first_valid_value
 
 from selfcap_curate.links import SpeedSeries, pose_speed
@@ -109,8 +110,8 @@ class EpisodeInputs:
     """OAK gyro magnitude on the requested catalog clock."""
     pose: SpeedSeries
     """Quest angular speed on the requested catalog clock."""
-    videos: tuple[CatalogVideo, ...]
-    """OAK left, RGB, Quest right encoded video samples."""
+    videos: tuple[ChunkedVideoDecoder, ...]
+    """OAK left, RGB, Quest right videos, decoded a chunk at a time; a reader each, as links decodes them on three threads."""
     focal_px: tuple[float, ...]
     """Original horizontal focal lengths in video order."""
     width_px: tuple[int, ...]
@@ -165,7 +166,8 @@ def read_episode(
         resolution: Float64[ndarray, "2"] = np.asarray(first_valid_value(calibration[f"{pinhole}:Pinhole:resolution"]), dtype=np.float64).reshape(2)
         focals.append(float(matrix[0, 0]))
         widths.append(int(resolution[0]))
-    videos: tuple[CatalogVideo, ...] = read_catalog_videos(dataset, segment_id, layout.video_entities, timeline)
+    device: torch.device = torch.device(select_decode_device())
+    videos: tuple[ChunkedVideoDecoder, ...] = tuple(open_decoders(dataset, segment_id, [entity], timeline, device)[0] for entity in layout.video_entities)
     axes = rdf_head(quaternions)
     return EpisodeInputs(
         layout,
@@ -214,25 +216,27 @@ def read_catalog_hands(segment: Segment) -> CatalogHands:
 
 def read_phone_videos(
     segment: Segment, *, timeline: Literal["capture_time", "video_time"] = CAPTURE_TIMELINE
-) -> dict[str, CatalogVideo]:
-    """Read phone packets once on the requested catalog clock."""
-    videos = read_catalog_videos(segment.dataset, segment.id, [video_path(rig, 0) for rig in range(len(segment.layout.phones))], timeline)
-    return dict(zip(segment.layout.phones, videos, strict=True))
+) -> dict[str, ChunkedVideoDecoder]:
+    """Index the phone videos on the requested catalog clock; their packets are read a chunk at a time as they decode.
 
-
-def aligned_phone_videos(videos_capture: dict[str, CatalogVideo], sync: TimeSync) -> dict[str, CatalogVideo]:
-    """Shift capture packet timestamps by the same integer nanoseconds as patch_base; share packet payloads."""
-    if sync.offsets_ms is None:
-        raise ValueError(f"{sync.episode_key.segment}: expected its successful alignment record")
+    A reader each: keypoints decodes the phones on threads of their own.
+    """
+    device: torch.device = torch.device(select_decode_device())
     return {
-        phone: replace(video, times=(video.t_ns + round((sync.offsets_ms.get(f"exo/{phone}") or 0.0) * 1e6)).view(video.times.dtype))
-        for phone, video in videos_capture.items()
+        phone: open_decoders(segment.dataset, segment.id, [video_path(rig, 0)], timeline, device)[0] for rig, phone in enumerate(segment.layout.phones)
     }
 
 
-def median_rate(videos: dict[str, CatalogVideo]) -> float:
+def aligned_phone_times(videos_capture: dict[str, ChunkedVideoDecoder], sync: TimeSync) -> dict[str, Int64[ndarray, "n"]]:
+    """Each phone's capture sample times shifted by the same integer nanoseconds as patch_base."""
+    if sync.offsets_ms is None:
+        raise ValueError(f"{sync.episode_key.segment}: expected its successful alignment record")
+    return {phone: video.index.t_ns + round((sync.offsets_ms.get(f"exo/{phone}") or 0.0) * 1e6) for phone, video in videos_capture.items()}
+
+
+def median_rate(videos: dict[str, ChunkedVideoDecoder]) -> float:
     """Median frame rate over these videos, rounded as in the session runner."""
-    return round(float(np.median([1e9 / float(np.median(np.diff(video.t_ns))) for video in videos.values()])), 3)
+    return round(float(np.median([1e9 / float(np.median(np.diff(video.index.t_ns))) for video in videos.values()])), 3)
 
 
 def factory_rigs(layout: SelfcapLayout) -> tuple[int, ...]:

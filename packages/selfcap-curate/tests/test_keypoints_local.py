@@ -7,13 +7,12 @@ import pytest
 import rerun as rr
 from frozen_v2 import fixture_sync, session_episode
 from rrd_fixtures import VIDEO_FIXTURES
-from simplecv.catalog_video import CatalogVideo
+from video_stubs import TimesOnly
 
-import selfcap_curate.catalog_io as catalog_io
 import selfcap_curate.keypoints as keypoints
 from selfcap_curate.apis import keypoints as api
 from selfcap_curate.calib_layer import CalibSession, write_calib_layer
-from selfcap_curate.catalog_io import DATASET_NAME
+from selfcap_curate.catalog_io import DATASET_NAME, aligned_phone_times
 from selfcap_curate.exo_calibration import Camera, PhoneCalibration, SessionCalibration
 from selfcap_curate.factory import QuestBlock
 from selfcap_curate.keypoints import Keypoints2D, project, read_cameras, triangulate
@@ -86,7 +85,7 @@ def test_keypoints_rate_defaults_to_the_native_phone_rate_without_a_second_read(
     sync = calibration(local / f"selfcap__{key}.rrd")
     rates = []
     reads = []
-    real_read = catalog_io.read_catalog_videos
+    real_read = api.read_phone_videos
 
     class Checked(Exception):
         pass
@@ -95,12 +94,12 @@ def test_keypoints_rate_defaults_to_the_native_phone_rate_without_a_second_read(
         rates.append(rate)
         raise Checked
 
-    def counted_read(*args):
-        reads.append(args[1])
-        return real_read(*args)
+    def counted_read(segment, **kwargs):
+        reads.append(segment.id)
+        return real_read(segment, **kwargs)
 
     monkeypatch.setattr(api, "read_catalog_hands", lambda *_args: empty_raw_hands())
-    monkeypatch.setattr(catalog_io, "read_catalog_videos", counted_read)
+    monkeypatch.setattr(api, "read_phone_videos", counted_read)
     monkeypatch.setattr(api, "read_time_sync", lambda *_args: sync)
     monkeypatch.setattr(api, "read_ego_cameras", lambda *_args: ())
     monkeypatch.setattr(api, "keypoint_models", lambda *_args: (None, None))
@@ -124,7 +123,7 @@ def test_each_episode_resolves_its_own_rate_unless_the_config_gives_one(tmp_path
         segment = f"selfcap__{key}"
         syncs[segment] = replace(calibration(local / f"{segment}.rrd", episode=key[-5:]), flags=["quest_unsynced_kept_as_cut"])
         bases.append(synthetic_base(tmp_path / f"{key}.base.rrd", segment=segment, phones=tuple("ABC"), oak=False, quest=False))
-        video = CatalogVideo(np.arange(3, dtype=np.int64).astype("timedelta64[ns]") * spacings_ns[key], [np.array([1], dtype=np.uint8)] * 3, [True, False, False], "av1")
+        video = TimesOnly(np.arange(3, dtype=np.int64) * spacings_ns[key])
         phone_videos[segment] = dict.fromkeys("ABC", video)
     rates = []
 
@@ -309,7 +308,8 @@ def test_keypoints_uses_the_effective_clock_published_with_its_camera_pose(tmp_p
 
     def detect(_segment, _detector, _pose, *, sync, videos, **_kwargs):
         assert sync.offsets_ms["exo/A"] == 125.0
-        assert videos["A"].t_ns[0] - videos["B"].t_ns[0] == 125_000_000
+        aligned = aligned_phone_times(videos, sync)  # the videos keep the capture clock; planning aligns them with this sync
+        assert aligned["A"][0] - aligned["B"][0] == 125_000_000
         raise Checked
 
     monkeypatch.setattr(api, "detect_keypoints", detect)

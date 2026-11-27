@@ -19,14 +19,13 @@ from handtrack.results import load_track, save_track
 
 
 def test_show3d_reader_keeps_native_pixels_and_exports_headset_layers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from dataclasses import dataclass
 
     import pyarrow as pa
     from dataforge.writing import atomic_recording
     from rerun.chunk import RrdReader
-    from simplecv.catalog_video import CatalogVideo
     from test_catalog import _statics
     from test_segment_labels import _timeline
+    from test_stream import _FakeVideo
 
     from handtrack import pipeline, rerun_layers
     from handtrack.apis.export_layers import read_ground_truth
@@ -39,32 +38,26 @@ def test_show3d_reader_keeps_native_pixels_and_exports_headset_layers(tmp_path: 
     info = SegmentInfo(SHOW3D, "show3d_demo", "show3d", "grab", "train", "HLU829", 6, 60)
     timeline = _timeline(left_confidence=0.9, right_translation=(0.04, 0.0, 0.4))
     statics = _statics(fisheye=False)
-    video = CatalogVideo(timeline.video_time_ns, [], [], "av1")
+    def decode(marker: int, indices: list[int]) -> torch.Tensor:
+        pixels = torch.zeros((len(indices), 1, 1280, 1024), dtype=torch.uint8)
+        pixels[:, :, 100:200, 300:400] = 231
+        return pixels
+
+    video = _FakeVideo(timeline.video_time_ns, 0, decode)
     paths: list[str] = []
 
-    def videos(entry, segment, cameras, clock):
+    def videos(entry, segment, cameras, clock, device):
         paths.extend(cameras)
         return video, video
 
     monkeypatch.setattr(pipeline, "read_statics", lambda entry, selected: statics)
     monkeypatch.setattr(pipeline, "read_hand_timeline", lambda entry, selected, _static: timeline)
-    monkeypatch.setattr(pipeline, "read_catalog_videos", videos)
+    monkeypatch.setattr(pipeline, "open_decoders", videos)
     entry = MagicMock(spec=DatasetEntry)
     data = pipeline.read_segment(entry, info)
     assert paths == ["/world/rig_01/cam_00/pinhole/video", "/world/rig_01/cam_01/pinhole/video"]
     assert data.camera_angles == (0.0, 0.0)  # UmeTrack sees the native image with its own camera model (measured: -90 degrees broke the right hand)
 
-    @dataclass
-    class Batch:
-        data: torch.Tensor
-
-    class Decoder:
-        def get_frames_at(self, indices: list[int]) -> Batch:
-            pixels = torch.zeros((len(indices), 1, 1280, 1024), dtype=torch.uint8)
-            pixels[:, :, 100:200, 300:400] = 231
-            return Batch(pixels)
-
-    monkeypatch.setattr(pipeline, "open_nvdec_decoder", lambda video, fps, device: Decoder())
     chunk = next(pipeline.decoded_frames(data, 3, torch.device("cpu")))
     assert len(chunk.native) == 2 and chunk.native[0].shape == (3, 1280, 1024)
     assert int(chunk.native[0][0, 150, 350]) == 231

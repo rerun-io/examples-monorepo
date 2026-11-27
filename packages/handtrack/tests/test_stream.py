@@ -1,16 +1,16 @@
 import dataclasses
+from collections.abc import Callable, Sequence
 
 import numpy as np
 import pyarrow as pa
 import pytest
 import torch
-from simplecv.catalog_video import CatalogVideo
+from simplecv.catalog_video_reader import ChunkedVideoDecoder, StreamIndex
 
 from handtrack.data.batches import CropKind
 from handtrack.data.catalog import UMETRACK, HandTimeline, SegmentInfo
 from handtrack.data.stream import (
     CatalogStream,
-    DecoderOpener,
     DetNetSamples,
     ImageHands,
     KeyNetAugment,
@@ -211,27 +211,41 @@ def _fake_segment(segment_id: str, marker: int) -> tuple[SegmentInfo, SegmentDat
         principal=torch.tensor([[320.0, 240.0]]),
         fisheye62=None,
     )
-    video: CatalogVideo = CatalogVideo(times.astype("timedelta64[ns]"), [np.full(4, marker, dtype=np.uint8)] * frames, [True] * frames, "av1")
+    video: _FakeVideo = _FakeVideo(times, marker)
     info: SegmentInfo = SegmentInfo(UMETRACK, segment_id, "real", "hand_hand", "training", "user_00", frames, 30)
     return info, SegmentData(rig=rig, letterboxes=(letterbox_for(640, 480),), timeline=timeline, videos=(video,))
 
 
-class _Frames:
-    def __init__(self, data: torch.Tensor) -> None:
-        self.data: torch.Tensor = data
+def _gray(marker: int, indices: list[int]) -> torch.Tensor:
+    return torch.full((len(indices), 3, 480, 640), 128, dtype=torch.uint8)
 
 
-class _GrayDecoder:
-    def get_frames_at(self, indices: list[int]) -> _Frames:
-        return _Frames(torch.full((len(indices), 3, 480, 640), 128, dtype=torch.uint8))
+class _FakeVideo(ChunkedVideoDecoder):
+    """A camera's video without a catalog: ``decode(marker, indices)`` makes the frames; ``marker`` tags the segment."""
+
+    def __init__(self, times_ns: np.ndarray, marker: int, decode: Callable[[int, list[int]], torch.Tensor] = _gray) -> None:
+        self._index = StreamIndex(f"/fake/{marker}", times_ns.astype("timedelta64[ns]"), np.ones(len(times_ns), dtype=bool), "av1")
+        self.marker: int = marker
+        self.decode: Callable[[int, list[int]], torch.Tensor] = decode
+
+    @property
+    def index(self) -> StreamIndex:
+        return self._index
+
+    def get_frames_at(self, indices: Sequence[int]) -> torch.Tensor:
+        return self.decode(self.marker, list(indices))
 
 
-def _stream(segments: dict[str, tuple[SegmentInfo, SegmentData]], opener: DecoderOpener) -> CatalogStream:
+def _stream(segments: dict[str, tuple[SegmentInfo, SegmentData]], decode: Callable[[int, list[int]], torch.Tensor] | None = None) -> CatalogStream:
+    if decode is not None:
+        segments = {
+            name: (info, dataclasses.replace(data, videos=tuple(_FakeVideo(video.index.t_ns, video.marker, decode) for video in data.videos)))
+            for name, (info, data) in segments.items()
+        }
     return CatalogStream(
         StreamConfig(datasets=(UMETRACK,), nets="detnet", producers=1, fetchers=1, detnet_buffer=64, detnet_batch_size=2, min_fill=0.0, device="cpu"),
         segments=tuple(info for info, _ in segments.values()),
         read_segment=lambda info: segments[info.segment_id][1],
-        open_decoder=opener,
     )
 
 
@@ -239,13 +253,13 @@ def test_a_segment_that_fails_twice_is_skipped_for_the_rest_of_the_run() -> None
     segments: dict[str, tuple[SegmentInfo, SegmentData]] = {name: _fake_segment(name, marker) for name, marker in (("good-segment", 1), ("bad-segment", 0))}
     opened: list[int] = []
 
-    def opener(video: CatalogVideo, fps: int, device: torch.device) -> _GrayDecoder:
-        opened.append(int(video.samples[0][0]))
-        if video.samples[0][0] == 0:
+    def decode(marker: int, indices: list[int]) -> torch.Tensor:
+        opened.append(marker)
+        if marker == 0:
             raise RuntimeError("Failed to open input buffer: Invalid data found when processing input")
-        return _GrayDecoder()
+        return _gray(marker, indices)
 
-    with _stream(segments, opener) as stream:
+    with _stream(segments, decode) as stream:
         for epoch in (0, 1):
             stream.start_epoch(epoch)
             images: int = 0
@@ -261,10 +275,10 @@ def test_a_segment_that_fails_twice_is_skipped_for_the_rest_of_the_run() -> None
 def test_machinery_failures_stay_fatal() -> None:
     segments: dict[str, tuple[SegmentInfo, SegmentData]] = {"good-segment": _fake_segment("good-segment", 1)}
 
-    def opener(video: CatalogVideo, fps: int, device: torch.device) -> _GrayDecoder:
+    def decode(marker: int, indices: list[int]) -> torch.Tensor:
         raise torch.OutOfMemoryError("CUDA out of memory")
 
-    with _stream(segments, opener) as stream:
+    with _stream(segments, decode) as stream:
         stream.start_epoch(0)
         with pytest.raises(RuntimeError, match=r"a catalog producer failed \(dataforge-umetrack good-segment\)"):
             stream.next_detnet_batch()
@@ -286,7 +300,7 @@ def test_cancel_interrupts_producer_wait(evaluation: bool) -> None:
         return data
 
     stream = CatalogStream(StreamConfig(device='cpu', validation=evaluation, producers=1, fetchers=1, detnet_buffer=4),
-                           segments=(info,), read_segment=reader, open_decoder=lambda *_args: _GrayDecoder())
+                           segments=(info,), read_segment=reader)
     batches = []
 
     def consume() -> None:
@@ -310,7 +324,7 @@ def test_cancel_interrupts_producer_wait(evaluation: bool) -> None:
 def test_evaluation_retains_native_hand_eligibility() -> None:
     info, data = _fake_segment('native', 1)
     with CatalogStream(StreamConfig(device='cpu', validation=True, producers=1, fetchers=1),
-                       segments=(info,), read_segment=lambda info: data, open_decoder=lambda *_args: _GrayDecoder()) as stream:
+                       segments=(info,), read_segment=lambda info: data) as stream:
         stream.start_epoch(0)
         batch = stream.next_detnet_batch()
         assert batch is not None
@@ -345,7 +359,7 @@ def test_epoch_publication_cannot_discard_claimed_work() -> None:
 
     release = threading.Event()
     stream = InterleavedStream(StreamConfig(device='cpu', nets='detnet', producers=1, fetchers=1, detnet_buffer=4, detnet_batch_size=2, min_fill=0.0),
-                               segments=(info,), read_segment=reader, open_decoder=lambda *_args: _GrayDecoder())
+                               segments=(info,), read_segment=reader)
     returned = threading.Event()
     batches = []
 
@@ -377,16 +391,16 @@ def test_camera_retry_does_not_duplicate_published_prefix(failures: int) -> None
     attempts = []
     first_camera_opens = []
 
-    def opener(video: CatalogVideo, fps: int, device: torch.device) -> _GrayDecoder:
-        if video.samples[0][0] == 1:
+    def decode(marker: int, indices: list[int]) -> torch.Tensor:
+        if marker == 1:
             first_camera_opens.append(1)
-        if video.samples[0][0] == 2:
+        if marker == 2:
             attempts.append(1)
             if len(attempts) <= failures:
                 raise RuntimeError('FFmpeg invalid data')
-        return _GrayDecoder()
+        return _gray(marker, indices)
 
-    with _stream({'retry': (info, data)}, opener) as stream:
+    with _stream({'retry': (info, data)}, decode) as stream:
         stream.start_epoch(0)
         cameras = []
         while stream.next_detnet_batch() is not None:
@@ -404,8 +418,7 @@ def test_slow_consumer_receives_all_samples_including_tail() -> None:
     segments = {str(i): _fake_segment(str(i), i) for i in range(5)}
     with CatalogStream(StreamConfig(device='cpu', nets='detnet', producers=1, fetchers=1, detnet_buffer=3,
                                     detnet_batch_size=2, queue_chunks=2, min_fill=1.0),
-                       segments=tuple(info for info, _ in segments.values()), read_segment=lambda info: segments[info.segment_id][1],
-                       open_decoder=lambda *_args: _GrayDecoder()) as stream:
+                       segments=tuple(info for info, _ in segments.values()), read_segment=lambda info: segments[info.segment_id][1]) as stream:
         stream.start_epoch(0)
         time.sleep(0.3)
         count = 0
@@ -428,7 +441,7 @@ def test_evaluation_selection_is_bounded_and_completion_order_independent() -> N
     results = []
     for order in (range(10), reversed(range(10))):
         with BoundedStream(StreamConfig(device='cpu', nets='detnet', validation=True, validation_samples=3),
-                           segments=(info,), read_segment=lambda info: data, open_decoder=lambda *_args: _GrayDecoder()) as stream:
+                           segments=(info,), read_segment=lambda info: data) as stream:
             # Feed the same decoded sample identities in opposite completion orders.
             stream._epoch_segments = [dataclasses.replace(info, segment_id=str(i)) for i in range(10)]
             for i in order:
@@ -447,7 +460,7 @@ def test_programming_errors_cancel_workers_without_retry(error: Exception) -> No
         raise error
 
     with CatalogStream(StreamConfig(device='cpu', nets='detnet', producers=1, fetchers=1), segments=(info,),
-                       read_segment=reader, open_decoder=lambda *_args: _GrayDecoder()) as stream:
+                       read_segment=reader) as stream:
         stream.start_epoch(0)
         with pytest.raises(RuntimeError, match='catalog producer failed') as caught:
             stream.next_detnet_batch()
@@ -459,8 +472,7 @@ def test_programming_errors_cancel_workers_without_retry(error: Exception) -> No
 @pytest.mark.parametrize('evaluation', [False, True])
 def test_cancel_is_terminal_for_readiness(evaluation: bool) -> None:
     info, data = _fake_segment('terminal', 1)
-    with CatalogStream(StreamConfig(device='cpu', validation=evaluation), segments=(info,), read_segment=lambda info: data,
-                       open_decoder=lambda *_args: _GrayDecoder()) as stream:
+    with CatalogStream(StreamConfig(device='cpu', validation=evaluation), segments=(info,), read_segment=lambda info: data) as stream:
         stream.start_epoch(0)
         stream.cancel()
         assert not stream.detnet_ready() and not stream.keynet_ready()
@@ -471,7 +483,7 @@ def test_close_reports_workers_alive_at_deadline(monkeypatch: pytest.MonkeyPatch
     import handtrack.data.stream as module
 
     info, data = _fake_segment('timeout', 1)
-    stream = _stream({'timeout': (info, data)}, lambda *_args: _GrayDecoder())
+    stream = _stream({'timeout': (info, data)})
     stream.close()
 
     class StuckThread:
@@ -540,8 +552,7 @@ def test_joint_readiness_allows_consumer_ratio_to_adapt() -> None:
     segments = {str(i): _fake_segment(str(i), i) for i in range(5)}
     with CatalogStream(StreamConfig(device='cpu', nets='both', producers=1, fetchers=1, detnet_buffer=1, keynet_buffer=1,
                                     detnet_batch_size=4, keynet_batch_size=4, queue_chunks=1, min_fill=1.0),
-                       segments=tuple(info for info, _ in segments.values()), read_segment=lambda info: segments[info.segment_id][1],
-                       open_decoder=lambda *_args: _GrayDecoder()) as stream:
+                       segments=tuple(info for info, _ in segments.values()), read_segment=lambda info: segments[info.segment_id][1]) as stream:
         stream.start_epoch(0)
         detnet = keynet = 0
         deadline = time.monotonic() + 10.0
@@ -576,7 +587,7 @@ def test_classified_transport_failures_retry(error: Exception) -> None:
         return data
 
     with CatalogStream(StreamConfig(device='cpu', nets='detnet', producers=1, fetchers=1), segments=(info,),
-                       read_segment=reader, open_decoder=lambda *_args: _GrayDecoder()) as stream:
+                       read_segment=reader) as stream:
         stream.start_epoch(0)
         assert stream.next_detnet_batch() is not None
         assert stream.next_detnet_batch() is None
@@ -600,7 +611,7 @@ def test_missing_confidence_preserves_show3d_geometric_absence() -> None:
 def test_invalid_catalog_confidence_is_a_classified_data_failure() -> None:
     info, data = _fake_segment('invalid-confidence', 1)
     data = dataclasses.replace(data, timeline=dataclasses.replace(data.timeline, confidence=torch.full_like(data.timeline.confidence, 0.5)))
-    with _stream({'invalid-confidence': (info, data)}, lambda *_args: _GrayDecoder()) as stream:
+    with _stream({'invalid-confidence': (info, data)}) as stream:
         stream.start_epoch(0)
         assert stream.next_detnet_batch() is None
         assert stream.stats.retried_segments == stream.stats.skipped_segments == 1

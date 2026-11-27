@@ -7,10 +7,8 @@ import numpy as np
 import torch
 from rerun.catalog import CatalogClient
 from simplecv.catalog_rig_layout import catalog_components, parse_rig_layout, read_rig_kinds
-from simplecv.catalog_video import read_catalog_videos
-from simplecv.catalog_video_codec import wrap_mp4
+from simplecv.catalog_video_reader import open_decoders
 from torch import Tensor
-from torchcodec.decoders import VideoDecoder
 
 from posekit.apis.body_accuracy import load_accuracy_report, read_local_frames
 from posekit.apis.body_bench import person_boxes_per_frame
@@ -79,12 +77,10 @@ def main(config: Config) -> None:
     cameras = [camera for camera in parse_rig_layout(components, kinds).cameras if camera.rig_kind == "exo"]
     if not cameras or config.evaluation_frames < 100:
         raise ValueError("Calibration requires phone cameras and at least 100 held-out evaluation frames.")
-    videos = read_catalog_videos(dataset, config.segment, [camera.video_entity for camera in cameras], "video_time")
+    decoders = open_decoders(dataset, config.segment, [camera.video_entity for camera in cameras], "video_time", torch.device("cuda"))
     selected: list[tuple[str, int, Tensor]] = []
     evaluation: list[CalibrationFrame] = []
-    for camera_index, (camera, video) in enumerate(zip(cameras, videos, strict=True)):
-        fps: float = 1e9 / float(np.median(np.diff(video.t_ns)))
-        decoder = VideoDecoder(wrap_mp4(video.samples, video.keyframes, round(fps), codec=video.codec), device="cuda", dimension_order="NHWC", seek_mode="approximate")
+    for camera_index, (camera, decoder) in enumerate(zip(cameras, decoders, strict=True)):
         count: int = config.evaluation_frames // len(cameras) + int(camera_index < config.evaluation_frames % len(cameras))
         total: int = count + config.calibration_per_camera
         if len(decoder) < total + 2:
@@ -92,7 +88,7 @@ def main(config: Config) -> None:
         indices: list[int] = np.linspace(0, len(decoder) - 1, total + 2, dtype=np.int64)[1:-1].tolist()
         calibration_positions: set[int] = set(np.linspace(0, total - 1, config.calibration_per_camera, dtype=np.int64).tolist())
         source: str = f"{config.segment}{camera.video_entity}"
-        frames = decoder.get_frames_at(indices).data.contiguous()
+        frames = decoder.get_frames_at(indices).permute(0, 2, 3, 1).contiguous()
         for position, index in enumerate(indices):
             frame = frames[position].clone()
             if position in calibration_positions:
@@ -107,12 +103,10 @@ def main(config: Config) -> None:
         entities = [camera.video_entity for camera in extra_cameras]
         if not entities or extra_source.frames_per_camera < 1:
             raise ValueError(f"No calibration cameras or invalid frame count for {extra_source.segment}")
-        extra_videos = read_catalog_videos(extra_dataset, extra_source.segment, entities, extra_source.timeline)
-        for entity, video in zip(entities, extra_videos, strict=True):
-            fps = 1e9 / float(np.median(np.diff(video.t_ns)))
-            decoder = VideoDecoder(wrap_mp4(video.samples, video.keyframes, round(fps), codec=video.codec), device="cuda", dimension_order="NHWC", seek_mode="approximate")
+        extra_decoders = open_decoders(extra_dataset, extra_source.segment, entities, extra_source.timeline, torch.device("cuda"))
+        for entity, decoder in zip(entities, extra_decoders, strict=True):
             indices = np.unique(np.linspace(0, len(decoder) - 1, extra_source.frames_per_camera + 2, dtype=np.int64)[1:-1]).tolist()
-            frames = decoder.get_frames_at(indices).data.contiguous()
+            frames = decoder.get_frames_at(indices).permute(0, 2, 3, 1).contiguous()
             selected.extend((f"{extra_source.segment}{entity}", index, frame.clone()) for index, frame in zip(indices, frames, strict=True))
             print(f"[body-calibrate] additional {extra_source.dataset}/{extra_source.segment}{entity}: {len(indices)} frames", flush=True)
     selected.extend((row.source, row.index, frame) for row, frame in read_local_frames(config.inputs, config.frames_per_video))

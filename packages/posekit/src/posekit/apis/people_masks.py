@@ -20,8 +20,8 @@ import torch
 from einops import rearrange
 from jaxtyping import Bool, Int64, UInt8
 from numpy import ndarray
-from simplecv.catalog_video import CatalogVideo, read_catalog_videos
 from simplecv.catalog_video_codec import wrap_mp4
+from simplecv.catalog_video_reader import MP4_FPS, CatalogVideoReader, StreamIndex, StreamPackets, read_video_index
 from simplecv.rerun_log_utils import RerunTyroConfig
 from torch import Tensor
 
@@ -222,19 +222,21 @@ def write_overlay(overlay_dir: Path, entity: str, index: int, rgb: UInt8[ndarray
     path.chmod(0o644)
 
 
-def decode_selected(video: CatalogVideo, indices: list[int], device: str) -> tuple[list[int], UInt8[Tensor, "n h w 3"]]:
-    """NVDEC-decode the selected packets, one decoder per keyframe run.
+def decode_selected(reader: CatalogVideoReader, stream: int, indices: list[int], device: str) -> tuple[list[int], UInt8[Tensor, "n h w 3"]]:
+    """NVDEC-decode the selected packets of one stream of ``reader``, one decoder per GOP (a reader chunk holds whole GOPs).
 
     Returns:
         The decoded packet indices (ascending) and their RGB frames.
     """
     from torchcodec.decoders import VideoDecoder
 
+    index: StreamIndex = reader.streams[stream]
     decoded: list[int] = []
     frames: list[UInt8[Tensor, "m h w 3"]] = []
-    for run in selection_windows(video.keyframes, indices):
-        data: bytes = wrap_mp4(video.samples[run.start : run.stop], video.keyframes[run.start : run.stop], 30, codec=video.codec)
-        decoder = VideoDecoder(data, device=device, seek_mode="exact")
+    for run in selection_windows(index.keyframes.tolist(), indices):
+        packets: StreamPackets = reader.packets(reader.chunk_of(stream, run.start)).streams[stream]
+        lo, hi = run.start - packets.first, run.stop - packets.first
+        decoder = VideoDecoder(wrap_mp4(packets.samples[lo:hi], packets.keyframes[lo:hi], MP4_FPS, codec=index.codec), device=device, seek_mode="exact")
         batch: UInt8[Tensor, "m 3 h w"] = decoder.get_frames_at((run.wanted - run.start).tolist()).data
         frames.append(rearrange(batch, "m c h w -> m h w c").contiguous())
         decoded.extend(run.wanted.tolist())
@@ -271,12 +273,13 @@ def main(config: PeopleMasksConfig) -> None:
         for entity in entities:
             target: str = mask_entity(entity)
             rr.log(target, PEOPLE_MASK_ANNOTATION, static=True)
-            video: CatalogVideo = read_catalog_videos(client.get_dataset(sources[entity].dataset), segment_id, [entity], config.timeline)[0]
-            n_packets: int = len(video.samples)
+            dataset = client.get_dataset(sources[entity].dataset)
+            reader = CatalogVideoReader(dataset, segment_id, read_video_index(dataset, segment_id, [entity], config.timeline), config.timeline)
+            n_packets: int = len(reader.streams[0].times)
             selected: list[int] = list(config.frames) if config.frames else list(range(0, n_packets, config.stride))
             for begin in range(0, len(selected), config.mask.batch_size):
                 decoded: tuple[list[int], UInt8[Tensor, "n h w 3"]] = decode_selected(
-                    video, selected[begin : begin + config.mask.batch_size], config.device
+                    reader, 0, selected[begin : begin + config.mask.batch_size], config.device
                 )
                 torch.cuda.synchronize()
                 start: float = time.perf_counter()
@@ -286,7 +289,7 @@ def main(config: PeopleMasksConfig) -> None:
                 n_images += len(decoded[0])
                 frames_cpu: UInt8[ndarray, "n h w 3"] | None = decoded[1].cpu().numpy() if config.overlay_dir is not None else None
                 for row, index in enumerate(decoded[0]):
-                    set_frame_time(config.timeline, video.times[index])
+                    set_frame_time(config.timeline, reader.streams[0].times[index])
                     rr.log(target, rr.SegmentationImage(masks[row].astype(np.uint8) * PERSON_CLASS_ID))
                     if frames_cpu is not None and config.overlay_dir is not None:
                         write_overlay(config.overlay_dir, entity, index, frames_cpu[row], masks[row])

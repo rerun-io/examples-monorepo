@@ -113,8 +113,8 @@ def main(config: Config) -> dict[str, tuple[Curve, ...]]:
     start: float = max(float(signal.times[0]) for signal in signals)
     stop: float = min(float(signal.times[-1]) for signal in signals)
     for inputs in (aligned, cut):
-        start = max(start, *(float(video.t_ns[0]) * 1e-9 + 0.1 for video in inputs.videos))
-        stop = min(stop, *(float(video.t_ns[-1]) * 1e-9 - 0.1 for video in inputs.videos))
+        start = max(start, *(float(video.index.t_ns[0]) * 1e-9 + 0.1 for video in inputs.videos))
+        stop = min(stop, *(float(video.index.t_ns[-1]) * 1e-9 - 0.1 for video in inputs.videos))
     candidates: Float64[ndarray, "n"] = np.arange(start, stop - config.window_seconds, 0.5)
     if not len(candidates):
         raise ValueError("segment has insufficient common duration for the requested window")

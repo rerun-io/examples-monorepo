@@ -1,4 +1,4 @@
-"""NVDEC decode of catalog video streams, with the next chunk decoded on one thread per stream.
+"""NVDEC decode of a reader's video streams, chunk by chunk, with the next batch decoded on one thread per stream.
 
 ``decode_runs`` plans which samples each decoder reads, so that no sample is decoded twice at any selection of pictures.
 A torchcodec CUDA decoder decodes on any thread that has a current CUDA context (``video_io.bind_cuda_device``), not
@@ -6,6 +6,7 @@ only on the one that created it; here each stream's decoder is created and used 
 once. Two NVDEC threads decode about twice the frames per second of one thread on the RTX 5090.
 """
 
+import threading
 import time
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -18,8 +19,8 @@ from jaxtyping import Int64, UInt8
 from numpy import ndarray
 from torch import Tensor
 
-from simplecv.catalog_video import CatalogVideo
 from simplecv.catalog_video_codec import wrap_mp4
+from simplecv.catalog_video_reader import MP4_FPS, CatalogVideoReader, SharedChunks, StreamPackets, _ChunkDecoder
 from simplecv.video_io import bind_cuda_device
 
 
@@ -76,50 +77,126 @@ def decode_runs(indices: Int64[ndarray, " k"], gop_starts: Int64[ndarray, " g"],
 
 
 class StreamDecoder:
-    """Sequential NVDEC decode of one stream, from the keyframe at or before ``start`` up to ``end``."""
+    """Sequential decode of one stream of a reader, a chunk at a time, up to (not including) sample ``end``.
 
-    def __init__(self, video: CatalogVideo, start: int, end: int, device: str, fps: int = 30) -> None:
-        """Mux the packets ``[keyframe at or before start, end)`` into an in-memory MP4 and open a decoder."""
+    One chunk is open at a time, muxed from the keyframe at or before the first frame asked of it and cut at ``end``, so
+    memory is one chunk however far apart ``start`` and ``end`` are.
+    """
+
+    def __init__(
+        self, reader: CatalogVideoReader, stream: int, start: int, end: int, device: str, *, packets: Iterator[StreamPackets] | None = None
+    ) -> None:
+        """Bind the device; nothing is fetched until frames are asked for.
+
+        Args:
+            reader: Where the stream's chunks come from.
+            stream: Position of the stream in the reader.
+            start: First frame that will be asked for.
+            end: One past the last frame that will be asked for.
+            device: ``cuda`` decodes on NVDEC.
+            packets: The stream's packets of consecutive chunks, from one at or before ``start`` (``PrefetchedChunks``
+                shares one read-ahead between its streams); by default the reader's cache.
+        """
+        bind_cuda_device(device)
+        self.reader: CatalogVideoReader = reader
+        self.stream: int = stream
+        self.end: int = end
+        self.device: str = device
+        if packets is None:
+            chunks: range = range(reader.chunk_of(stream, start), reader.chunk_of(stream, max(start, end - 1)) + 1)
+            packets = (reader.packets(chunk).streams[stream] for chunk in chunks)
+        self._packets: Iterator[StreamPackets] = packets
+        self._open: tuple[StreamPackets, int, _ChunkDecoder] | None = None
+        """The open chunk, the stream index of its decoder's frame 0, and the decoder."""
+
+    def _decoder_for(self, index: int) -> tuple[StreamPackets, int, _ChunkDecoder]:
         from torchcodec.decoders import VideoDecoder
 
-        bind_cuda_device(device)
-        self.first: int = max(i for i in range(start + 1) if video.keyframes[i])
-        data: bytes = wrap_mp4(video.samples[self.first : end], video.keyframes[self.first : end], fps, codec=video.codec)
-        self.decoder = VideoDecoder(data, device=device, seek_mode="exact", num_ffmpeg_threads=0)
+        chunk: StreamPackets | None = self._open[0] if self._open is not None else None
+        while chunk is None or index >= chunk.first + len(chunk.samples):
+            chunk = next(self._packets, None)
+            if chunk is None:
+                raise IndexError(f"{self.reader.streams[self.stream].entity}: sample {index} is past this decoder's chunks")
+        local: int = index - chunk.first
+        lo: int = max((position for position in range(local + 1) if chunk.keyframes[position]), default=0)
+        hi: int = min(len(chunk.samples), self.end - chunk.first)
+        data: bytes = wrap_mp4(chunk.samples[lo:hi], chunk.keyframes[lo:hi], MP4_FPS, codec=self.reader.streams[self.stream].codec)
+        return chunk, chunk.first + lo, VideoDecoder(data, device=self.device, seek_mode="exact", num_ffmpeg_threads=0)
 
     def frames(self, indices: list[int]) -> UInt8[Tensor, "n h w 3"]:
-        """RGB frames at ascending stream indices."""
-        batch: UInt8[Tensor, "n 3 h w"] = self.decoder.get_frames_at([i - self.first for i in indices]).data
+        """RGB frames at ascending stream indices below ``end``."""
+        parts: list[Tensor] = []
+        done: int = 0
+        while done < len(indices):
+            if self._open is None or indices[done] >= self._open[0].first + len(self._open[0].samples):
+                self._open = self._decoder_for(indices[done])
+            chunk, offset, decoder = self._open
+            group: list[int] = [index for index in indices[done:] if index < chunk.first + len(chunk.samples)]
+            parts.append(decoder.get_frames_at([index - offset for index in group]).data)
+            done += len(group)
+        if not parts:
+            return torch.empty((0, 0, 0, 3), dtype=torch.uint8, device=self.device)
+        batch: UInt8[Tensor, "n 3 h w"] = parts[0] if len(parts) == 1 else torch.cat(parts)
         # NVDEC frames are NHWC in memory (NCHW is a view), so this is a view, not a copy
         return rearrange(batch, "n c h w -> n h w c").contiguous()
 
 
-class PrefetchedChunks:
-    """Iterate the frames of each chunk, one batch per stream; the next chunk decodes while the caller computes.
+def _locked(lock: threading.Lock, packets: Iterator[StreamPackets]) -> Iterator[StreamPackets]:
+    """``SharedChunks`` is not thread-safe; its streams' walks are taken on their decode threads."""
+    while True:
+        with lock:
+            taken: StreamPackets | None = next(packets, None)
+        if taken is None:
+            return
+        yield taken
 
-    ``wait_s`` is the time the caller spent waiting for decoded frames.
+
+class PrefetchedChunks:
+    """Iterate the frames of each batch, one tensor per stream of the reader; the next batch decodes while the caller computes.
+
+    The streams share one read-ahead of the reader's chunks: one query per chunk for every stream. ``wait_s`` is the time
+    the caller spent waiting for decoded frames.
     """
 
-    def __init__(self, videos: tuple[CatalogVideo, ...], chunks: list[list[int]], start: int, end: int, device: str, fps: int = 30) -> None:
-        """Start the decoders and the first chunk (decoding starts at construction).
+    def __init__(self, reader: CatalogVideoReader, chunks: list[list[int]], start: int, end: int, device: str) -> None:
+        """Start the decoders and the first batch (decoding starts at construction).
 
-        Each decoder muxes its packets up to the last frame the chunks want, or ``end`` when that is earlier: a caller
-        that passes the end of the clip but samples only its start does not hold the whole clip in memory.
+        The decoders read the chunks up to the last frame the batches want, or ``end`` when that is earlier: a caller
+        that passes the end of the clip but samples only its start fetches only the start.
+
+        Args:
+            reader: One decode thread per stream.
+            chunks: The batches of ascending sample indices, the same for every stream.
+            start: First sample of the first batch, or earlier.
+            end: One past the last sample a batch may want.
+            device: ``cuda`` decodes on NVDEC.
         """
         self.chunks: list[list[int]] = chunks
         self.device: str = device
         self.wait_s: float = 0.0
-        self.threads: list[ThreadPoolExecutor] = [ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"decode-{slot}") for slot in range(len(videos))]
+        streams: range = range(len(reader.streams))
+        self.threads: list[ThreadPoolExecutor] = [ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"decode-{slot}") for slot in streams]
         last: int = min(end, max((chunk[-1] for chunk in chunks if chunk), default=start) + 1)
+
+        def chunk_at(slot: int, sample: int) -> int:
+            return reader.chunk_of(slot, min(sample, len(reader.streams[slot].times) - 1))
+
+        # Within a batch one stream may decode all of it before another starts, so it may hold the chunks a batch spans.
+        span: int = max((chunk_at(slot, chunk[-1]) - chunk_at(slot, chunk[0]) + 1 for chunk in chunks if chunk for slot in streams), default=1)
+        read: range = range(min(chunk_at(slot, start) for slot in streams), max(chunk_at(slot, max(start, last - 1)) for slot in streams) + 1)
+        shared: SharedChunks = SharedChunks(reader, read, max_held=span + 2)
+        lock: threading.Lock = threading.Lock()
         self.decoders: list[Future[StreamDecoder]] = [
-            thread.submit(StreamDecoder, video, start, last, device, fps) for thread, video in zip(self.threads, videos, strict=True)
+            thread.submit(StreamDecoder, reader, slot, start, last, device, packets=_locked(lock, shared.stream(slot)))
+            for slot, thread in zip(streams, self.threads, strict=True)
         ]
         self.pending: list[Future[Tensor]] = self._submit(chunks[0]) if chunks else []
 
     def _decode(self, slot: int, chunk: list[int]) -> UInt8[Tensor, "n h w 3"]:
         frames: UInt8[Tensor, "n h w 3"] = self.decoders[slot].result().frames(chunk)
-        # This thread's stream only: a device-wide synchronize invalidates a CUDA graph another thread captures meanwhile.
-        torch.cuda.current_stream(self.device).synchronize()
+        if torch.device(self.device).type == "cuda":
+            # This thread's stream only: a device-wide synchronize invalidates a CUDA graph another thread captures meanwhile.
+            torch.cuda.current_stream(self.device).synchronize()
         return frames
 
     def _submit(self, chunk: list[int]) -> list[Future[Tensor]]:

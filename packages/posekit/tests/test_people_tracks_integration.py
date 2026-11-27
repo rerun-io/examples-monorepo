@@ -1,14 +1,33 @@
 """People tracks on real Insta360 lens frames (GPU, SAM 3 + EfficientTAM weights, an Insta360 base recording)."""
 
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from simplecv.catalog_video_reader import CatalogVideoReader
 
 pytestmark = pytest.mark.integration
 
 BASE_RRD: str | None = os.environ.get("POSEKIT_PEOPLE_MASKS_RRD")
 """A recording whose two lenses show the camera operator close to the camera."""
+
+
+@contextmanager
+def lens_reader() -> Iterator["CatalogVideoReader"]:
+    """Both lenses of the base recording, served while the caller decodes."""
+    import rerun as rr
+    from simplecv.catalog_video_reader import CatalogVideoReader, read_video_index
+
+    entities: list[str] = ["/world/rig_00/cam_00/pinhole/video", "/world/rig_00/cam_01/pinhole/video"]
+    with rr.server.Server(datasets={"base": [str(BASE_RRD)]}) as server:
+        dataset = server.client().get_dataset("base")
+        segment: str = dataset.segment_ids()[0]
+        yield CatalogVideoReader(dataset, segment, read_video_index(dataset, segment, entities, "video_time"), "video_time")
 
 
 def test_people_tracker_keeps_the_operator_between_redetects() -> None:
@@ -17,21 +36,15 @@ def test_people_tracker_keeps_the_operator_between_redetects() -> None:
         pytest.skip("needs a CUDA GPU")
     if BASE_RRD is None or not Path(BASE_RRD).exists():
         pytest.skip(f"asset missing: Insta360 base .rrd (set POSEKIT_PEOPLE_MASKS_RRD; got {BASE_RRD})")
-    import rerun as rr
-    from simplecv.catalog_video import read_catalog_videos
     from simplecv.catalog_video_decode import StreamDecoder
 
     from posekit.apis.people_masks import MaskOptions
     from posekit.apis.people_tracks import PeopleTracker, TrackOptions
     from posekit.ops.people_tracks import mask_iou
 
-    entities: list[str] = ["/world/rig_00/cam_00/pinhole/video", "/world/rig_00/cam_01/pinhole/video"]
-    with rr.server.Server(datasets={"base": [str(BASE_RRD)]}) as server:
-        dataset = server.client().get_dataset("base")
-        videos = read_catalog_videos(dataset, dataset.segment_ids()[0], entities, "video_time")
     indices: list[int] = [0, 10, 20, 30]
-    decoders = [StreamDecoder(v, 0, 31, "cuda") for v in videos]
-    frames = torch.stack([d.frames(indices) for d in decoders])
+    with lens_reader() as reader:
+        frames = torch.stack([StreamDecoder(reader, slot, 0, 31, "cuda").frames(indices) for slot in range(2)])
     tracker = PeopleTracker(TrackOptions(redetect_every=3), MaskOptions(), "cuda")
 
     unions = [tracker.step(frames[:, i]) for i in range(len(indices))]
@@ -50,19 +63,13 @@ def test_prefetched_chunks_match_the_sequential_decode() -> None:
         pytest.skip("needs a CUDA GPU")
     if BASE_RRD is None or not Path(BASE_RRD).exists():
         pytest.skip(f"asset missing: Insta360 base .rrd (set POSEKIT_PEOPLE_MASKS_RRD; got {BASE_RRD})")
-    import rerun as rr
-    from simplecv.catalog_video import read_catalog_videos
     from simplecv.catalog_video_decode import PrefetchedChunks, StreamDecoder
 
-    entities: list[str] = ["/world/rig_00/cam_00/pinhole/video", "/world/rig_00/cam_01/pinhole/video"]
-    with rr.server.Server(datasets={"base": [str(BASE_RRD)]}) as server:
-        dataset = server.client().get_dataset("base")
-        videos = read_catalog_videos(dataset, dataset.segment_ids()[0], entities, "video_time")
     chunks: list[list[int]] = [[10, 20, 30], [40, 50, 60], [70]]
-    decoders = [StreamDecoder(v, 10, 71, "cuda") for v in videos]
-    expected = [torch.stack([d.frames(chunk) for d in decoders]) for chunk in chunks]
-
-    got = [torch.stack(batches) for batches in PrefetchedChunks(videos, chunks, 10, 71, "cuda")]
+    with lens_reader() as reader:
+        decoders = [StreamDecoder(reader, slot, 10, 71, "cuda") for slot in range(2)]
+        expected = [torch.stack([d.frames(chunk) for d in decoders]) for chunk in chunks]
+        got = [torch.stack(batches) for batches in PrefetchedChunks(reader, chunks, 10, 71, "cuda")]
 
     assert len(got) == len(chunks)
     assert all(torch.equal(g, e) for g, e in zip(got, expected, strict=True))
@@ -74,20 +81,14 @@ def test_people_tracker_lookahead_gives_the_same_masks() -> None:
         pytest.skip("needs a CUDA GPU")
     if BASE_RRD is None or not Path(BASE_RRD).exists():
         pytest.skip(f"asset missing: Insta360 base .rrd (set POSEKIT_PEOPLE_MASKS_RRD; got {BASE_RRD})")
-    import rerun as rr
-    from simplecv.catalog_video import read_catalog_videos
     from simplecv.catalog_video_decode import StreamDecoder
 
     from posekit.apis.people_masks import MaskOptions
     from posekit.apis.people_tracks import PeopleTracker, TrackOptions
 
-    entities: list[str] = ["/world/rig_00/cam_00/pinhole/video", "/world/rig_00/cam_01/pinhole/video"]
-    with rr.server.Server(datasets={"base": [str(BASE_RRD)]}) as server:
-        dataset = server.client().get_dataset("base")
-        videos = read_catalog_videos(dataset, dataset.segment_ids()[0], entities, "video_time")
     indices: list[int] = list(range(0, 70, 10))
-    decoders = [StreamDecoder(v, 0, 61, "cuda") for v in videos]
-    frames = torch.stack([d.frames(indices) for d in decoders])
+    with lens_reader() as reader:
+        frames = torch.stack([StreamDecoder(reader, slot, 0, 61, "cuda").frames(indices) for slot in range(2)])
 
     def unions(lookahead: bool) -> list:
         tracker = PeopleTracker(TrackOptions(redetect_every=2, lookahead=lookahead), MaskOptions(), "cuda")

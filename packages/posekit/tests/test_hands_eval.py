@@ -8,7 +8,7 @@ import torch
 
 pytest.importorskip("warp", reason="the eval imports EgoHand; it needs the posekit-hands Pixi environment")
 
-from simplecv.catalog_video import CatalogVideo
+from simplecv.catalog_video_reader import ChunkedVideoDecoder
 
 from posekit.apis.hands_eval import EndToEndCell, HandsEvalConfig, error_quantiles, evaluate_segment, failed_bands, joint_box, within_accuracy_band
 from posekit.cameras import CalibratedCamera
@@ -16,6 +16,13 @@ from posekit.eval.hand_gt import GtDataset, HandGtSegment
 from posekit.models.base import HandDetector, TopDownHandPose3d
 from posekit.predictions import BoxDetections, HandDetections, HandPoses3d, Keypoints3d
 from posekit.skeletons import HAND_21
+
+
+class NoVideo(ChunkedVideoDecoder):
+    """The protocol tests pass frames in; nothing decodes."""
+
+    def __init__(self) -> None:
+        pass
 
 
 def _segment() -> HandGtSegment:
@@ -29,7 +36,7 @@ def _segment() -> HandGtSegment:
     valid = np.ones((1, 2, 21), bool)
     valid[:, :, 1] = False
     camera = CalibratedCamera(np.array([[500.0, 0, 200], [0, 500, 200], [0, 0, 1]]), np.zeros(0), 400, 400, lens="PINHOLE")
-    return HandGtSegment("seg", camera, CatalogVideo(np.zeros(1, np.int64), [], [True], "av1"), np.zeros(1, np.int64), np.zeros(1, np.int64), xyz, uv, valid)
+    return HandGtSegment("seg", camera, NoVideo(), np.zeros(1, np.int64), np.zeros(1, np.int64), xyz, uv, valid)
 
 
 class TruthPose(TopDownHandPose3d):

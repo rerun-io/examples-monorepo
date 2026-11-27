@@ -67,7 +67,7 @@ def test_failed_session_is_unpublished_and_retryable(tmp_path: Path, monkeypatch
     monkeypatch.setattr(
         align,
         "read_episode",
-        lambda *a, **_kw: SimpleNamespace(layout=SimpleNamespace(oak_rig=4), videos=[SimpleNamespace(t_ns=np.array([0, 60_000_000_000]))]),
+        lambda *a, **_kw: SimpleNamespace(layout=SimpleNamespace(oak_rig=4), videos=[SimpleNamespace(index=SimpleNamespace(t_ns=np.array([0, 60_000_000_000])))]),
     )
     monkeypatch.setattr(align, "read_session_clock", lambda *a: SimpleNamespace(session=record.session, start_s=0.0))
     monkeypatch.setattr(align, "measure_links", lambda *a, **_kw: record.links)
