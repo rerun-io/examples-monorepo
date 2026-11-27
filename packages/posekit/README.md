@@ -329,11 +329,16 @@ models are posekit's own: YOLOX-HumanArt (TensorRT) or SAM 3 on the faces, Effic
 differs from FullCircle, and why, is in the module docstring.
 
 ```bash
-# operator-mask layer for an Insta360 base segment (dataforge insta360): <lens>/pinhole/people_mask on both lenses
-python tools/apps/fullcircle_masks.py --dataset <dataset> --segment <segment> --rr-config.save <layer.rrd> \
-    --rr-config.headless --rr-config.recording-id <segment> --rr-config.application-id dataforge
-# a base not registered yet: --rrd <base.rrd> instead of --dataset/--segment
+# lens_mask layer of an Insta360 base segment (dataforge insta360): <lens>/pinhole/people_mask on both lenses,
+# written to <output-dir>/<segment>.rrd and registered as the segment's lens_mask layer
+pixi run -e posekit posekit-lens-masks --dataset <dataset> --segment <segment> --catalog-url <url> --output-dir <dir>
+# a base not registered yet: --rrd <base.rrd> instead of --dataset/--segment (written, not registered)
 ```
+
+`posekit-lens-masks` is one step: FullCircle's two passes, and in the second the people tracker
+(`posekit.apis.people_tracks.PeopleTracker`: SAM 3 re-detects, EfficientTAM in between) on the same decoded frames, its
+masks dilated 8 px (`--mask.dilate-px`) and ORed in on the GPU; `--no-people-tracks` writes FullCircle alone. The layer
+carries its run record (`simplecv.run_record`).
 
 The masks are 1/4 of the lens resolution with a static `Transform3D(scale=[4, 4, 1])`, on the framesets of the segment's cube layer (its `cube` property, or `--cube-rrd`; every 10th without one; `--stride` must agree with it), the tracker re-prompted once a second
 (`--reprompt-every-frames 30`, which follows the stride), already dilated by 12 px (`--masker.dilate-px`; FullCircle

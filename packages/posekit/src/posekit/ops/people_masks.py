@@ -111,3 +111,16 @@ def overlay_mask(rgb: UInt8[ndarray, "h w 3"], mask: Bool[ndarray, "h w"], *, al
     red: UInt8[ndarray, "3"] = np.array([255, 0, 0], dtype=np.uint8)
     tinted[mask] = np.round((1.0 - alpha) * rgb[mask] + alpha * red).astype(np.uint8)
     return tinted
+
+
+def pool_cells(masks: Bool[Tensor, "s h w"], factor: int) -> Bool[Tensor, "s hm wm"]:
+    """Full-resolution masks on the ``factor`` times coarser mask grid: a cell is masked when any of its pixels is (the
+    tensor counterpart of ``posekit.apis.mask_union.pool_any``, so a GPU union needs no host copy).
+
+    Raises:
+        ValueError: If ``factor`` does not divide the mask size.
+    """
+    n_slots, height, width = int(masks.shape[0]), int(masks.shape[1]), int(masks.shape[2])
+    if height % factor or width % factor:
+        raise ValueError(f"a {width}x{height} mask does not pool by {factor}")
+    return masks.reshape(n_slots, height // factor, factor, width // factor, factor).any(dim=4).any(dim=2)
