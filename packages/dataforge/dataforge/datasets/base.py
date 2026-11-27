@@ -176,6 +176,9 @@ class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
         sequence's rig). The alternative: stop embedding and save an ``.rbl`` beside local files.
         """
         base: bool = layer == paths.BASE_LAYER
+        if self.run is None:
+            self.run = start_run(self.config)
+        sequence: RunStart = replace(self.run, started=datetime.fromisoformat(self.timer.started_at))
         with writing.atomic_recording(
             target,
             recording_id=identity.recording_id,
@@ -184,9 +187,6 @@ class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
             optimize=layer in self.optimized_layers,
         ) as recording:
             yield recording
-            if self.run is None:
-                self.run = start_run(self.config)
-            sequence: RunStart = replace(self.run, started=datetime.fromisoformat(self.timer.started_at))
             write_run_record(recording, sequence.finish(layer, identity.recording_id))
 
     @abstractmethod
