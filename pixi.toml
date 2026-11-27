@@ -1326,106 +1326,6 @@ cwd = "packages/lamp"
 env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
 description = "Track people with LAMP in a four-camera Robocap catalog segment"
 
-# ═══════════════════════════════════════════════════════════════════════════
-# pysfm
-# ═══════════════════════════════════════════════════════════════════════════
-[feature.pysfm]
-platforms = ["linux-64"]
-
-[feature.pysfm.dependencies]
-python = "3.12.*"
-tyro = ">=0.9.1,<0.10"
-# No CUDA-13 pycolmap on conda-forge yet: its cuda* builds pin cuda-version <13
-# (hard conflict), and the PyPI wheel core-dumps in feature extraction. The
-# conda cpu_* build links the env's own libs and passes all tests — the only
-# cost is GPU SIFT. Switch back to build = "cuda*" once the conda-forge cuda130
-# migration reaches colmap/pycolmap (or build them in ai-demos if GPU SIFT is
-# needed sooner).
-pycolmap = { version = "4.0.*", build = "cpu*" }
-[feature.pysfm.pypi-dependencies]
-pysfm = { path = "packages/pysfm", editable = true }
-
-[feature.pysfm.activation.env]
-PACKAGE_DIR = "packages/pysfm"
-
-# ── Download tasks ───────────────────────────────────────────────────────
-[feature.pysfm.tasks._pysfm-download-sfm-example]
-# One line on purpose: pixi collapses newlines inside cmd into spaces, which turned the
-# previous multi-line `python -c` program into a SyntaxError (AGENTS.md gotcha).
-cmd = """
-test -d data/examples/sfm_reconstruction/Fountain || \
-(mkdir -p data/examples/sfm_reconstruction && \
-python -c "import urllib.request, zipfile; urllib.request.urlretrieve('https://cvg-data.inf.ethz.ch/local-feature-evaluation-schoenberger2017/Strecha-Fountain.zip', '/tmp/fountain.zip'); zipfile.ZipFile('/tmp/fountain.zip').extractall('data/examples/sfm_reconstruction')")
-"""
-cwd = "packages/pysfm"
-description = "Download Fountain example dataset for SfM"
-
-[feature.pysfm.tasks._pysfm-download-unknown-rig]
-cmd = "test -e data/examples/unknown-rig/cam1.mp4 || hf download pablovela5620/pycolmap-glomap-example --include 'unknown-rig/*.mp4' --repo-type dataset --local-dir data/examples/"
-cwd = "packages/pysfm"
-description = "Download unknown-rig example videos"
-
-[feature.pysfm.tasks._pysfm-download-calibrated-rig]
-cmd = "test -e data/examples/calibrated-rig/video_dev1_session15_segment1_left-front.mp4 || hf download pablovela5620/pycolmap-glomap-example --include 'calibrated-rig/*.mp4' --repo-type dataset --local-dir data/examples/"
-cwd = "packages/pysfm"
-description = "Download calibrated-rig example videos"
-
-# ── Demo tasks ───────────────────────────────────────────────────────────
-[feature.pysfm.tasks.pysfm-sfm-reconstruction-demo]
-cmd = "python tools/demos/sfm_reconstruction.py --image-dir data/examples/sfm_reconstruction/Fountain/images --rr-config.save data/examples/sfm_reconstruction/fountain.rrd"
-depends-on = ["_pysfm-download-sfm-example"]
-cwd = "packages/pysfm"
-description = "Run COLMAP SfM reconstruction on Fountain dataset with Rerun viewer"
-
-# ── App tasks ────────────────────────────────────────────────────────────
-[feature.pysfm.tasks.pysfm-sfm-reconstruction-app]
-cmd = "python tools/nodes/sfm_reconstruction_app.py"
-depends-on = ["_pysfm-download-sfm-example"]
-cwd = "packages/pysfm"
-description = "Launch COLMAP SfM Gradio app with Rerun viewer"
-
-[feature.pysfm.tasks.pysfm-vid-to-img-node]
-cmd = "python tools/nodes/video_to_image_node.py"
-depends-on = ["_pysfm-download-unknown-rig"]
-cwd = "packages/pysfm"
-description = "Launch Video-to-Image frame extraction Gradio app with Rerun viewer"
-
-[feature.pysfm.tasks.pysfm-vid-to-img-node-dev]
-cmd = "gradio tools/nodes/video_to_image_node.py --watch-dirs $PIXI_PROJECT_ROOT/packages/pysfm/pysfm"
-depends-on = ["_pysfm-download-unknown-rig"]
-cwd = "packages/pysfm"
-description = "Video-to-Image Gradio app with hot reload"
-
-[feature.pysfm.tasks.pysfm-vid-to-img-demo]
-cmd = "python tools/demos/video_to_image.py --video-path data/examples/unknown-rig/cam1.mp4 --output-dir /tmp/video_to_image_output --rr-config.save /tmp/video_to_image_output/video_to_image.rrd"
-depends-on = ["_pysfm-download-unknown-rig"]
-cwd = "packages/pysfm"
-description = "Run video-to-image frame extraction CLI demo (saves .rrd)"
-
-[feature.pysfm.tasks.pysfm-vid-recon-demo]
-cmd = "python tools/demos/pycolmap_vid_recon.py --config.video-path data/examples/unknown-rig/cam1.mp4"
-depends-on = ["_pysfm-download-unknown-rig"]
-cwd = "packages/pysfm"
-description = "Monocular video reconstruction demo with Rerun viewer"
-
-[feature.pysfm.tasks.pysfm-brush-train-kitchen-5k]
-cmd = """
-python tools/brush/train_colmap_brush.py \
-  --images-dir /home/pablo/0Dev/data/colmap-data/multicam/images/6g-night-nov-29-2024/kitchen-nov-29-2024-train/0100 \
-  --model-dir /home/pablo/0Dev/data/colmap-data/multicam/colmap/6g-night-nov-29-2024/kitchen-nov-29-2024-train/0100-aliked-lightglue-globalmapper-overlap10-timed-20260320/rig/sparse/0 \
-  --work-root /home/pablo/0Dev/data/colmap-data/multicam/brush/6g-night-nov-29-2024/kitchen-nov-29-2024-train/0100-global-rig \
-  --steps 5000 \
-  --eval-split-every 10 \
-  --eval-every 1000 \
-  --export-every 5000 \
-  --experiment-name 5k
-"""
-cwd = "packages/pysfm"
-description = "Train a first 5k-step Brush splat from the kitchen train 0100 rig model"
-
-[feature.pysfm.target.linux-64.dependencies]
-brush = "==0.3.0"
-
 [feature.soma-runtime]
 platforms = ["linux-64", "linux-aarch64", "linux-64-cuda13", "linux-aarch64-cuda13"]
 
@@ -4134,7 +4034,7 @@ description = "Build the lietorch-mojo extension and the DPVO and ViPE kernels, 
 # ═══════════════════════════════════════════════════════════════════════════
 # pycolmap is recipes/colmap-src: COLMAP 4.2.0 built with CASPAR (GPU bundle adjustment) and the OPENCV_FISHEYE
 # Caspar adapter, sm_120 on linux-64 (RTX 5090) and sm_121 on linux-aarch64 (DGX Spark). The conda-forge pycolmap
-# cannot run CASPAR, and pysfm's pycolmap 4.0 cpu build stays in its own solve group.
+# cannot run CASPAR.
 [feature.colsfm]
 platforms = ["linux-64", "linux-aarch64"]
 
@@ -4782,20 +4682,6 @@ lamp-catalog-dev = { features = [
     "torchcodec",
     "ffmpeg",
 ], solve-group = "lamp-catalog", no-default-feature = true }
-# pysfm runs on the conda CPU pycolmap build — see the feature.pysfm note.
-pysfm = { features = [
-    "common",
-    "cuda",
-    "pysfm",
-    "ffmpeg",
-], solve-group = "pysfm", no-default-feature = true }
-pysfm-dev = { features = [
-    "common",
-    "cuda",
-    "pysfm",
-    "dev",
-    "ffmpeg",
-], solve-group = "pysfm", no-default-feature = true }
 vistadream = { features = [
     "common",
     "cuda",
