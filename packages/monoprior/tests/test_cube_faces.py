@@ -20,11 +20,6 @@ def test_full_centred_faces_are_accepted(name: str) -> None:
     assert _face(name).name == name
 
 
-def test_seam_split_names_are_rejected() -> None:
-    with pytest.raises(ValueError, match="cube6_"):
-        _face("cube_0_left")
-
-
 @pytest.mark.parametrize(("width", "height", "cx"), [(N, 480, (N - 1) / 2), (N, N, 79.5), (N, N, N / 2)])
 def test_half_faces_and_off_centre_principal_points_are_rejected(width: int, height: int, cx: float) -> None:
     with pytest.raises(ValueError, match="full centred"):

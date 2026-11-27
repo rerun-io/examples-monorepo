@@ -1,19 +1,15 @@
 """Cube-face pinholes of the Insta360 cube-face layer (6-face cubemap), and spirula's depth/normal prior encodings.
 
 Every face is a full N x N 90 deg pinhole (fx = fy = N/2, principal point at the image centre with integer pixel
-centres: cx = cy = (N - 1) / 2), named ``cube6_<front0|front1|left|right|up|down>``. MoGe-2 runs on each face as
+centres: cx = cy = (N - 1) / 2), named by the layer's ``cube`` property (``cube_layer.read_cube_faces``). MoGe-2 runs on each face as
 it is, so a prior matches its training image pixel for pixel.
 """
 
-import re
 from dataclasses import dataclass
 
 import numpy as np
 from jaxtyping import Bool, Float32, Float64, UInt8, UInt16
 from numpy import ndarray
-
-FACE_NAME_PATTERN: re.Pattern[str] = re.compile(r"^cube6_(front0|front1|left|right|up|down)$")
-"""Face names of the 6-face cubemap layer (each camera node's static ``name``)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,7 +19,7 @@ class CubeFace:
     entity: str
     """Camera node, e.g. ``/world/rig_00/cam_03``."""
     name: str
-    """Face name ``cube6_<direction>`` (the node's static ``name``)."""
+    """Face name, e.g. ``cube6_front0`` (the node's static ``name``)."""
     k_matrix: Float64[ndarray, "3 3"]
     """Pinhole intrinsics, pixels, integer pixel centres."""
     width: int
@@ -32,13 +28,11 @@ class CubeFace:
     """Image height, pixels."""
 
     def __post_init__(self) -> None:
-        """Validate the name and that the face is a full centred 90 deg pinhole.
+        """Validate that the face is a full centred 90 deg pinhole.
 
         Raises:
-            ValueError: For another name, a non-square face, fx or fy other than N/2, or an off-centre principal point.
+            ValueError: For a non-square face, fx or fy other than N/2, or an off-centre principal point.
         """
-        if FACE_NAME_PATTERN.match(self.name) is None:
-            raise ValueError(f"{self.entity}: face name {self.name!r} is not cube6_<front0|front1|left|right|up|down>")
         centre_px: float = (self.width - 1) / 2.0
         expected: Float64[ndarray, "4"] = np.array([self.width / 2.0, self.width / 2.0, centre_px, centre_px])
         actual: Float64[ndarray, "4"] = np.array([self.k_matrix[0, 0], self.k_matrix[1, 1], self.k_matrix[0, 2], self.k_matrix[1, 2]])

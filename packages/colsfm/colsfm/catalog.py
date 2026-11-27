@@ -54,8 +54,12 @@ from colsfm.frames_meta import FRAMES_META_NAME
 from colsfm.geometry import TumPose, interpolate_poses, rigid3d_from_matrix
 from colsfm.run_lifecycle import STAGING_SUFFIX, publish_directory
 
-DEFAULT_CATALOG_URL: Final[str] = "rerun+http://dgx-spark:51235"
-"""The shared catalog the dataforge corpora are registered on."""
+DEFAULT_CATALOG_URL: Final[str] = "rerun+http://127.0.0.1:51235"
+"""This host's catalog, the default of every other catalog stage (slam-rs, dataforge, posekit)."""
+
+DEFAULT_TRAJECTORY_ENTITY: Final[str] = "/world/runs/slam_rs/rig"
+"""slam-rs's final run in its `slam_rs` layer (`dataforge.schema.run_path(SLAM_RS_SOURCE)`): `/world/rig_00` belongs to
+the base and the `gt` layer."""
 
 DEFAULT_TIMELINE: Final[str] = "video_time"
 """The timeline exoego:v2 segments index their video and poses on."""
@@ -124,7 +128,7 @@ class CatalogInputConfig:
     """Camera names (the camera node's static `name`) fed to the pipeline; empty means every video camera."""
     stereo_pairs: tuple[tuple[str, str], ...] = ()
     """Camera-name pairs declared as `stereo_pair` (rectifiable stereo only; the matcher pairs them per rig frame)."""
-    trajectory_entity: str = "/world/rig_00"
+    trajectory_entity: str = DEFAULT_TRAJECTORY_ENTITY
     """Entity whose temporal `Transform3D` is `world_T_rig` (the initial trajectory)."""
     timeline: str = DEFAULT_TIMELINE
     """Timeline the video and the trajectory are read on."""

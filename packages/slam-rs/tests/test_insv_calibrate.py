@@ -161,7 +161,7 @@ def test_the_bootstrap_scan_finds_a_known_shift_of_the_frame_times_on_the_real_c
         pytest.skip(f"the converted Insta360 clip VID_20261116_125200_00_003.rrd is absent: set SLAM_RS_INSTA360_RRD (now {CLIP_RRD})")
     shift_ns: int = 3_000_000
     offsets_ms: tuple[float, ...] = tuple(float(value) for value in range(-8, 9, 2))
-    vio_config: _core.VioConfig = _core.VioConfig.from_json(load_slam_config().vio_config_text("insta360-native", profile="fast"))
+    vio_config: _core.VioConfig = _core.VioConfig.from_json(load_slam_config().vio_config_text("insta360", profile="fast"))
     with open_segment(LocalSegment(CLIP_RRD), profile=RigProfile(decode_threads=4), window_s=1.0, include_ground_truth=False) as feed:
         start_ns: int = int(feed.frame_t_ns[0]) + 60_000_000_000
         stop_ns: int = start_ns + 2_300_000_000
