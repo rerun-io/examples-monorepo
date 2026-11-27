@@ -86,6 +86,8 @@ class CalibrationResult:
     """Of the rig model."""
     seconds: float
     """Wall time of the whole calibration."""
+    reconstruction: pycolmap.Reconstruction
+    """The rig model the calibration was read from (camera `i` of `cameras` is COLMAP camera `i + 1`)."""
 
 
 def rig_window_pairs(image_ids: Sequence[Sequence[int | None]], overlap: int) -> list[ImagePair]:
@@ -328,5 +330,10 @@ def calibrate(source: CatalogInputConfig, options: CalibrateOptions) -> Calibrat
     seconds: float = time.perf_counter() - started
     print(f"[colsfm.calibrate] {registered} registered, {error_px:.3f} px, layer {layer_path} in {seconds:.1f} s")
     return CalibrationResult(
-        cameras=cameras, layer_path=layer_path, registered_images=registered, mean_reprojection_error_px=error_px, seconds=seconds
+        cameras=cameras,
+        layer_path=layer_path,
+        registered_images=registered,
+        mean_reprojection_error_px=error_px,
+        seconds=seconds,
+        reconstruction=reconstruction,
     )
