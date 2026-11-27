@@ -11,7 +11,7 @@ What it assumes instead of solving:
 
 - the rig frame is the first selected camera (its `rig_T_cam` is the identity);
 - the scale is the reconstruction's own, not metres: rotations and intrinsics are what the solve found, translations
-  share one unknown factor. The layer says so (`metric_scale=False`). A run that starts from a trajectory composes each
+  share one unknown factor. The layer says so on its root (`metric_scale=False`). A run that starts from a trajectory composes each
   camera as `world_T_rig @ rig_T_cam`, so the layer combines only with a trajectory in the same frame and scale; a metric
   trajectory in another rig frame (slam_rs: the IMU frame, metres) does not combine with it as it is, and `run catalog`
   refuses it (`colsfm.catalog.refuse_unscaled_calibration`).
@@ -322,8 +322,8 @@ def calibrate(source: CatalogInputConfig, options: CalibrateOptions) -> Calibrat
             num_rig_frames=len(streams[0].names),
             registered_images=sum(registered.values()),
             mean_reprojection_error_px=error_px,
-            metric_scale=False,
         ),
+        metric_scale=False,
     )
     seconds: float = time.perf_counter() - started
     print(f"[colsfm.calibrate] {registered} registered, {error_px:.3f} px, layer {layer_path} in {seconds:.1f} s")

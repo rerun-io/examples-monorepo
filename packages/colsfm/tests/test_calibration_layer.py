@@ -73,8 +73,10 @@ def _segment(tmp_path: Path) -> CatalogInputConfig:
             )
     # The camera nodes are `/world/rig_00/<node>`: the same writer, with the node as the name.
     nodes: tuple[CatalogCameraModel, ...] = tuple(dataclasses.replace(camera, name=camera.entity.rsplit("/", 1)[1]) for camera in RECORDED)
-    write_calibration_layer(tmp_path / "recorded.rrd", "seg", nodes, rr.AnyValues(source="recorded"), root="/world/rig_00")
-    write_calibration_layer(tmp_path / "calibrate.rrd", "seg", tuple(_calibrated(camera) for camera in RECORDED), rr.AnyValues(metric_scale=False))
+    write_calibration_layer(tmp_path / "recorded.rrd", "seg", nodes, rr.AnyValues(source="recorded"), root="/world/rig_00", metric_scale=True)
+    write_calibration_layer(
+        tmp_path / "calibrate.rrd", "seg", tuple(_calibrated(camera) for camera in RECORDED), rr.AnyValues(source="calibrate"), metric_scale=False
+    )
     return CatalogInputConfig(
         dataset="robocap",
         rrd=base,
@@ -119,28 +121,36 @@ def test_a_camera_that_does_not_fit_its_projection_leaves_the_previous_layer_who
     import rerun as rr
 
     layer: Path = tmp_path / "calibrate.rrd"
-    write_calibration_layer(layer, "seg", RECORDED, rr.AnyValues(source="first"))
+    write_calibration_layer(layer, "seg", RECORDED, rr.AnyValues(source="first"), metric_scale=True)
     before: bytes = layer.read_bytes()
     broken: CatalogCameraModel = dataclasses.replace(RECORDED[1], distortion=(0.1, 0.2))
     with pytest.raises(ValueError, match="right_front: DISTORTED_PINHOLE takes 8"):
-        write_calibration_layer(layer, "seg", (RECORDED[0], broken), rr.AnyValues(source="second"))
+        write_calibration_layer(layer, "seg", (RECORDED[0], broken), rr.AnyValues(source="second"), metric_scale=True)
     assert layer.read_bytes() == before
     assert sorted(path.name for path in tmp_path.iterdir()) == ["calibrate.rrd"]
     assert layer.stat().st_mode & 0o777 == 0o644
 
 
 @pytest.mark.integration
-def test_a_run_refuses_a_calibration_in_its_own_scale_and_takes_a_metric_one(tmp_path: Path) -> None:
-    """Needs a catalog server (an in-process one, on an OS port)."""
+def test_a_run_refuses_a_calibration_in_its_own_scale_and_takes_a_metric_one_of_the_same_segment(tmp_path: Path) -> None:
+    """Needs a catalog server (an in-process one, on an OS port). Each calibration root states its own scale."""
     import rerun as rr
     from rerun.catalog import CatalogClient
 
     from colsfm.catalog import prepare_catalog_input, refuse_unscaled_calibration
 
-    unscaled: CatalogInputConfig = dataclasses.replace(_segment(tmp_path), calibration_entity=CALIBRATION_ENTITY)
-    with serve_catalog_input(unscaled) as served, pytest.raises(ValueError, match="metric_scale=False"):
-        prepare_catalog_input(served)  # refused before the trajectory is read: the fixture has none
-    write_calibration_layer(tmp_path / "metric.rrd", "seg", tuple(_calibrated(camera) for camera in RECORDED), rr.AnyValues(metric_scale=True))
-    metric: CatalogInputConfig = dataclasses.replace(unscaled, layers={**unscaled.layers, "calibrate": tmp_path / "metric.rrd"})
-    with serve_catalog_input(metric) as served:
-        refuse_unscaled_calibration(CatalogClient(served.catalog_url).get_dataset(name="robocap"), served.segment, CALIBRATION_ENTITY)
+    metric_root: str = "/world/runs/aligned/rig"
+    write_calibration_layer(
+        tmp_path / "metric.rrd",
+        "seg",
+        tuple(_calibrated(camera) for camera in RECORDED),
+        rr.AnyValues(source="aligned"),
+        root=metric_root,
+        metric_scale=True,
+    )
+    both: CatalogInputConfig = _segment(tmp_path)
+    both = dataclasses.replace(both, layers={**both.layers, "metric": tmp_path / "metric.rrd"}, calibration_entity=CALIBRATION_ENTITY)
+    with serve_catalog_input(both) as served:
+        with pytest.raises(ValueError, match="metric_scale=False"):
+            prepare_catalog_input(served)  # refused before the trajectory is read: the fixture has none
+        refuse_unscaled_calibration(CatalogClient(served.catalog_url).get_dataset(name="robocap"), served.segment, metric_root)

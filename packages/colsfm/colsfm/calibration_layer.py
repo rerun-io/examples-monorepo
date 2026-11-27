@@ -46,7 +46,13 @@ def simplecv_camera(camera: CatalogCameraModel) -> PinholeParameters | Fisheye62
 
 
 def write_calibration_layer(
-    rrd_path: Path, segment: str, cameras: Sequence[CatalogCameraModel], properties: rr.AnyValues, root: str = CALIBRATION_ENTITY
+    rrd_path: Path,
+    segment: str,
+    cameras: Sequence[CatalogCameraModel],
+    properties: rr.AnyValues,
+    root: str = CALIBRATION_ENTITY,
+    *,
+    metric_scale: bool,
 ) -> None:
     """Write cameras as a calibration layer of `segment`; the file appears whole or not at all.
 
@@ -56,6 +62,8 @@ def write_calibration_layer(
         cameras: The calibration to write.
         properties: The `colsfm_calibrate` recording property (how the calibration was made).
         root: The entity the cameras go under.
+        metric_scale: Whether the translations are in metres; logged on `root` itself, so each calibration of a segment
+            states its own (`colsfm.catalog.refuse_unscaled_calibration` reads it).
 
     Raises:
         ValueError: When a camera's distortion does not fit its projection (nothing is written).
@@ -70,6 +78,7 @@ def write_calibration_layer(
     try:
         recording: rr.RecordingStream = open_layer(staging, segment)
         try:
+            recording.log(root, rr.AnyValues(metric_scale=metric_scale), static=True)
             for model in models:
                 log_pinhole(model, Path(f"{root}/{model.name}"), image_plane_distance=IMAGE_PLANE_DISTANCE, static=True, recording=recording)
             recording.send_property(CALIBRATION_PROPERTY, properties)

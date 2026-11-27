@@ -46,7 +46,7 @@ from simplecv.catalog_video_reader import StreamIndex, read_video_index
 from simplecv.rrd_query_utils import first_valid_value
 
 from colsfm import DATA_DIR
-from colsfm.alignment import GROUND_TRUTH_FILE_NAME
+from colsfm.alignment import GROUND_TRUTH_FILE_NAME, match_timestamps
 from colsfm.export import write_tum_file
 from colsfm.frame_manifest import FRAME_SOURCE_FILE, FrameSourceManifest, StreamKeyframes, write_manifest
 from colsfm.frame_poses import ViewRigSource
@@ -621,36 +621,33 @@ def nearest_packets(videos: Sequence[StreamIndex], targets_ns: Sequence[int], to
     Returns:
         Per camera, rig frame index -> packet index; a rig frame the camera has no packet for is absent.
     """
+    targets: Int64[ndarray, " k"] = np.asarray(targets_ns, dtype=np.int64)
     selection: list[dict[int, int]] = []
     for video in videos:
-        chosen: dict[int, int] = {}
-        for sample, target in enumerate(targets_ns):
-            nearest: int = int(np.clip(np.searchsorted(video.t_ns, target), 1, len(video.t_ns) - 1))
-            nearest = nearest if abs(int(video.t_ns[nearest]) - target) < abs(int(video.t_ns[nearest - 1]) - target) else nearest - 1
-            frame_t: int = int(video.t_ns[nearest])
-            if abs(frame_t - target) <= tolerance_ns and span_ns[0] <= frame_t <= span_ns[1]:
-                chosen[sample] = nearest
-        selection.append(chosen)
+        samples, packets = match_timestamps(targets, video.t_ns, tolerance_ns)  # any integer unit; nanoseconds here
+        inside = (video.t_ns[packets] >= span_ns[0]) & (video.t_ns[packets] <= span_ns[1])
+        selection.append({int(sample): int(packet) for sample, packet in zip(samples[inside], packets[inside], strict=True)})
     return selection
 
 
 def refuse_unscaled_calibration(dataset: DatasetEntry, segment: str, calibration_entity: str) -> None:
-    """Refuse a calibration layer that says it is not in metres before it is composed with a trajectory.
+    """Refuse a calibration that says it is not in metres before it is composed with a trajectory.
 
-    `colsfm calibrate` writes its cameras in the first camera's frame and the reconstruction's own scale
-    (`metric_scale=False`); `prepare_catalog_input` composes every camera as `world_T_rig @ rig_T_cam` with a metric
-    trajectory in its own rig frame (slam_rs: the IMU frame), which would put every camera in the wrong place.
-    A layer that states nothing is taken as it is.
+    `colsfm calibrate` writes its cameras in the first camera's frame and the reconstruction's own scale, and says so on
+    the calibration's root (`metric_scale=False`, `colsfm.calibration_layer.write_calibration_layer`);
+    `prepare_catalog_input` composes every camera as `world_T_rig @ rig_T_cam` with a metric trajectory in its own rig
+    frame (slam_rs: the IMU frame), which would put every camera in the wrong place. A root that states nothing is
+    taken as it is.
 
     Raises:
-        ValueError: When the segment's `colsfm_calibrate` property says `metric_scale=False`.
+        ValueError: When `calibration_entity` says `metric_scale=False`.
     """
-    table: pa.Table = dataset.filter_segments(segment).filter_contents(["/__properties/**"]).reader(index=None).to_arrow_table()
-    metric = _static_values(table, f"property:{CALIBRATION_PROPERTY}:metric_scale")
+    table: pa.Table = dataset.filter_segments(segment).filter_contents([calibration_entity]).reader(index=None).to_arrow_table()
+    metric = _static_values(table, f"{calibration_entity}:metric_scale")
     if metric is not None and not metric[0]:
         raise ValueError(
             f"{segment}: the calibration at {calibration_entity} is in its first camera's frame and its own scale "
-            f"({CALIBRATION_PROPERTY}: metric_scale=False), so it cannot be composed with a metric trajectory in another rig frame"
+            "(metric_scale=False), so it cannot be composed with a metric trajectory in another rig frame"
         )
 
 
