@@ -46,7 +46,8 @@ re_sdk_types = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
 re_tracing = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
 re_types_core = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
 re_video = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
-# The web build turns off the default features (see gsplat-viewer/Cargo.toml); native users ask for "default".
+# Without default features (no analytics): gsplat-viewer's `app` feature and gsplat-viewer-web add `default_web`; the
+# gsplat-cli probe asks for `default`.
 re_viewer = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0", default-features = false }
 re_viewer_context = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
 egui_kittest = { version = "0.37.0", features = ["wgpu", "eframe"] }

@@ -6,11 +6,20 @@ edition = "2024"
 [[bin]]
 name = "gsplat-rust-renderer"
 path = "src/main.rs"
+required-features = ["app"]
+
+[features]
+default = ["app"]
+# The standalone gsplat-rust-renderer binary (application.rs) and its runtime. The canonical viewer links the library
+# without it, so none of these reach rerun-canonical. `default_web` = the stock views (map, audio) without analytics;
+# analytics' reqwest pulls a second wasm-streams, whose exported JS classes collide in wasm-bindgen.
+app = ["dep:clap", "dep:egui_kittest", "dep:re_crash_handler", "dep:re_grpc_server", "dep:tokio", "dep:re_video", "re_viewer/default_web"]
 
 [dependencies]
 gsplat-core = { path = "../gsplat-core" }
 anyhow.workspace = true
-clap.workspace = true
+canonical-viewer-extension = { path = "../../../canonical-viewer/rust/crates/extension" }
+clap = { workspace = true, optional = true }
 # Rerun 0.44 is on glam 0.33 (re_math); gsplat-core and Brush stay on the workspace glam 0.30.
 # The viewer speaks Rerun's glam and converts at the gsplat-core boundary (`gsplat_core::glam`).
 glam = "0.33"
@@ -24,28 +33,26 @@ re_byte_size.workspace = true
 re_tracing.workspace = true
 re_format.workspace = true
 re_math = "0.33"
+# Without default features (no analytics); `app` and gsplat-viewer-web add `default_web`, the stock views.
+re_viewer.workspace = true
 ahash = "0.8"
 # Load-time split of SOG decoding (std Instant panics on wasm32).
 web-time = "1.1"
 
-# Native-only: the binary's gRPC server, crash handler, headless harness and runtime. The web build links the lib.
+# Native-only, behind `app`: the binary's gRPC server, crash handler, headless harness and runtime. The web build
+# and the canonical viewer link the lib.
 # Rerun 0.44 uses egui/eframe 0.37, so the headless kittest harness must stay on the same egui family as re_viewer.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-egui_kittest.workspace = true
-re_crash_handler.workspace = true
-re_grpc_server.workspace = true
-tokio = { workspace = true }
-re_viewer = { workspace = true, features = ["default"] }
+egui_kittest = { workspace = true, optional = true }
+re_crash_handler = { workspace = true, optional = true }
+re_grpc_server = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
 # Native AV1 decoding at full speed (the lens and face videos of dataforge recordings): `nasm` turns on dav1d's
 # assembly. Without it Rerun 0.44 refuses AV1 on Linux x86-64 ("compile Rerun with the `nasm` feature") and decodes
 # 2-3x slower on Apple silicon. x86-64 assembles with nasm (the pixi feature's `nasm`); Apple silicon with the C
 # compiler. Linux arm64 has no native AV1 decoder in re_video 0.44 (no dav1d there), so the feature changes nothing.
-re_video = { workspace = true, features = ["nasm"] }
+re_video = { workspace = true, features = ["nasm"], optional = true }
 
-# The web build drops analytics and the agent panel (its reqwest pulls a second wasm-streams,
-# whose exported JS classes collide in wasm-bindgen).
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-re_viewer = { workspace = true, features = ["default_web"] }
 
 # The TRiGS motion reference test reads its .rrd fixture (both crates are already in the graph via re_viewer).
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]

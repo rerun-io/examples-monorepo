@@ -2084,12 +2084,14 @@ description = "Run Python, Rust and GPU integration author checks"
 [feature.gsplat-rust-renderer.tasks.tests-integration]
 cmd = "pytest -q -ra -m integration"
 cwd = "packages/gsplat-rust-renderer"
+# The viewer pixel tests run the canonical viewer with this package's extension: build it from the current sources.
+depends-on = [{ task = "canonical-viewer-build", environment = "canonical-viewer" }]
 description = "Run Python and whole-target Rust integration contracts"
 
 [feature.gsplat-rust-renderer.tasks.tests-golden]
 cmd = "pytest -q -ra -m golden"
 cwd = "packages/gsplat-rust-renderer"
-depends-on = ["gsplat-build"]
+depends-on = ["gsplat-build", { task = "canonical-viewer-build", environment = "canonical-viewer" }]
 description = "Build release tools and compare against golden references"
 
 [feature.gsplat-rust-renderer.tasks.gsplat-log-ply]
@@ -2227,9 +2229,10 @@ cmd = "python tools/prepare_rerun.py"
 cwd = "packages/canonical-viewer"
 description = "Check out the Rerun tag into target/patch/ and apply patches/ (skipped when unchanged)"
 
+# The prepare step is in the command, not in depends-on: other environments call this task (gsplat's tests), and pixi
+# resolves a called task's depends-on in the caller's environment.
 [feature.canonical-viewer.tasks.canonical-viewer-build]
-cmd = "cargo build --release --locked --manifest-path rust/Cargo.toml --target-dir target --bin rerun-canonical"
-depends-on = ["canonical-viewer-prepare"]
+cmd = "python tools/prepare_rerun.py && cargo build --release --locked --manifest-path rust/Cargo.toml --target-dir target --bin rerun-canonical"
 cwd = "packages/canonical-viewer"
 description = "Build rerun-canonical (release) into target/release/"
 

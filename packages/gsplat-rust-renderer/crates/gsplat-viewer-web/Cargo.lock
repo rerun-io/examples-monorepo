@@ -1290,6 +1290,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "canonical-viewer-extension"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "re_viewer",
+]
+
+[[package]]
 name = "cargo-platform"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3961,6 +3969,7 @@ version = "0.1.0"
 dependencies = [
  "ahash",
  "anyhow",
+ "canonical-viewer-extension",
  "clap",
  "egui_kittest",
  "glam 0.33.12",

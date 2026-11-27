@@ -1,9 +1,30 @@
-//! Registration of the compute splat renderer and visualizers, shared by the native and web viewers.
+//! Registration of the compute splat renderer and visualizers, shared by the canonical viewer ([`EXTENSION`]) and the
+//! gsplat native and web viewers.
 
 use crate::visualizer;
+use canonical_viewer_extension::Extension;
 use re_sdk_types::View as _;
 use re_viewer::external::{eframe, re_renderer, re_sdk_types, re_viewer_context};
 use std::sync::Arc;
+
+/// The gsplat extension of the canonical viewer: the compute splat renderer, its visualizers and its device needs.
+pub const EXTENSION: Extension = Extension {
+    name: "gsplat",
+    device_needs: Some(|offered_features, offered_limits, wanted| {
+        apply_compute_needs(
+            offered_features,
+            offered_limits,
+            gsplat_core::subgroups_allowed(),
+            wanted,
+        );
+    }),
+    // Default framing on splat and hexel bounds (crate::bounds), which Rerun's spatial views cannot see.
+    replaces_fallbacks: &[
+        ("3D", "EyeControls3D:position"),
+        ("3D", "EyeControls3D:look_target"),
+    ],
+    register: register_compute_splats,
+};
 
 /// Register the compute splat renderer and the `Spatial3DView` visualizers on a stock viewer.
 pub fn register_compute_splats(viewer: &mut re_viewer::App) -> anyhow::Result<()> {
@@ -53,21 +74,34 @@ pub fn compute_device_descriptor(
             re_renderer::device_caps::DeviceCaps::from_adapter_without_validation(adapter)
                 .device_descriptor();
         descriptor.label = Some("Gaussian compute viewer");
-        let available = adapter.limits();
-        if gsplat_core::check_adapter(&available).is_ok() {
-            if allow_subgroups {
-                descriptor.required_features |= adapter.features() & wgpu::Features::SUBGROUP;
-            }
-            if crate::profile::requested() {
-                descriptor.required_features |=
-                    adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
-            }
-            descriptor.required_limits =
-                gsplat_core::compute_limits(&available, descriptor.required_limits);
-        }
         descriptor.memory_hints = wgpu::MemoryHints::MemoryUsage;
+        apply_compute_needs(
+            &adapter.features(),
+            &adapter.limits(),
+            allow_subgroups,
+            &mut descriptor,
+        );
         descriptor
     })
+}
+
+/// Add the splat kernels' features and limits to `descriptor`, out of what the adapter offers.
+fn apply_compute_needs(
+    offered_features: &wgpu::Features,
+    offered_limits: &wgpu::Limits,
+    allow_subgroups: bool,
+    descriptor: &mut wgpu::DeviceDescriptor<'static>,
+) {
+    if gsplat_core::check_adapter(offered_limits).is_ok() {
+        if allow_subgroups {
+            descriptor.required_features |= *offered_features & wgpu::Features::SUBGROUP;
+        }
+        if crate::profile::requested() {
+            descriptor.required_features |= *offered_features & wgpu::Features::TIMESTAMP_QUERY;
+        }
+        descriptor.required_limits =
+            gsplat_core::compute_limits(offered_limits, descriptor.required_limits.clone());
+    }
 }
 
 pub(crate) fn register_splat_system(
@@ -81,4 +115,25 @@ pub(crate) fn register_splat_system(
     registrator.register_context_system::<crate::selection::AutomaticComputeSelection>()?;
     registrator.register_visualizer::<visualizer::GaussianSplatVisualizer>()?;
     registrator.register_visualizer::<crate::hexels::HexelVisualizer>()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use re_sdk_types::blueprint::{archetypes::EyeControls3D, views::Spatial3DView};
+
+    #[test]
+    fn replaced_fallbacks_name_what_bounds_registers() {
+        let view = Spatial3DView::identifier();
+        let expected = [
+            EyeControls3D::descriptor_position().component,
+            EyeControls3D::descriptor_look_target().component,
+        ]
+        .map(|component| (view.as_str().to_owned(), component.as_str().to_owned()));
+        let declared = EXTENSION
+            .replaces_fallbacks
+            .iter()
+            .map(|(view, component)| ((*view).to_owned(), (*component).to_owned()));
+        assert!(declared.eq(expected));
+    }
 }
