@@ -1,7 +1,7 @@
 """Build the custom gsplat viewer for the web: the stock Rerun web viewer plus the compute splat renderer.
 
-Steps: prepare the patched re_viewer and wgpu crates from their verified crates.io archives
-(patches/*.patch, applied to crates/gsplat-viewer-web/target/patch/), build crates/gsplat-viewer-web
+Steps: prepare a checkout of the Rerun release tag with the patched re_viewer, and the patched wgpu crate from its
+verified crates.io archive (patches/*.patch, applied under target/patch/ and crates/gsplat-viewer-web/target/patch/), build crates/gsplat-viewer-web
 for wasm32, run wasm-bindgen (output named re_viewer, like the stock viewer) and wasm-opt, then write
 a viewer directory with the stock layout: the app files (index.html, re_viewer.js, re_viewer_bg.wasm)
 and npm/ (index.js and the ES-module re_viewer.js that @rerun-io/web-viewer imports).
@@ -40,8 +40,33 @@ class PatchedCrate:
 
 
 PATCHED_CRATES: tuple[PatchedCrate, ...] = (
-    PatchedCrate("re_viewer", "0.42.0", "1764a375b91a2bd32d8bd772b1e69679cf790392d84037569eff5fbc6e6c7741", "patches/re_viewer-0.42.0-web-hooks.patch"),
     PatchedCrate("wgpu", "30.0.0", "6d8f4bd44d92da5270f03409dba9f952dab24f128e05d6a554926101d1bf9114", "patches/wgpu-30.0.0-webgpu-subgroups.patch"),
+)
+
+
+@dataclass(frozen=True, slots=True)
+class PatchedGitTag:
+    """A git tag of a whole Cargo workspace and the patch applied to one of its crates."""
+
+    name: str
+    url: str
+    tag: str
+    commit: str
+    """The tag's commit, checked after the fetch."""
+    crate_dir: str
+    """Directory of the patched crate in the checkout."""
+    patch: str
+    """Patch path relative to the package directory."""
+
+
+# Rerun 0.44.0 is not on crates.io; the web crate's [patch."https://github.com/rerun-io/rerun"] points into this checkout.
+RERUN_TAG: PatchedGitTag = PatchedGitTag(
+    "rerun",
+    "https://github.com/rerun-io/rerun",
+    "0.44.0",
+    "f346ba2728b9f55afdfd5afdb2b976fecb98dcdd",
+    "crates/top/re_viewer",
+    "patches/re_viewer-0.44.0-web-hooks.patch",
 )
 
 
@@ -82,6 +107,50 @@ def prepare(crate: PatchedCrate, cargo_home: Path) -> None:
     print(f"{stem}: prepared")
 
 
+def prepare_git_tag(source: PatchedGitTag, cargo_home: Path) -> None:
+    """Check out one tag and patch one crate into the package's target/patch/, unless an identical tree is there."""
+    stem: str = f"{source.name}-{source.tag}"
+    destination: Path = PACKAGE_DIR / "target/patch" / stem
+    patch: Path = PACKAGE_DIR / source.patch
+    fingerprint: str = f"{source.commit}\n{hashlib.sha256(patch.read_bytes()).hexdigest()}\n"
+    marker: Path = destination / ".prepared-sha256"
+    if marker.is_file() and marker.read_text() == fingerprint:
+        print(f"{stem}: unchanged")
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=f".{stem}-", dir=destination.parent) as temporary:
+        staging: Path = Path(temporary)
+        # Rerun keeps test snapshots in LFS; git archive would download them through the smudge filter.
+        git_env: dict[str, str] = dict(os.environ, GIT_CEILING_DIRECTORIES=str(staging.parent), GIT_LFS_SKIP_SMUDGE="1")
+        # Cargo's own clone of the tag (the native build fetched it) saves the download.
+        repository: Path | None = next(
+            (
+                db
+                for db in sorted((cargo_home / "git/db").glob(f"{source.name}-*"))
+                if subprocess.run(["git", f"--git-dir={db}", "cat-file", "-e", f"{source.commit}^{{commit}}"], capture_output=True).returncode == 0
+            ),
+            None,
+        )
+        if repository is None:
+            repository = staging / "repository.git"
+            subprocess.run(["git", "init", "-q", "--bare", str(repository)], env=git_env, check=True)
+            subprocess.run(["git", f"--git-dir={repository}", "fetch", "-q", "--depth", "1", source.url, f"refs/tags/{source.tag}"], env=git_env, check=True)
+            fetched: str = subprocess.run(
+                ["git", f"--git-dir={repository}", "rev-parse", "FETCH_HEAD^{commit}"], env=git_env, check=True, capture_output=True, text=True
+            ).stdout.strip()
+            if fetched != source.commit:
+                raise ValueError(f"{stem}: tag {source.tag} is {fetched}, expected {source.commit}")
+        archive: bytes = subprocess.run(["git", f"--git-dir={repository}", "archive", "--format=tar", source.commit], env=git_env, check=True, capture_output=True).stdout
+        with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+            tar.extractall(staging / stem, filter="data")
+        subprocess.run(["git", "apply", "-p1", f"--directory={stem}/{source.crate_dir}", str(patch)], cwd=staging, env=git_env, check=True)
+        (staging / stem / ".prepared-sha256").write_text(fingerprint)
+        if destination.exists():
+            destination.rename(staging / "previous")
+        (staging / stem).rename(destination)
+    print(f"{stem}: prepared")
+
+
 def npm_module(no_modules_js: str) -> str:
     """Turn wasm-bindgen's no-modules output into the ES module with a default factory that npm/index.js imports."""
     head: str = "let wasm_bindgen = (function(exports) {"
@@ -105,11 +174,11 @@ class BuildWebViewerConfig:
     """Build the web viewer and write it in the stock /rerun-viewer/<version>/ layout."""
 
     stock_dir: Path
-    """A stock Rerun 0.42.0 web viewer directory (index.html, npm/index.js, ...) to copy the shell files from."""
+    """A stock Rerun 0.44.0 web viewer directory (index.html, npm/index.js, ...) to copy the shell files from."""
     out_dir: Path
-    """Output viewer directory, e.g. .../rerun-viewer/0.42.0-gsplat; replaced if it exists."""
+    """Output viewer directory, e.g. .../rerun-viewer/0.44.0-gsplat; replaced if it exists."""
     cargo_home: Path = Path(os.environ.get("CARGO_HOME", str(Path.home() / ".cargo")))
-    """Cargo home with the crates.io archive cache."""
+    """Cargo home with the crates.io archive cache and Cargo's git clones."""
     wasm_opt: bool = True
     """Run wasm-opt -O2 (strips debug info and names; about a minute)."""
     toolchain_prefix: Path | None = None
@@ -119,6 +188,7 @@ class BuildWebViewerConfig:
 
 def main(config: BuildWebViewerConfig) -> None:
     """Prepare patches, build, bind, optimise and lay out the web viewer."""
+    prepare_git_tag(RERUN_TAG, config.cargo_home)
     for crate in PATCHED_CRATES:
         prepare(crate, config.cargo_home)
     prefix: Path = config.toolchain_prefix or Path(os.environ["CONDA_PREFIX"])
