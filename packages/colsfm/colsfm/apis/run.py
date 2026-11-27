@@ -1,4 +1,5 @@
-"""The colsfm CLI: `run` (a cuSFM input folder), `catalog` (a Rerun catalog segment) and `stage` (one cheap stage).
+"""The colsfm CLI: `run` (a cuSFM input folder), `catalog` (a Rerun catalog segment), `calibrate` (an uncalibrated rig on a
+catalog segment) and `stage` (one cheap stage).
 
 `run` and `catalog` with no other flag run the fast full pipeline: RaCo-ALIKED features, FlexGlue matching (both on
 TensorRT), loop closure, CASPAR bundle adjustment (no closing Ceres solve; `--caspar-ceres-polish` adds one), and the regularised rig-extrinsic refinement. Every one
@@ -9,6 +10,10 @@ run and names those tasks.
 `catalog` reads the rig, the video and the initial trajectory from a catalog segment (`colsfm.catalog`), runs the
 pipeline on the decoded keyframes, and writes the run as a `/world/runs/colsfm` layer of that segment
 (`colsfm.rerun_layer`).
+
+`calibrate` estimates the rig's intrinsics and extrinsics on a window of a catalog segment and writes them as a
+calibration layer (`colsfm.calibrate`) in its first camera's frame and its own scale, which `catalog` refuses to compose
+with a metric trajectory (`metric_scale=False`).
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ import tyro
 from simplecv.run_record import RunStart, start_run
 
 from colsfm import DATA_DIR
+from colsfm.calibrate import CalibrateOptions, calibrate
 from colsfm.catalog import CatalogInputConfig, PreparedInput, prepare_catalog_input, serve_catalog_input
 from colsfm.frame_manifest import FRAME_SOURCE_FILE, read_manifest
 from colsfm.pipeline import StageResult, run_pipeline, run_stage
@@ -91,6 +97,21 @@ class CatalogCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class CalibrateCommand:
+    """Estimate an uncalibrated rig's intrinsics and extrinsics on a window of a catalog segment, as a calibration layer."""
+
+    source: CatalogInputConfig
+    """Segment and cameras; the window is the trimmed segment. The trajectory, stride and recorded calibration are not read."""
+    options: CalibrateOptions = field(default_factory=CalibrateOptions)
+    """Model, number of rig frames and outputs."""
+
+    def execute(self) -> None:
+        """Serve a local input for the whole calibration, then calibrate."""
+        with serve_catalog_input(self.source) as source:
+            calibrate(source, self.options)
+
+
+@dataclass(frozen=True, slots=True)
 class StageCommand:
     """Run one metadata-only stage, without touching images or a GPU."""
 
@@ -108,6 +129,7 @@ class StageCommand:
 Command: TypeAlias = (
     Annotated[RunCommand, tyro.conf.subcommand("run", description="Run the whole pipeline on a cuSFM input folder")]
     | Annotated[CatalogCommand, tyro.conf.subcommand("catalog", description="Run the whole pipeline on a catalog segment")]
+    | Annotated[CalibrateCommand, tyro.conf.subcommand("calibrate", description="Estimate an uncalibrated rig's intrinsics and extrinsics")]
     | Annotated[StageCommand, tyro.conf.subcommand("stage", description="Run one metadata-only stage")]
 )
 """The subcommands the CLI offers."""
