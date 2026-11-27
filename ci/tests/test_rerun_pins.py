@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import pytest
 import tomllib
 
 REPO_ROOT: Path = Path(__file__).resolve().parents[2]
@@ -20,6 +21,7 @@ PATCHED_GIT: tuple[str, ...] = (
     "https://github.com/rerun-io/re_mp4.git",
 )
 WEB_VIEWER_BUILD: Path = REPO_ROOT / "packages/gsplat-rust-renderer/gsplat_rust_renderer/apis/build_web_viewer.py"
+CANONICAL_PREPARE: Path = REPO_ROOT / "packages/canonical-viewer/canonical_viewer/apis/prepare_rerun.py"
 
 
 def _cargo_manifests() -> list[Path]:
@@ -70,7 +72,8 @@ def test_patched_egui_family_uses_one_rev_per_repository() -> None:
     assert revs[PATCHED_GIT[0]], "no [patch.crates-io] entry pins the egui family"
 
 
-def test_gsplat_web_viewer_builds_the_conda_pin_tag() -> None:
-    match: re.Match[str] | None = re.search(r'^RERUN_TAG: str = "([^"]+)"$', WEB_VIEWER_BUILD.read_text(), flags=re.MULTILINE)
-    assert match is not None, f"{WEB_VIEWER_BUILD.relative_to(REPO_ROOT)}: RERUN_TAG constant not found"
+@pytest.mark.parametrize("script", [WEB_VIEWER_BUILD, CANONICAL_PREPARE], ids=lambda script: script.parent.parent.name)
+def test_patched_rerun_checkouts_use_the_conda_pin_tag(script: Path) -> None:
+    match: re.Match[str] | None = re.search(r'^RERUN_TAG: str = "([^"]+)"$', script.read_text(), flags=re.MULTILINE)
+    assert match is not None, f"{script.relative_to(REPO_ROOT)}: RERUN_TAG constant not found"
     assert match.group(1) == _conda_rerun_version()

@@ -1,0 +1,13 @@
+[package]
+name = "canonical-viewer-extension"
+description = "The contract between the canonical Rerun viewer and one extension crate"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+re_viewer.workspace = true
+
+[lints]
+workspace = true

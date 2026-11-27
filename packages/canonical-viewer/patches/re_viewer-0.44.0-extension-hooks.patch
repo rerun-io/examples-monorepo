@@ -1,0 +1,54 @@
+diff --git a/crates/top/re_viewer/src/app/mod.rs b/crates/top/re_viewer/src/app/mod.rs
+--- a/crates/top/re_viewer/src/app/mod.rs
++++ b/crates/top/re_viewer/src/app/mod.rs
+@@ -738,7 +738,11 @@
+             async_runtime,
+         };
+ 
+-        Self { store_hub, core }
++        let mut app = Self { store_hub, core };
++        if let Some(setup_app) = crate::extension_hooks::SETUP_APP.get() {
++            setup_app(&mut app);
++        }
++        app
+     }
+ 
+     /// Interface for all recordings and blueprints.
+diff --git a/crates/top/re_viewer/src/lib.rs b/crates/top/re_viewer/src/lib.rs
+--- a/crates/top/re_viewer/src/lib.rs
++++ b/crates/top/re_viewer/src/lib.rs
+@@ -117,6 +117,19 @@
+ #[cfg(not(target_arch = "wasm32"))]
+ pub use headless::run_headless_app;
+ 
++/// Hooks for a viewer that links `re_viewer` and adds renderers, visualizers or device needs.
++///
++/// Set them once, before the viewer starts: in `main` on native, in `#[wasm_bindgen(start)]` on the web.
++/// They apply to the native, headless and web viewers alike.
++pub mod extension_hooks {
++    /// Adjusts the wgpu configuration that every viewer (native, headless, web) passes to eframe.
++    pub static WGPU_OPTIONS: std::sync::OnceLock<fn(&mut egui_wgpu::WgpuConfiguration)> =
++        std::sync::OnceLock::new();
++
++    /// Runs on every new [`crate::App`] once it is constructed.
++    pub static SETUP_APP: std::sync::OnceLock<fn(&mut crate::App)> = std::sync::OnceLock::new();
++}
++
+ // ----------------------------------------------------------------------------
+ // When compiling for web:
+ 
+@@ -211,6 +224,14 @@
+ // ---------------------------------------------------------------------------
+ 
+ pub(crate) fn wgpu_options(force_wgpu_backend: Option<&str>) -> egui_wgpu::WgpuConfiguration {
++    let mut options = stock_wgpu_options(force_wgpu_backend);
++    if let Some(adjust) = extension_hooks::WGPU_OPTIONS.get() {
++        adjust(&mut options);
++    }
++    options
++}
++
++fn stock_wgpu_options(force_wgpu_backend: Option<&str>) -> egui_wgpu::WgpuConfiguration {
+     re_tracing::profile_function!();
+ 
+     let instance_descriptor = re_renderer::device_caps::instance_descriptor(force_wgpu_backend);

@@ -137,6 +137,8 @@ packages/vistadream/ckpt/
 
 # depth-video-viewer
 packages/depth-video-viewer/target/
+packages/canonical-viewer/target/
+packages/canonical-viewer/rust/target/
 
 # gsplat-rust-renderer
 packages/gsplat-rust-renderer/target/

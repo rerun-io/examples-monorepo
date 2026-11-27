@@ -2177,6 +2177,77 @@ depends-on = ["lint", "typecheck", "deadcode", "tests", "tests-integration", "de
 description = "Run Python and Rust author checks"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# canonical-viewer — the one Rerun viewer that holds every viewer extension and Rerun patch (rerun-canonical)
+# ═══════════════════════════════════════════════════════════════════════════
+[feature.canonical-viewer]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.canonical-viewer.dependencies]
+python = "3.12.*"
+# Pinned Rerun crates share this Rust toolchain (Rerun 0.44 requires rustc 1.98).
+rust = "1.98.*"
+clang = "*"
+cmake = "*"
+pkg-config = "*"
+# dav1d's x86-64 assembly (the `nasm` feature): without it Rerun refuses AV1 on Linux x86-64.
+nasm = "*"
+git = "*"
+numpy = "*"
+jaxtyping = "*"
+pillow = "*"
+tyro = ">=0.9.1,<0.10"
+rerun-sdk = { version = "==0.44.0", channel = "https://prefix.dev/conda-forge" }  # pin-bump: hold — the stock viewer the parity golden compares against; moves with the canonical viewer's Rerun tag
+python-dateutil = "<3"  # conda rerun-sdk (ipykernel -> jupyter_client) would take 4.x
+# gilrs (via re_viewer) links libudev through pkg-config at build time.
+libudev = "257.*"
+libxkbcommon = "*"
+wayland = "*"
+xorg-libx11 = "*"
+xorg-libxcursor = "*"
+xorg-libxi = "*"
+xorg-libxinerama = "*"
+xorg-libxrandr = "*"
+
+[feature.canonical-viewer.pypi-dependencies]
+canonical-viewer = { path = "packages/canonical-viewer", editable = true }
+
+[feature.canonical-viewer.activation.env]
+PACKAGE_DIR = "packages/canonical-viewer"
+PYREFLY_TARGET = "canonical_viewer tools tests"
+CARGO_PROFILE_DEV_DEBUG = "0"
+CARGO_PROFILE_TEST_DEBUG = "0"
+CARGO_INCREMENTAL = "0"
+PKG_CONFIG_PATH = "${CONDA_PREFIX}/lib/pkgconfig"
+
+[feature.canonical-viewer.tasks.canonical-viewer-prepare]
+cmd = "python tools/prepare_rerun.py"
+cwd = "packages/canonical-viewer"
+description = "Check out the Rerun tag into target/patch/ and apply patches/ (skipped when unchanged)"
+
+[feature.canonical-viewer.tasks.canonical-viewer-build]
+cmd = "cargo build --release --locked --manifest-path rust/Cargo.toml --target-dir target --bin rerun-canonical"
+depends-on = ["canonical-viewer-prepare"]
+cwd = "packages/canonical-viewer"
+description = "Build rerun-canonical (release) into target/release/"
+
+[feature.canonical-viewer.tasks.rerun-canonical]
+cmd = "target/release/rerun-canonical"
+depends-on = ["canonical-viewer-build"]
+cwd = "packages/canonical-viewer"
+description = "Run rerun-canonical; any `rerun` arguments follow (an .rrd path, --headless, mcp, ...)"
+
+# Call the env's cargo-fmt/cargo-clippy directly (see gsplat-rust-check for why).
+[feature.canonical-viewer.tasks.canonical-viewer-rust-check]
+cmd = "cargo-fmt --manifest-path rust/Cargo.toml -p canonical-viewer -p canonical-viewer-extension -- --check && cargo-clippy clippy --locked --manifest-path rust/Cargo.toml --target-dir target --all-targets -- -D warnings && cargo test --locked --manifest-path rust/Cargo.toml --target-dir target"
+depends-on = ["canonical-viewer-prepare"]
+cwd = "packages/canonical-viewer"
+description = "Check Rust formatting, run Clippy and the Rust unit tests"
+
+[feature.canonical-viewer.tasks.gate]
+depends-on = ["lint", "typecheck", "deadcode", "tests", "canonical-viewer-rust-check", "canonical-viewer-build", "tests-integration"]
+description = "Run Python and Rust author checks (integration needs the release build)"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # hexels — upstream Hexels (CUDA 13 build in recipes/hexels-src) + our protocol tools
 # ═══════════════════════════════════════════════════════════════════════════
 # hexel-kernel installs as the Python module `gsplat`: never compose this feature with nerfstudio gsplat.
@@ -4813,6 +4884,15 @@ gsplat-rust-renderer-web = { features = [
     "gsplat-web",
     "ffmpeg",
 ], solve-group = "gsplat-rust-renderer", no-default-feature = true }
+canonical-viewer = { features = [
+    "canonical-viewer",
+    "ffmpeg",
+], solve-group = "canonical-viewer", no-default-feature = true }
+canonical-viewer-dev = { features = [
+    "canonical-viewer",
+    "dev",
+    "ffmpeg",
+], solve-group = "canonical-viewer", no-default-feature = true }
 depth-video-viewer = { features = [
     "depth-video-viewer",
     "ffmpeg",
