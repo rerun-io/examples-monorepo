@@ -26,6 +26,7 @@ model. Do not mix these keypoints with COLMAP-detected features.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import replace
 from typing import Final, Literal, TypeAlias
 
@@ -60,6 +61,24 @@ PINHOLE_FAMILY_MODELS: Final[frozenset[CameraProjectionModel]] = frozenset({"PIN
 """The two models exported from the rectified 3x4 `projection_matrix` rather than the
 raw 3x3 `camera_matrix` (export.md §3.3). `colsfm.rerun_log` picks its intrinsics the
 same way, so the membership test lives here rather than in two hardcoded tuples."""
+
+
+def colmap_model_and_parameters(
+    projection: CameraProjectionModel, k_matrix: Float64[ndarray, "3 3"], distortion: Sequence[float]
+) -> tuple[ColmapCameraModel, CameraParameters]:
+    """The COLMAP model and parameters of a camera given as a projection, its 3x3 intrinsics and its distortion.
+
+    `COLMAP_MODEL_BY_PROJECTION_MODEL` picks the model; the parameters are `fx fy cx cy` and then the distortion in the
+    model's order, which is the order a catalog camera (`colsfm.catalog.CatalogCameraModel`) keeps it in.
+
+    Raises:
+        ValueError: When the distortion does not have the model's number of coefficients.
+    """
+    wanted: int = DISTORTION_COUNT_BY_PROJECTION_MODEL.get(projection, 0)
+    if len(distortion) != wanted:
+        raise ValueError(f"{projection} takes {wanted} distortion coefficients, got {len(distortion)}")
+    pinhole: list[float] = [float(k_matrix[0, 0]), float(k_matrix[1, 1]), float(k_matrix[0, 2]), float(k_matrix[1, 2])]
+    return COLMAP_MODEL_BY_PROJECTION_MODEL[projection], np.asarray([*pinhole, *distortion], dtype=np.float64)
 
 
 def _pinhole_parameters_from_projection_matrix(camera: CameraParams) -> CameraParameters:
