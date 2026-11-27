@@ -11,12 +11,6 @@ from torch import nn
 from torch.profiler import ProfilerActivity, profile, schedule, tensorboard_trace_handler
 from tqdm import tqdm
 
-try:
-    import wandb  # noqa: F401
-    WANDB_AVAILABLE = True
-except ImportError:
-    WANDB_AVAILABLE = False
-
 from monopriors.models.zipdepth_checkpoint import RANGE_MARGIN_COVERAGE_MAX_KEY, RANGE_MARGIN_M_KEY
 from monopriors.third_party.zipdepth.model_utils import strip_state_dict_prefixes
 
@@ -48,7 +42,6 @@ class ZipDepthTrainer:
                 scheduler,
                 device,
                 use_amp=True,
-                log_wandb=False,
                 writer=None,
                 is_distributed=False,
                 rank=0,
@@ -78,7 +71,6 @@ class ZipDepthTrainer:
             scheduler: Learning rate scheduler (optional)
             device: Training device
             use_amp: Enable automatic mixed precision training
-            log_wandb: Enable Weights & Biases logging
             writer: TensorBoard SummaryWriter instance (optional)
             is_distributed: Whether running in distributed mode
             rank: Process rank for distributed training
@@ -111,7 +103,6 @@ class ZipDepthTrainer:
         self.scheduler = scheduler
         self.device = device
         self.use_amp = use_amp
-        self.log_wandb = log_wandb and WANDB_AVAILABLE
         self.writer = writer
         self.global_step = 0
         self.training_stage = 0
