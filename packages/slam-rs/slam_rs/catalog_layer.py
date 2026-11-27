@@ -111,7 +111,8 @@ def track_layer(
     log_layer(rec, run, clock_offset_ns=feed.video_time_offset_ns, profile=profile, backend=str(_core.gpu_backend) if vio.gpu else "cpu",
               decoder=feed.decode_device, detail=detail, animate_base_rig=animate_base_rig,
               lenses=tuple(zip(feed.cameras, dataset_videos(feed.camera_positions), strict=True)),
-              walk_span_ns=(int(feed.frame_t_ns[0]) - cam_offset_ns, int(feed.frame_t_ns[-1]) - cam_offset_ns), strict=strict)
+              walk_span_ns=(int(feed.frame_t_ns[0]) - cam_offset_ns, int(feed.frame_t_ns[-1]) - cam_offset_ns), strict=strict,
+              mask_entities=() if feed.masks is None else feed.masks.entities)
     if stage is not None:
         stage.finish(shift_clock(run.estimate if run.final is None else run.final, -feed.export_offset_ns), run.map_result)
     return LayerRun(run=run, stage=stage)
@@ -149,6 +150,7 @@ def log_layer(
     lenses: Sequence[tuple[CameraCalib, str]] = (),
     walk_span_ns: tuple[int, int] | None = None,
     strict: bool = True,
+    mask_entities: Sequence[str] = (),
 ) -> None:
     """Write both runs' poses on base video time, and the run's metadata, into the layer's recording.
 
@@ -162,6 +164,8 @@ def log_layer(
     ``animate_base_rig`` also writes the final poses on ``/world/rig_00``; only
     for a dataset without a ``gt`` layer, where nothing else moves the rig.
     Each run carries its level follow frame (:func:`slam_rs.follow_frame.follow_entity`).
+    ``mask_entities`` are the masks the feed tracked with; the metadata records them (``masked``, ``mask_entities``),
+    because a masked layer replaces an unmasked one under the same name and colsfm takes it as its prior.
     The caller decides from the catalog, so a dataset's ground truth must be
     registered as the layer named ``gt``: a base layer, or a layer by another
     name, that animates the rig would clash again without an error.
@@ -216,7 +220,7 @@ def log_layer(
                                   calibration_sha256=run.calibration_sha256,
                                   num_poses=len(positions), num_framesets=run.framesets, num_dropped=len(run.dropped),
                                   wall_s=run.wall_s, median_tracker_ms=run.median_tracker_ms,
-                                  export_to_video_time_offset_ns=clock_offset_ns), static=True)
+                                  export_to_video_time_offset_ns=clock_offset_ns, masked=bool(mask_entities), mask_entities=list(mask_entities)), static=True)
     if run.dropped:
         rec.log(f"{root}/dropped", rr.AnyValues(
             t_ns=[drop.t_ns - clock_offset_ns for drop in run.dropped], reasons=[drop.reason for drop in run.dropped],

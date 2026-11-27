@@ -92,7 +92,7 @@ def test_replay_gate_and_catalog_layer_build_the_same_estimator(feed: FakeFeed, 
 
     gate: Built = built_by(lambda: tracking.run_segment(settings, segment, backend="cpu"))
     replayed: Built = built_by(
-        lambda: replay.main(replay.Config(rr_config=RerunTyroConfig(headless=True), segment=segment.segment_id, backend="cpu", output_csv=tmp_path / "t.csv"))
+        lambda: replay.main(replay.Config(rr_config=RerunTyroConfig(headless=True), segment=segment.segment_id, backend="cpu"))
     )
     handle: DatasetEntry = DatasetEntry.__new__(DatasetEntry)
     monkeypatch.setattr(catalog_layer, "resolve_catalog_segments", lambda segments: (replace(segments[0], dataset=handle),))

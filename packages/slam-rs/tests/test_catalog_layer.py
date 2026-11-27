@@ -13,6 +13,7 @@ import rerun.chunk as rrc
 from dataforge import schema
 from fixture_types import Rows, RowsReader
 from rerun.catalog import DatasetEntry
+from simplecv.catalog_layers import atomic_recording
 from simplecv.rerun_walk_path import TRAIL, TRAJECTORY
 
 from slam_rs import catalog_layer
@@ -135,7 +136,8 @@ def test_the_shipped_tool_moves_the_base_rig_only_without_ground_truth(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, run: SegmentRun, segment_id: str, ground_truth_uri: str | None, writes_base_rig: bool,
 ) -> None:
     """``slam-rs-catalog-layer`` decides the clash from the catalog: an MSD segment with a ``gt`` layer keeps
-    ``/world/rig_00`` for the ground truth; a RoboCap session (no ``gt``) still has its rig animated by the final run."""
+    ``/world/rig_00`` for the ground truth; a RoboCap session (no ``gt``) still has its rig animated by the final run.
+    The masks are read from the segment's layers, by the entity name the tool is given."""
     dataset: MagicMock = MagicMock(spec=DatasetEntry)
     resolved: CatalogSegment = CatalogSegment("rerun+http://catalog", segment_id.split("__")[0], segment_id, dataset, ground_truth_uri)
     feed: SimpleNamespace = SimpleNamespace(
@@ -143,7 +145,13 @@ def test_the_shipped_tool_moves_the_base_rig_only_without_ground_truth(
     )
     monkeypatch.setattr(catalog_layer_api, "resolve_catalog_segments", lambda _sources: (resolved,))
     monkeypatch.setattr(catalog_layer_api, "select_decode_device", lambda _request: "cpu")
-    monkeypatch.setattr(catalog_layer_api, "open_segment", lambda *_args, **_kwargs: nullcontext(feed))
+    opened: dict[str, object] = {}
+
+    def open_segment(*_args: object, **kwargs: object) -> nullcontext[SimpleNamespace]:
+        opened.update(kwargs)
+        return nullcontext(feed)
+
+    monkeypatch.setattr(catalog_layer_api, "open_segment", open_segment)
     monkeypatch.setattr(catalog_layer_api, "_core", SimpleNamespace(Calibration=_FakeCalibration, VioConfig=_FakeVioConfig, Vio=_FakeVio))
 
     def tracked(rec: object, _feed: object, _vio: object, *, animate_base_rig: bool, **_kwargs: object) -> catalog_layer.LayerRun:
@@ -153,7 +161,10 @@ def test_the_shipped_tool_moves_the_base_rig_only_without_ground_truth(
 
     monkeypatch.setattr(catalog_layer_api, "track_layer", tracked)
 
-    catalog_layer_api.main(catalog_layer_api.Config(segment=segment_id, output_dir=tmp_path, catalog="rerun+http://catalog", detail="poses"))
+    catalog_layer_api.main(
+        catalog_layer_api.Config(segment=segment_id, output_dir=tmp_path, catalog="rerun+http://catalog", detail="poses", mask_entity="people_mask")
+    )
+    assert opened["mask_entity"] == "people_mask"
 
     output: Path = tmp_path / f"{segment_id}.rrd"
     entities: set[str] = {chunk.entity_path for chunk in rrc.RrdReader(output).stream().collect().stream()}
@@ -189,6 +200,22 @@ def test_explained_boundary_drop_is_written(
     assert len(drop_batches) == 1
     assert drop_batches[0].column("t_ns").to_pylist() == [[stamp]]
     assert drop_batches[0].column("reasons").to_pylist() == [[reason]]
+
+
+@pytest.mark.parametrize("masks", [(), ("/world/rig_00/cam_00/pinhole/people_mask", "/world/rig_00/cam_01/pinhole/people_mask")])
+def test_the_layer_records_the_masks_its_run_tracked_with(tmp_path: Path, run: SegmentRun, masks: tuple[str, ...]) -> None:
+    """A masked run replaces an unmasked one under the same layer name, so the run's metadata says which it was."""
+    output: Path = tmp_path / "masks.rrd"
+    with atomic_recording(output, application_id="dataforge", recording_id="session", send_properties=False) as rec:
+        catalog_layer.log_layer(rec, run, clock_offset_ns=0, profile="fast", backend="cpu", mask_entities=masks)
+    batches: list[pa.RecordBatch] = [
+        batch for chunk in rrc.RrdReader(output).stream().filter(content="/world/runs/slam_rs").to_chunks()
+        if "masked" in (batch := chunk.to_record_batch()).schema.names
+    ]
+    assert len(batches) == 1
+    assert batches[0].column("masked").to_pylist() == [[bool(masks)]]
+    listed: list[object] = batches[0].column("mask_entities").to_pylist() if "mask_entities" in batches[0].schema.names else [None]
+    assert listed == ([list(masks)] if masks else [None])
 
 
 def test_explained_interior_gap_still_refuses_the_layer(tmp_path: Path, run: SegmentRun) -> None:

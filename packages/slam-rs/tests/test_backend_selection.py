@@ -122,5 +122,5 @@ except ValueError as error:
 
 
 def test_the_robocap_probe_names_its_raw_vio_output_as_the_layer_does() -> None:
-    """The probe writes the raw causal VIO (it is compared with a raw-VIO regression reference), so its file is ``slam_rs_vio.csv``; ``slam_rs.csv`` is the final run."""
+    """The probe writes the raw causal VIO (it is compared with a raw-VIO regression reference), so its file is ``slam_rs_vio.csv``; the Rust ``slam-rs-cli`` writes the final run as ``slam_rs.csv``."""
     assert robocap_probe.OUTPUT_NAME == "slam_rs_vio.csv"

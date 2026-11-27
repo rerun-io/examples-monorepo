@@ -1,4 +1,4 @@
-"""The global BA's layer (PR d2): GBA keyframes under the run beside the raw VIO, its attempts on their own timeline, and its trajectory."""
+"""The global BA's layer (PR d2): GBA keyframes under the run beside the raw VIO, and its attempts on their own timeline."""
 
 from pathlib import Path
 
@@ -13,8 +13,7 @@ from numpy import ndarray
 from slam_rs import _core
 from slam_rs.catalog_feed import TIMELINE
 from slam_rs.columns import ColumnLog
-from slam_rs.gba_log import GBA_KEYFRAMES_ENTITY, GBA_PATH_ENTITY, GBA_STATS_ENTITY, GBA_TIMELINE, keyframe_trajectory, log_map_result
-from slam_rs.trajectory import Trajectory
+from slam_rs.gba_log import GBA_KEYFRAMES_ENTITY, GBA_PATH_ENTITY, GBA_STATS_ENTITY, GBA_TIMELINE, log_map_result
 from slam_rs.vio_log import RUN_ENTITY
 
 
@@ -30,18 +29,6 @@ def _finished(rig: RigFactory, texture: TextureFactory, run_gba: bool) -> _core.
     result: _core.MapResult | None = vio.finish_map(run_gba=run_gba)
     assert result is not None
     return result
-
-
-def test_the_keyframe_trajectory_is_the_map_before_or_after_the_gba(rig: RigFactory, texture: TextureFactory) -> None:
-    result: _core.MapResult = _finished(rig, texture, run_gba=True)
-    after: Trajectory = keyframe_trajectory(result, after_gba=True)
-    before: Trajectory = keyframe_trajectory(result, after_gba=False)
-    np.testing.assert_array_equal(after.t_ns, result.keyframe_t_ns)
-    np.testing.assert_array_equal(after.position_m, result.keyframe_poses[:, 0:3])
-    np.testing.assert_array_equal(before.position_m, result.keyframe_poses_before_gba[:, 0:3])
-    # w-first, as :mod:`slam_rs.trajectory` stores rotations.
-    np.testing.assert_array_equal(after.quaternion_wxyz[:, 0], result.keyframe_poses[:, 6])
-    np.testing.assert_array_equal(after.quaternion_wxyz[:, 1:], result.keyframe_poses[:, 3:6])
 
 
 def test_the_gba_keyframes_go_under_the_run_and_its_attempts_on_their_timeline(
