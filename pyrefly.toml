@@ -2,6 +2,9 @@
 # package-local `[tool.pyrefly]` sections in `packages/*/pyproject.toml`.
 project-includes = [
     "packages/agent-traces/agent_traces/**/*",
+    "packages/pipelines/pipelines/**/*",
+    "packages/pipelines/tests/**/*",
+    "packages/pipelines/tools/**/*",
     "packages/kornia-staging/scripts/**/*",
     "packages/kornia-staging/tests/**/*",
     "packages/monoprior/monopriors/**/*",
@@ -95,6 +98,7 @@ disable-search-path-heuristics = true
 # Source roots — where first-party imports are resolved from
 search-path = [
     "packages/agent-traces",
+    "packages/pipelines",
     "packages/kornia-staging",
     "packages/monoprior",
     "packages/simplecv",
@@ -147,6 +151,7 @@ site-package-path = [
     ".pixi/envs/posekit-hands-dev/lib/python3.12/site-packages",
     ".pixi/envs/posekit-body-dev/lib/python3.12/site-packages",
     ".pixi/envs/agent-traces-dev/lib/python3.12/site-packages",
+    ".pixi/envs/pipelines-dev/lib/python3.12/site-packages",
     ".pixi/envs/kornia-staging-dev/lib/python3.12/site-packages",
     # Per-package envs for package-specific deps.
     # Common deps (rerun, numpy, etc.) are resolved from the python-interpreter-path

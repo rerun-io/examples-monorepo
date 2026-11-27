@@ -191,6 +191,7 @@ repomix-output.xml
 artifacts/*
 
 packages/agent-traces/data/
+packages/pipelines/data/
 
 packages/selfcap-curate/data/
 
