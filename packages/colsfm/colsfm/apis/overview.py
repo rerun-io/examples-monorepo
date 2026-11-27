@@ -81,7 +81,7 @@ def _overview(config: Config) -> OverviewNumbers:
     dataset: DatasetEntry = CatalogClient(config.source.catalog_url).get_dataset(name=config.source.dataset)
     if config.source.ground_truth_entity is None:
         raise ValueError("--source.ground-truth-entity is required: the overview scores against ground truth")
-    cameras = read_catalog_cameras(dataset, config.source.segment, config.source.cameras)
+    cameras = read_catalog_cameras(dataset, config.source.segment, config.source.cameras, config.source.calibration_entity)
     start = read_catalog_trajectory(dataset, config.source.segment, config.source.trajectory_entity, config.source.timeline)
     ground_truth = read_catalog_trajectory(dataset, config.source.segment, config.source.ground_truth_entity, config.source.timeline)
     recording: rr.RecordingStream = rr.RecordingStream(APPLICATION_ID, recording_id=config.recording_id, send_properties=False)
