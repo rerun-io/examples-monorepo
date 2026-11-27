@@ -14,7 +14,7 @@ TensorRT's own `OnnxParser`, which is the same split `colsfm.tensorrt_runtime`
 documents.
 
 **The engines.** The graph has a real batch axis, `image [batch, 3, h, w]`, so each engine is built with an
-optimisation profile and `DEFAULT_BATCH_SIZE` images run together. Everything either side of the engine runs through
+optimisation profile and up to `DEFAULT_BATCH_SIZE` images run together, as many as its profile admits. Everything either side of the engine runs through
 `colsfm.features_native`: GPU frames from the run's `colsfm.frames.FrameSource`, the `(k + 1) * 0.5 * size - 0.5`
 mapping back onto the original image, and the two database columns written for image rows somebody else created.
 What this module owns is what is RaCo's alone —
@@ -94,16 +94,11 @@ MINIMUM_BATCH_SIZE: Final[int] = 1
 """The optimisation profile's `min`, so a one-image run still executes."""
 
 DEFAULT_BATCH_SIZE: Final[int] = 8
-"""Images per execution, and the profile's `opt`; `tools/raco_extract.py`'s own default."""
-
-MAXIMUM_BATCH_SIZE: Final[int] = DEFAULT_BATCH_SIZE
-"""The fixed-shape profile's `max`: the batch runs use, not the graph's export ceiling of 16.
-
-TensorRT sizes an execution context for the profile maximum: batch 16 at 1200x1920 asked for 19.1 GB, and with a
-per-size dynamic context alive beside it Galileo ran the 5090 out of memory. Batch 8 halves that."""
+"""Images per execution a caller asks for, and a profile's `opt` where its `max` allows; `tools/raco_extract.py`'s own
+default. Each size group runs at most its engine's `maximum_batch_size` of them."""
 
 DYNAMIC_MAXIMUM_BATCH_SIZE: Final[int] = 8
-"""The shape-dynamic profile's `max` batch.
+"""The shape-dynamic profile's `max` batch, and the largest `batch_size` a caller may ask for.
 
 16 is inside the fixed-shape graph's export bounds but its execution already
 failed on a 32 GB 5090 (NOTES.md "RaCo backend"), and with the spatial axes
@@ -111,12 +106,26 @@ dynamic the builder has to size its tactic workspace for the *maximum* shape as
 well, which pushes the build itself over. 8 is `DEFAULT_BATCH_SIZE`, so nothing
 in the extraction path wants more."""
 
-DYNAMIC_BATCH_PIXEL_BUDGET: Final[int] = 2 * 1216 * 1920
-"""Pixels one shape-dynamic execution may hold at its profile maximum (batch x height x width).
+BATCH_PIXEL_BUDGET: Final[int] = 2 * 1216 * 1920
+"""Pixels one execution may hold at its engine's profile maximum (batch x height x width), on either graph.
 
 TensorRT sizes an execution context's activation memory for the profile maximum: batch 8 at 1216x1920 asked for
-11.3 GB on the RTX 5090 and 17.1 GB on the GB10. Two full frames' worth keeps a large-image group to a few GB and still
-lets 480x640 images run eight at a time."""
+11.3 GB on the RTX 5090 and 17.1 GB on the GB10 (dynamic graph), 19.4 GiB at 1200x1920 (fixed graph). Two full frames'
+worth keeps a large-image group to a few GB and still lets 480x640 images run eight at a time."""
+
+MAXIMUM_BATCH_SIZE: Final[int] = BATCH_PIXEL_BUDGET // (NETWORK_HEIGHT * NETWORK_WIDTH)
+"""The fixed-shape profile's `max`: the 1200x1920 frames `BATCH_PIXEL_BUDGET` holds, 2.
+
+Its context grows by 2.43 GiB per frame of profile maximum (RTX 5090, TensorRT 11.2: 4.86 / 9.73 / 19.39 GiB at 2 / 4 /
+8), so the earlier batch 8 took 19.4 GiB and ran the integration lane out of memory beside the rest of the process. A
+smaller batch costs no speed: 12.6 ms an image at 2 against 13.0 at 8. A workspace below 24 GiB is no way out; the
+graph then has no tactic for its upsampling block."""
+
+CONTEXT_MEMORY_BUDGET_GIB: Final[float] = 6.0
+"""The most activation memory one RaCo execution context may take on the 5090, enforced by `test_raco_backend`.
+
+A Galileo run holds the extraction context beside pycolmap, the matcher engines and CASPAR on one 32 GB card; the fixed
+engine's 4.86 GiB and the full-size dynamic one fit under it with room for the rest."""
 
 INPUT_DIM_DIVISOR: Final[int] = 32
 """RaCo's four-level pyramid pools by 32, so both network sides must be multiples of it.
@@ -175,7 +184,7 @@ def raco_profile(network_height: int = NETWORK_HEIGHT, network_width: int = NETW
     return {
         ALIKED_IMAGE_BINDING: (
             (MINIMUM_BATCH_SIZE, 3, network_height, network_width),
-            (DEFAULT_BATCH_SIZE, 3, network_height, network_width),
+            (min(DEFAULT_BATCH_SIZE, MAXIMUM_BATCH_SIZE), 3, network_height, network_width),
             (MAXIMUM_BATCH_SIZE, 3, network_height, network_width),
         )
     }
@@ -286,7 +295,7 @@ def select_raco_engine(network_size: tuple[int, int], choice: RacoEngineChoice =
     Args:
         network_size: `(network_height, network_width)` from `network_size_for`.
         choice: `auto` decides by size; `fixed` and `dynamic` force one engine.
-        batch_pixels: The dynamic engine's pixel budget per execution; `DYNAMIC_BATCH_PIXEL_BUDGET` when None.
+        batch_pixels: The dynamic engine's pixel budget per execution; `BATCH_PIXEL_BUDGET` when None.
 
     Returns:
         The graph, the input size to preprocess to, and the batch ceiling.
@@ -310,16 +319,16 @@ def select_raco_engine(network_size: tuple[int, int], choice: RacoEngineChoice =
 
 
 def dynamic_batch_ceiling(network_size: tuple[int, int], batch_pixels: int | None = None) -> int:
-    """The batch ceiling of a shape-dynamic engine for one size: as many images as `DYNAMIC_BATCH_PIXEL_BUDGET` holds.
+    """The batch ceiling of a shape-dynamic engine for one size: as many images as `BATCH_PIXEL_BUDGET` holds.
 
     Args:
         network_size: `(network_height, network_width)`.
-        batch_pixels: The pixel budget; `DYNAMIC_BATCH_PIXEL_BUDGET` when None.
+        batch_pixels: The pixel budget; `BATCH_PIXEL_BUDGET` when None.
 
     Returns:
         Between `MINIMUM_BATCH_SIZE` and `DYNAMIC_MAXIMUM_BATCH_SIZE`.
     """
-    budget: int = DYNAMIC_BATCH_PIXEL_BUDGET if batch_pixels is None else batch_pixels
+    budget: int = BATCH_PIXEL_BUDGET if batch_pixels is None else batch_pixels
     fits: int = budget // max(1, network_size[0] * network_size[1])
     return max(MINIMUM_BATCH_SIZE, min(DYNAMIC_MAXIMUM_BATCH_SIZE, fits))
 
@@ -423,10 +432,8 @@ def extract_raco(
             rank rather than by detector response.
         max_num_features: Keypoint ceiling per image; the graph's own top-2048
             head normally binds first, so this only ever truncates.
-        batch_size: Images executed together, 1 to the graph's batch ceiling.
-            `native_resolution` bounds it at `DYNAMIC_MAXIMUM_BATCH_SIZE` unless
-            `raco_engine` forces the fixed engine, because `auto` may reach the
-            dynamic one for any size group.
+        batch_size: Images executed together at most, 1 to `DYNAMIC_MAXIMUM_BATCH_SIZE`; each size group runs
+            at most its engine's `maximum_batch_size` of them.
         native_resolution: Run each image at its own size, rounded up to
             `INPUT_DIM_DIVISOR`, on whichever engine `raco_engine` picks for that
             size. `False` is the legacy behaviour: the fixed-shape graph, and
@@ -445,16 +452,15 @@ def extract_raco(
 
     Raises:
         FileNotFoundError: When the database, the image root or the ONNX graph is missing.
-        ValueError: When `batch_size` is outside the graph's profile.
+        ValueError: When `batch_size` is outside 1 to `DYNAMIC_MAXIMUM_BATCH_SIZE`.
     """
     if not database_path.is_file():
         raise FileNotFoundError(f"No COLMAP database at {database_path}")
     if not image_root.is_dir():
         raise FileNotFoundError(f"No image directory at {image_root}")
     engine_choice: RacoEngineChoice = raco_engine if native_resolution else "fixed"
-    maximum_batch_size: int = MAXIMUM_BATCH_SIZE if engine_choice == "fixed" else DYNAMIC_MAXIMUM_BATCH_SIZE
-    if not MINIMUM_BATCH_SIZE <= batch_size <= maximum_batch_size:
-        raise ValueError(f"batch_size must be in [{MINIMUM_BATCH_SIZE}, {maximum_batch_size}], got {batch_size}")
+    if not MINIMUM_BATCH_SIZE <= batch_size <= DYNAMIC_MAXIMUM_BATCH_SIZE:
+        raise ValueError(f"batch_size must be in [{MINIMUM_BATCH_SIZE}, {DYNAMIC_MAXIMUM_BATCH_SIZE}], got {batch_size}")
 
     started: float = time.perf_counter()
     tasks: list[ImageTask] = image_tasks(database_path, image_names)

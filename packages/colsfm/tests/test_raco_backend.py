@@ -230,17 +230,37 @@ def test_either_engine_can_be_forced_whatever_the_size() -> None:
     forced_dynamic: RacoEngine = select_raco_engine(network_size_for(1200, 1920), "dynamic")
     assert forced_dynamic.kind == "dynamic"
     assert (forced_dynamic.network_height, forced_dynamic.network_width) == (1216, 1920)
-    # Two full frames: the pixel budget (DYNAMIC_BATCH_PIXEL_BUDGET) caps a 1216x1920 dynamic engine at batch 2.
+    # Two full frames: the pixel budget (BATCH_PIXEL_BUDGET) caps a 1216x1920 dynamic engine at batch 2.
     assert forced_dynamic.maximum_batch_size == 2
 
     forced_fixed: RacoEngine = select_raco_engine(network_size_for(370, 1226), "fixed")
     assert forced_fixed.kind == "fixed"
     assert (forced_fixed.network_height, forced_fixed.network_width) == (1200, 1920)
-    # The fixed profile's own max (8), not the graph's export ceiling of 16, whose context ran Galileo out of memory.
+    # The fixed profile's own max (two frames of BATCH_PIXEL_BUDGET), not the graph's export ceiling of 16.
     assert forced_fixed.maximum_batch_size == MAXIMUM_BATCH_SIZE
 
 
 # ── Engine-backed: needs the RaCo graphs and a CUDA device ───────────────────
+
+
+@requires_raco_models
+@pytest.mark.parametrize("choice", ["fixed", "dynamic"])
+def test_a_full_size_raco_context_fits_the_memory_budget(choice: RacoEngineChoice) -> None:
+    """The engine a 1200x1920 group runs on takes at most `CONTEXT_MEMORY_BUDGET_GIB` of activation memory.
+
+    TensorRT sizes the context for the profile maximum, so this is the profile's cost on this GPU, measured from the
+    built engine rather than estimated: a fixed profile of batch 8 took 19.4 GiB and ran the lane out of memory.
+    """
+    from trtkit.tensorrt_runtime import TensorRtDynamicRuntime
+
+    from colsfm.features_raco import CONTEXT_MEMORY_BUDGET_GIB, engine_file, fixed_engine_size_group, select_raco_engine
+
+    engine_path: Path = engine_file(select_raco_engine(fixed_engine_size_group(), choice))
+    # User-managed activation memory reads the profile's size without allocating it, so an oversized profile fails here.
+    runtime: TensorRtDynamicRuntime = TensorRtDynamicRuntime(engine_path, direct_binding=True, per_shape_activation_memory=True)
+    context_gib: float = runtime.device_memory_bytes / 2**30
+    print(f"[colsfm] {choice} RaCo context at 1200x1920: {context_gib:.2f} GiB")
+    assert context_gib <= CONTEXT_MEMORY_BUDGET_GIB
 
 
 @pytest.fixture(scope="module")
