@@ -20,8 +20,9 @@ import tarfile
 import tempfile
 import time
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 PACKAGE_DIR: Path = Path(__file__).resolve().parents[2]
 WEB_CRATE: Path = PACKAGE_DIR / "crates/gsplat-viewer-web"
@@ -44,58 +45,43 @@ PATCHED_CRATES: tuple[PatchedCrate, ...] = (
 )
 
 
-@dataclass(frozen=True, slots=True)
-class PatchedGitTag:
-    """A git tag of a whole Cargo workspace and the patch applied to one of its crates."""
-
-    name: str
-    url: str
-    tag: str
-    commit: str
-    """The tag's commit, checked after the fetch."""
-    crate_dir: str
-    """Directory of the patched crate in the checkout."""
-    patch: str
-    """Patch path relative to the package directory."""
+# Rerun 0.44.0 is not on crates.io; the web crate's [patch."https://github.com/rerun-io/rerun"] points into a patched
+# checkout of this tag.
+RERUN_URL: str = "https://github.com/rerun-io/rerun"
+RERUN_TAG: str = "0.44.0"
+RERUN_COMMIT: str = "f346ba2728b9f55afdfd5afdb2b976fecb98dcdd"
+"""The tag's commit, checked after the fetch."""
+RERUN_PATCH: str = "patches/re_viewer-0.44.0-web-hooks.patch"
+"""Patch path relative to the package directory, applied to crates/top/re_viewer in the checkout."""
 
 
-# Rerun 0.44.0 is not on crates.io; the web crate's [patch."https://github.com/rerun-io/rerun"] points into this checkout.
-RERUN_TAG: PatchedGitTag = PatchedGitTag(
-    "rerun",
-    "https://github.com/rerun-io/rerun",
-    "0.44.0",
-    "f346ba2728b9f55afdfd5afdb2b976fecb98dcdd",
-    "crates/top/re_viewer",
-    "patches/re_viewer-0.44.0-web-hooks.patch",
-)
+def prepare_tree(destination: Path, archive: Callable[[], bytes], *, source_id: str, patch: Path, patch_dir: str, tar_root: str) -> None:
+    """Extract a tar archive, apply one patch and swap the tree into destination, unless an identical tree is there.
 
-
-def prepare(crate: PatchedCrate, cargo_home: Path) -> None:
-    """Extract and patch one crate into the web crate's target/patch/, unless an identical tree is there."""
-    stem: str = f"{crate.name}-{crate.version}"
-    destination: Path = WEB_CRATE / "target/patch" / stem
-    patch: Path = PACKAGE_DIR / crate.patch
-    fingerprint: str = f"{crate.sha256}\n{hashlib.sha256(patch.read_bytes()).hexdigest()}\n"
+    Args:
+        destination: Prepared tree; its name is the stem the archive and patch paths are relative to.
+        archive: Fetches the tar archive; only called when the tree is missing or stale.
+        source_id: Archive digest or commit that, with the patch digest, fingerprints the tree.
+        patch: Patch file applied with ``git apply -p1``.
+        patch_dir: Directory of the patched files relative to the tree root ("" for the root).
+        tar_root: Directory relative to the tree's parent that the archive extracts into ("" when the archive's
+            entries already start with the stem).
+    """
+    stem: str = destination.name
+    fingerprint: str = f"{source_id}\n{hashlib.sha256(patch.read_bytes()).hexdigest()}\n"
     marker: Path = destination / ".prepared-sha256"
     if marker.is_file() and marker.read_text() == fingerprint:
         print(f"{stem}: unchanged")
         return
-    cached: Path | None = next((cargo_home / "registry/cache").glob(f"*/{stem}.crate"), None)
-    if cached is not None:
-        archive: bytes = cached.read_bytes()
-    else:
-        with urllib.request.urlopen(f"https://static.crates.io/crates/{crate.name}/{stem}.crate", timeout=60) as response:
-            archive = response.read()
-    if hashlib.sha256(archive).hexdigest() != crate.sha256:
-        raise ValueError(f"{stem}: archive SHA256 mismatch")
+    data: bytes = archive()
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=f".{stem}-", dir=destination.parent) as temporary:
         staging: Path = Path(temporary)
-        with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
-            tar.extractall(staging, filter="data")
+        with tarfile.open(fileobj=io.BytesIO(data)) as tar:
+            tar.extractall(staging / tar_root, filter="data")
         # Keep git from discovering the enclosing worktree (it would skip paths under the ignored target/).
         subprocess.run(
-            ["git", "apply", "-p1", f"--directory={stem}", str(patch)],
+            ["git", "apply", "-p1", f"--directory={PurePosixPath(stem, patch_dir)}", str(patch)],
             cwd=staging,
             env=dict(os.environ, GIT_CEILING_DIRECTORIES=str(staging.parent)),
             check=True,
@@ -107,48 +93,60 @@ def prepare(crate: PatchedCrate, cargo_home: Path) -> None:
     print(f"{stem}: prepared")
 
 
-def prepare_git_tag(source: PatchedGitTag, cargo_home: Path) -> None:
-    """Check out one tag and patch one crate into the package's target/patch/, unless an identical tree is there."""
-    stem: str = f"{source.name}-{source.tag}"
-    destination: Path = PACKAGE_DIR / "target/patch" / stem
-    patch: Path = PACKAGE_DIR / source.patch
-    fingerprint: str = f"{source.commit}\n{hashlib.sha256(patch.read_bytes()).hexdigest()}\n"
-    marker: Path = destination / ".prepared-sha256"
-    if marker.is_file() and marker.read_text() == fingerprint:
-        print(f"{stem}: unchanged")
-        return
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=f".{stem}-", dir=destination.parent) as temporary:
-        staging: Path = Path(temporary)
-        # Rerun keeps test snapshots in LFS; git archive would download them through the smudge filter.
-        git_env: dict[str, str] = dict(os.environ, GIT_CEILING_DIRECTORIES=str(staging.parent), GIT_LFS_SKIP_SMUDGE="1")
-        # Cargo's own clone of the tag (the native build fetched it) saves the download.
-        repository: Path | None = next(
-            (
-                db
-                for db in sorted((cargo_home / "git/db").glob(f"{source.name}-*"))
-                if subprocess.run(["git", f"--git-dir={db}", "cat-file", "-e", f"{source.commit}^{{commit}}"], capture_output=True).returncode == 0
-            ),
-            None,
-        )
-        if repository is None:
-            repository = staging / "repository.git"
-            subprocess.run(["git", "init", "-q", "--bare", str(repository)], env=git_env, check=True)
-            subprocess.run(["git", f"--git-dir={repository}", "fetch", "-q", "--depth", "1", source.url, f"refs/tags/{source.tag}"], env=git_env, check=True)
-            fetched: str = subprocess.run(
-                ["git", f"--git-dir={repository}", "rev-parse", "FETCH_HEAD^{commit}"], env=git_env, check=True, capture_output=True, text=True
-            ).stdout.strip()
-            if fetched != source.commit:
-                raise ValueError(f"{stem}: tag {source.tag} is {fetched}, expected {source.commit}")
-        archive: bytes = subprocess.run(["git", f"--git-dir={repository}", "archive", "--format=tar", source.commit], env=git_env, check=True, capture_output=True).stdout
-        with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
-            tar.extractall(staging / stem, filter="data")
-        subprocess.run(["git", "apply", "-p1", f"--directory={stem}/{source.crate_dir}", str(patch)], cwd=staging, env=git_env, check=True)
-        (staging / stem / ".prepared-sha256").write_text(fingerprint)
-        if destination.exists():
-            destination.rename(staging / "previous")
-        (staging / stem).rename(destination)
-    print(f"{stem}: prepared")
+def prepare(crate: PatchedCrate, cargo_home: Path) -> None:
+    """Extract and patch one crate into the web crate's target/patch/, unless an identical tree is there."""
+    stem: str = f"{crate.name}-{crate.version}"
+
+    def fetch() -> bytes:
+        cached: Path | None = next((cargo_home / "registry/cache").glob(f"*/{stem}.crate"), None)
+        if cached is not None:
+            archive: bytes = cached.read_bytes()
+        else:
+            with urllib.request.urlopen(f"https://static.crates.io/crates/{crate.name}/{stem}.crate", timeout=60) as response:
+                archive = response.read()
+        if hashlib.sha256(archive).hexdigest() != crate.sha256:
+            raise ValueError(f"{stem}: archive SHA256 mismatch")
+        return archive
+
+    prepare_tree(WEB_CRATE / "target/patch" / stem, fetch, source_id=crate.sha256, patch=PACKAGE_DIR / crate.patch, patch_dir="", tar_root="")
+
+
+def prepare_rerun(cargo_home: Path) -> None:
+    """Check out the Rerun tag and patch re_viewer into the package's target/patch/, unless an identical tree is there."""
+    stem: str = f"rerun-{RERUN_TAG}"
+
+    def fetch() -> bytes:
+        with tempfile.TemporaryDirectory(prefix=f".{stem}-fetch-") as temporary:
+            # Rerun keeps test snapshots in LFS; git archive would download them through the smudge filter.
+            git_env: dict[str, str] = dict(os.environ, GIT_CEILING_DIRECTORIES=temporary, GIT_LFS_SKIP_SMUDGE="1")
+            # Cargo's own clone of the tag (the native build fetched it) saves the download.
+            repository: Path | None = next(
+                (
+                    db
+                    for db in sorted((cargo_home / "git/db").glob("rerun-*"))
+                    if subprocess.run(["git", f"--git-dir={db}", "cat-file", "-e", f"{RERUN_COMMIT}^{{commit}}"], capture_output=True).returncode == 0
+                ),
+                None,
+            )
+            if repository is None:
+                repository = Path(temporary) / "repository.git"
+                subprocess.run(["git", "init", "-q", "--bare", str(repository)], env=git_env, check=True)
+                subprocess.run(["git", f"--git-dir={repository}", "fetch", "-q", "--depth", "1", RERUN_URL, f"refs/tags/{RERUN_TAG}"], env=git_env, check=True)
+                fetched: str = subprocess.run(
+                    ["git", f"--git-dir={repository}", "rev-parse", "FETCH_HEAD^{commit}"], env=git_env, check=True, capture_output=True, text=True
+                ).stdout.strip()
+                if fetched != RERUN_COMMIT:
+                    raise ValueError(f"{stem}: tag {RERUN_TAG} is {fetched}, expected {RERUN_COMMIT}")
+            return subprocess.run(["git", f"--git-dir={repository}", "archive", "--format=tar", RERUN_COMMIT], env=git_env, check=True, capture_output=True).stdout
+
+    prepare_tree(
+        PACKAGE_DIR / "target/patch" / stem,
+        fetch,
+        source_id=RERUN_COMMIT,
+        patch=PACKAGE_DIR / RERUN_PATCH,
+        patch_dir="crates/top/re_viewer",
+        tar_root=stem,
+    )
 
 
 def npm_module(no_modules_js: str) -> str:
@@ -188,7 +186,7 @@ class BuildWebViewerConfig:
 
 def main(config: BuildWebViewerConfig) -> None:
     """Prepare patches, build, bind, optimise and lay out the web viewer."""
-    prepare_git_tag(RERUN_TAG, config.cargo_home)
+    prepare_rerun(config.cargo_home)
     for crate in PATCHED_CRATES:
         prepare(crate, config.cargo_home)
     prefix: Path = config.toolchain_prefix or Path(os.environ["CONDA_PREFIX"])
