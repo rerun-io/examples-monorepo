@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from concurrent.futures import Future, ThreadPoolExecutor
+
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
