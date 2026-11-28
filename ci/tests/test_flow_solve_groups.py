@@ -27,3 +27,10 @@ def test_every_step_of_a_capture_to_splat_profile_runs_in_one_solve_group(tmp_pa
         steps = flow.flow_steps(profile, segment=f"{profile}__s", catalog_url="u", output_root=tmp_path)
         groups: set[object] = {environments[task.environment].get("solve-group") for step in steps for task in step.tasks}
         assert len(groups) == 1 and None not in groups, f"{profile}: {groups}"
+
+
+def test_every_step_of_person_to_4d_runs_in_one_solve_group(tmp_path: Path) -> None:
+    environments: dict[str, dict[str, object]] = tomllib.loads((REPO_ROOT / "pixi.toml").read_text())["environments"]
+    steps = _flow_module("person_to_4d").flow_steps(video=tmp_path / "v.mp4", clip="c", seed=1, catalog_url="u", output_root=tmp_path)
+    groups: set[object] = {environments[task.environment].get("solve-group") for step in steps for task in step.tasks}
+    assert len(groups) == 1 and None not in groups, groups

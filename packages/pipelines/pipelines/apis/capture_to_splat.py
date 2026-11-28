@@ -8,25 +8,19 @@ record (``simplecv.run_record``), not through this command.
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
 
 import tyro
-from rerun.catalog import CatalogClient
-from simplecv.run_record import RunRecord, read_run_record
 
+from pipelines.apis.actions import WORKSPACE_MANIFEST, Action, act
 from pipelines.capture_to_splat import InputProfile, flow_steps
-from pipelines.runner import Launch, run_flow, task_command
-from pipelines.step import Step
-
-WORKSPACE_MANIFEST: Path = Path(__file__).resolve().parents[4] / "pixi.toml"
-"""The workspace ``pixi.toml`` holding every stage's task."""
+from pipelines.runner import Launch
 
 
 @dataclass
 class Config:
     """Plan, run or show the capture_to_splat flow on one segment."""
 
-    action: tyro.conf.Positional[Literal["plan", "run", "show"]]
+    action: tyro.conf.Positional[Action]
     """``plan``: print the steps; ``run``: run them all, in order; ``show``: print each layer's run record."""
     profile: InputProfile
     """The input profile: ``insta360`` (lens masks, then masked SLAM) or ``robocap`` (SLAM)."""
@@ -53,27 +47,12 @@ def main(config: Config) -> None:
     Raises:
         SystemExit: If ``run`` stops at a failed step (its exit code).
     """
-    steps: tuple[Step, ...] = flow_steps(config.profile, segment=config.segment, catalog_url=config.catalog_url, output_root=config.output_root)
-    launch: Launch = Launch(manifest=WORKSPACE_MANIFEST, pixi=config.pixi, gpu_lock=config.gpu_lock, memory_max=config.memory_max)
-    if config.action == "plan":
-        for step in steps:
-            for task in step.tasks:
-                print(f"{step.name} -> layer {step.layer}: {' '.join(task_command(task, launch))}")
-        return
-    client: CatalogClient = CatalogClient(config.catalog_url)
-    if config.action == "show":
-        for step in steps:
-            try:
-                record: RunRecord = read_run_record(client.get_dataset(name=step.dataset), step.segment, step.layer)
-            except ValueError:
-                print(f"{step.name} -> layer {step.layer}: no run record")
-                continue
-            dirty: str = f" dirty {record.git_dirty_sha256[:12]}" if record.git_dirty_sha256 else ""
-            print(f"{step.name} -> layer {step.layer}: {record.started_at}, {record.wall_s:.0f} s, {record.git_commit[:12]}{dirty}, "
-                  f"env {record.pixi_environment}, {record.host}\n    {record.command}")
-        return
     logs: Path = config.logs or config.output_root.resolve() / "logs" / config.segment / datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    code: int = run_flow(steps, launch, client=client, logs=logs)
-    if code != 0:
-        raise SystemExit(code)
-    print(f"capture_to_splat ({config.profile}) on {config.segment}: {len(steps)} steps published")
+    act(
+        config.action,
+        flow_steps(config.profile, segment=config.segment, catalog_url=config.catalog_url, output_root=config.output_root),
+        Launch(manifest=WORKSPACE_MANIFEST, pixi=config.pixi, gpu_lock=config.gpu_lock, memory_max=config.memory_max),
+        catalog_url=config.catalog_url,
+        logs=logs,
+        title=f"capture_to_splat ({config.profile}) on {config.segment}",
+    )
