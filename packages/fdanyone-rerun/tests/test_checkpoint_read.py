@@ -6,6 +6,7 @@ import pytest
 import torch
 from safetensors.torch import load_file, save_file
 
+from fdanyone.errors import AssetError
 from fdanyone.model.loader import read_safetensors
 
 
@@ -57,4 +58,11 @@ def test_read_safetensors_rejects_a_truncated_file(tmp_path: Path) -> None:
     save_file(_tensors(), str(path))
     path.write_bytes(path.read_bytes()[:-10])
     with pytest.raises(ValueError, match="truncated"):
+        read_safetensors(path)
+
+
+def test_read_safetensors_names_a_dtype_it_does_not_map(tmp_path: Path) -> None:
+    path = tmp_path / "model.safetensors"
+    save_file({"blocks.0.int16": torch.arange(6, dtype=torch.int16)}, str(path))
+    with pytest.raises(AssetError, match="I16"):
         read_safetensors(path)

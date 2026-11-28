@@ -118,19 +118,24 @@ def read_safetensors(
 
     import torch
 
-    with path.open("rb") as handle:
-        (header_size,) = struct.unpack("<Q", handle.read(8))
-        header = json.loads(handle.read(header_size))
-    metadata = dict(header.pop("__metadata__", None) or {})
-    data_start = 8 + header_size
-    data_size = max((int(entry["data_offsets"][1]) for entry in header.values()), default=0)
-    if path.stat().st_size < data_start + data_size:
-        raise ValueError(f"{path} is truncated: {path.stat().st_size} bytes, header needs {data_start + data_size}.")
-
-    buffer = torch.empty(data_size, dtype=torch.uint8)
-    view = memoryview(buffer.numpy())
+    # One descriptor for the header, the size check and the payload: a file replaced between opens cannot pair one
+    # file's header with another's bytes.
     fd = os.open(path, os.O_RDONLY)
     try:
+        (header_size,) = struct.unpack("<Q", os.pread(fd, 8, 0))
+        header = json.loads(os.pread(fd, header_size, 8))
+        metadata = dict(header.pop("__metadata__", None) or {})
+        data_start = 8 + header_size
+        data_size = max((int(entry["data_offsets"][1]) for entry in header.values()), default=0)
+        file_size = os.fstat(fd).st_size
+        if file_size < data_start + data_size:
+            raise ValueError(f"{path} is truncated: {file_size} bytes, header needs {data_start + data_size}.")
+        unknown = {entry["dtype"] for entry in header.values()} - _SAFETENSORS_DTYPES.keys()
+        if unknown:
+            raise AssetError(f"{path} has tensor dtypes this reader does not map: {sorted(unknown)}.")
+
+        buffer = torch.empty(data_size, dtype=torch.uint8)
+        view = memoryview(buffer.numpy())
 
         def read(offset: int) -> None:
             end = min(offset + chunk_bytes, data_size)
