@@ -67,14 +67,26 @@ Applied in order by `tools/prepare_rerun.py` (`RERUN_PATCHES`) to the Rerun tag'
 |---|---|---|
 | `re_viewer-0.44.0-extension-hooks.patch` | the device and `App::new` hooks (native, headless, web) and the declared-fallback hook | upstream has extension hooks (Pablo wants no upstream PRs, issues or proposal drafts) |
 | `rerun-0.44.0-av1-arm64.patch` | native AV1 decoding on Linux arm64 (rerun-io/rerun#7755): `re_rav1d` 0.1.4 from a pinned git revision, whose arm64 assembly tables are hidden (the workspace's `[patch.crates-io]` gives depth-video-viewer the same `re_rav1d`) | a Rerun release fixes #7755 and `re_rav1d` 0.1.4 is on crates.io |
+| `rerun-0.44.0-proxy-slow-reader.patch` | the live proxy (`--serve-grpc`, and every viewer's own proxy) no longer lets one stalled reader block the logger and every other viewer: after one second of backpressure the sender overflows instead of waiting; 199 lines, over the 100-line rule, kept by Pablo's decision (design question 8). Limits below | upstream stops blocking on a stalled broadcast receiver |
 
 `tools/prepare_rerun.py` also applies `re_rav1d-0.1.4-wasm-libc.patch` to the AV1 patch's `re_rav1d` revision
 (`PATCHED_GIT_CRATES`): `libc` has none of the C types and errno values rav1d names on wasm32-unknown-unknown, so a
 15-line shim crate stands in for it there. Drop it when rav1d builds for wasm32 upstream.
 
-The AV1 patch comes byte-identical from ai-demos `.github/rerun-source-build/` (main `acaa65f`), which builds the same fix
-into its `rerun-sdk` wheels. The stalled-proxy-reader patch from the same place is not in this set while a test decides it
-(Pablo, 2026-11-27).
+The AV1 and stalled-proxy-reader patches come byte-identical from ai-demos `.github/rerun-source-build/` (main
+`acaa65f`), which builds the same fixes into its `rerun-sdk` wheels.
+
+The stalled-proxy-reader patch has two limits:
+
+1. **A stalled reader can miss data, and nothing in that reader says so.** A reader that stops reading (a web viewer
+   in a background browser tab, a sleeping iPad, a suspended process) loses the oldest messages it did not read once
+   1024 are queued, and its recording has a gap until it reconnects (a page reload). Only the proxy's log shows it,
+   once: "a receiver stalled for over 1s; it will skip the oldest messages". A frozen native UI thread does not stall
+   the reader: with the native viewer's UI thread frozen for 15 s under gdb while 6000 rows streamed in, the patched and
+   the stock viewer both kept 6000 of 6000.
+2. **While a reader is stalled, the byte budget is not enforced.** Only the channel's 1024 message slots bound it
+   (`--server-memory-limit` is not), so very large messages can hold extra memory until the reader recovers or
+   closes.
 
 ## Distribution
 
