@@ -436,19 +436,14 @@ class MoGeV2TrtPredictor(_MoGeV2Predictor):
         true for every in-range size once the one engine exists; an out-of-range size is false. False in an
         environment without trtkit."""
         try:
-            from trtkit.trt_builder import cached_engine_path, onnx_content_hash
+            from trtkit.trt_builder import cached_engine
         except ImportError:
             return False
 
         if not self.serves(input_hw):
             return False
         onnx_path, config = self._engine_spec(self.network_hw(input_hw))
-        if not onnx_path.exists():
-            return False
-        trt_dir: Path = self.cache_dir / "trt"
-        # The digest record lives in this predictor's cache, as ensure_engine keeps it (else the whole ONNX is hashed again).
-        digest: str = onnx_content_hash(onnx_path, cache_dir=trt_dir)
-        return cached_engine_path(onnx_path, config, cache_dir=trt_dir, onnx_sha256=digest).exists()
+        return cached_engine(onnx_path, config, cache_dir=self.cache_dir / "trt") is not None
 
     def _ensure_runtime(self, network_hw: tuple[int, int]) -> _Runtime:
         """Build or load the runtime that serves one network size."""

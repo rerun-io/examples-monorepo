@@ -18,14 +18,15 @@ from rerun.catalog import CatalogClient
 from simplecv.catalog_rig_layout import catalog_components, parse_rig_layout
 from torch import Tensor
 
+from open4dgs.birefnet_trt import load_matte_model
 from open4dgs.catalog_clip import LOCAL_CATALOG, MultiViewClip, companion_location, read_catalog_clip
 from open4dgs.masks import (
     MATTE_LAYER,
     MESH_PAD_FRACTION,
     MESH_PAD_PX,
     MODEL_NAME,
+    MatteNet,
     clip_mattes,
-    load_birefnet,
     register_mask_layer,
     write_mask_layer,
 )
@@ -66,7 +67,7 @@ def main(config: Config) -> None:
         camera.name for camera in parse_rig_layout(catalog_components(entry.filter_segments(config.segment_id).schema())).cameras
     ]
     device = torch.device("cuda")
-    model: torch.nn.Module = load_birefnet(config.model_dir, device)
+    model: MatteNet = load_matte_model(config.model_dir, device)
     mattes: list[UInt8[Tensor, "t h w"]] = []
     frame_indices: ndarray | None = None
     started: float = perf_counter()

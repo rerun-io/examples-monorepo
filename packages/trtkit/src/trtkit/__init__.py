@@ -43,8 +43,10 @@ from trtkit.trt_builder import (
     InputShapeProfile,
     TrtBuildConfig,
     build_engine,
+    cached_engine,
     cached_engine_path,
     ensure_engine,
+    files_content_hash,
     onnx_content_hash,
 )
 
@@ -73,10 +75,12 @@ __all__ = (
     "TorchRuntime",
     "TrtBuildConfig",
     "build_engine",
+    "cached_engine",
     "cached_engine_path",
     "create_runtime_from_onnx",
     "ensure_engine",
     "export_onnx",
+    "files_content_hash",
     "onnx_content_hash",
     "onnx_static_batch_size",
     "require_cuda_kernels",

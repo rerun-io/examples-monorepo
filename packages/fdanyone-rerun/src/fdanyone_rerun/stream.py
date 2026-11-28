@@ -9,7 +9,6 @@
 """
 
 import threading
-from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
@@ -90,9 +89,9 @@ class RunStreamer:
         self.message(f"{fraction:4.0%} {label}")
         # Upstream starts its next worker when this returns: the clip and the body log beside GVHMR and the skeletons.
         if canonical_clip is not None:
-            self._log_in_background(log_canonical_clip, canonical_clip, self.recording)
+            self._logging.append(self._logger.submit(log_canonical_clip, canonical_clip, self.recording))
         if label == CONDITIONING_STAGE:
-            self._log_in_background(self._log_body)
+            self._logging.append(self._logger.submit(self._log_body))
             self.recording.send_blueprint(body_blueprint())
         elif label == GENERATION_STAGE:
             self._wait_for_logging()  # the canonical clip lives until the run ends, and the denoiser gets the CPU
@@ -118,9 +117,6 @@ class RunStreamer:
         fps: float = float(MotionResult.load(self.output_dir / "gvhmr").fps)
         log_body(load_body(self.output_dir, model_dir()), fps, self.recording)
 
-    def _log_in_background(self, log: Callable[..., None], *args: object) -> None:
-        self._logging.append(self._logger.submit(log, *args))
-
     def _wait_for_logging(self) -> None:
         """Wait for the background logging so far; its first error is raised here."""
         pending, self._logging = self._logging, []
@@ -134,7 +130,7 @@ class RunStreamer:
         try:
             metadata: RunMetadata = run_views(self.config, on_stage=self.on_stage, on_step=self.on_step, cancel=self.stop)
             # The views' B-frame mp4s are re-encoded for the recording (NVENC, seconds): that runs beside the person's mattes.
-            self._log_in_background(log_cameras, read_camera_rig(self.output_dir), self.output_dir, self.recording)
+            self._logging.append(self._logger.submit(log_cameras, read_camera_rig(self.output_dir), self.output_dir, self.recording))
             self.recording.send_blueprint(result_blueprint(self.config.layout.num_views))
             generation = metadata.generation
             self.message(

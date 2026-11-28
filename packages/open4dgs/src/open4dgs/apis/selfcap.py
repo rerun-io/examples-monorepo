@@ -21,13 +21,13 @@ import numpy as np
 import torch
 from simplecv.catalog_layers import atomic_recording
 
+from open4dgs.birefnet_trt import load_matte_model
 from open4dgs.catalog_clip import LOCAL_CATALOG, SPARK_CATALOG
 from open4dgs.init_cloud import log_init_cloud
 from open4dgs.masks import (
     MATTE_LAYER,
     MODEL_NAME,
     clip_mattes,
-    load_birefnet,
     read_clip_masks,
     register_mask_layer,
     write_mask_layer,
@@ -80,7 +80,7 @@ def _masks(config: Config) -> None:
     timed: TimedClip = read_timed_clip(config.catalog_url, config.dataset, config.segment_id, config.time_start_s, config.num_frames)
     clip = timed.clip
     device = torch.device("cuda")
-    model = load_birefnet(config.model_dir, device)
+    model = load_matte_model(config.model_dir, device)
     started: float = time.perf_counter()
     joints = timed.joints
     assert joints is not None
