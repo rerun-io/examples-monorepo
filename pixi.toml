@@ -2410,6 +2410,22 @@ platforms = ["linux-64", "linux-aarch64"]
 [feature.caspar-mojo-pkg.activation.env]
 PACKAGE_DIR = "packages/caspar-mojo"
 
+# The test lanes build the extension first: a missing or stale .so must not skip or pass silently.
+[feature.caspar-mojo-pkg.tasks.tests]
+cmd = "cd $PACKAGE_DIR && pytest -q"
+depends-on = ["caspar-mojo-build"]
+description = "Build caspar-mojo, then run the package unit tests"
+
+[feature.caspar-mojo-pkg.tasks.tests-integration]
+cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m integration \"$@\" || test $? -eq 5' _"
+depends-on = ["caspar-mojo-build"]
+description = "Build caspar-mojo, then run the package integration tests"
+
+[feature.caspar-mojo-pkg.tasks.tests-golden]
+cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m golden \"$@\" || test $? -eq 5' _"
+depends-on = ["caspar-mojo-build"]
+description = "Build caspar-mojo, then run the package golden reference tests"
+
 [feature.caspar-mojo.tasks.caspar-mojo-build]
 cmd = "mojo build --emit shared-lib -I caspar_mojo/mojo -o caspar_mojo/_caspar_mojo.so caspar_mojo/mojo/_caspar_mojo.mojo"
 cwd = "packages/caspar-mojo"
@@ -4476,8 +4492,8 @@ description = "What Animated SOG costs a trained run (--run <run dir>, --setting
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════
 [environments]
-colsfm = { features = ["common", "cuda", "colsfm", "torchcodec", "ffmpeg"], solve-group = "colsfm", no-default-feature = true }
-colsfm-dev = { features = ["common", "cuda", "colsfm", "dev", "torchcodec", "ffmpeg"], solve-group = "colsfm", no-default-feature = true }
+colsfm = { features = ["common", "cuda", "colsfm", "caspar-mojo", "torchcodec", "ffmpeg"], solve-group = "colsfm", no-default-feature = true }
+colsfm-dev = { features = ["common", "cuda", "colsfm", "caspar-mojo", "dev", "torchcodec", "ffmpeg"], solve-group = "colsfm", no-default-feature = true }
 pipelines = { features = ["common", "pipelines", "ffmpeg"], solve-group = "pipelines", no-default-feature = true }
 pipelines-dev = { features = ["common", "pipelines", "dev", "ffmpeg"], solve-group = "pipelines", no-default-feature = true }
 agent-traces = { features = ["agent-traces", "ffmpeg"], solve-group = "agent-traces", no-default-feature = true }
