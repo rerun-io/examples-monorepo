@@ -1,13 +1,16 @@
 """The Mojo solver against the numpy reference on synthetic problems.
 
-Tolerances. The Mojo solver runs in float32 like CASPAR, so:
-- costs are compared with the float64 reference (initial within 1e-4, final within 1 %);
-- the iteration count and the exit reason are compared with the float32 reference run: in float64 the strict
-  `trial < best` test keeps accepting tiny decreases until `solver_iter_max`, while float32 ends on the damping
-  exit, so only the float32 run predicts the trajectory's length;
-- poses and points may differ from the float64 reference by 10x what float32 alone moves them (the float32
-  reference against the float64 one), plus a floor of 1e-6 of the scene extent: no float32 solver can do better
-  than that, and a real bug moves the state by far more.
+Tolerances (the lead's parity ruling). The Mojo solver runs in float32 like CASPAR. Once the cost has converged,
+every trial changes it by ~1e-6 relative, so float32 summation order decides its accept or reject (in CASPAR too)
+and the length of that tail varies from run to run. So:
+- the trace is compared trial by trial only up to convergence: the float32 reference's first trial whose best cost
+  is within `CONVERGED` of its final cost (same accept flags, best cost within 1e-3, PCG iterations within 1);
+- costs against the float64 reference: initial within 1e-4, final within 1 %;
+- the exit reason equals the float32 reference's, and the trial count is within a factor 2 of it (a gross check);
+- the state is compared through what it predicts, the pixels: each tail accept moves the state along a nearly flat
+  direction (the scale gauge, point depths), which changes no pixel to first order but can move a point by more
+  than float32 moves it elsewhere. The pixels may differ from the float64 reference's by 10x what float32 alone
+  moves them (the float32 reference against the float64 one), plus a floor of `PIXEL_FLOOR`.
 """
 
 from __future__ import annotations
@@ -16,15 +19,18 @@ from functools import cache
 
 import numpy as np
 import pytest
-from reference.solver import reference_linearize, reference_solve
+from reference.solver import State, make_groups, reference_linearize, reference_solve, residuals_and_jacobians
 from reference.synthetic import make_problem
 
-from caspar_mojo.problem import BaOptions, BaProblem, BaResult, CameraModel
+from caspar_mojo.problem import BaIteration, BaOptions, BaProblem, BaResult, CameraModel
 
 pytestmark = pytest.mark.integration
 
 OPTIONS = BaOptions(solver_iter_max=40)
-NOT_YET = pytest.mark.xfail(strict=False, reason="core: not implemented yet")
+CONVERGED = 1e-5
+"""Relative distance to the final cost at which a trace counts as converged."""
+PIXEL_FLOOR = 1e-4
+"""Pixels: a few float32 ulps of a 1000-pixel coordinate."""
 
 CASES = {
     "pinhole": (CameraModel.PINHOLE, ()),
@@ -40,12 +46,6 @@ CASES = {
     "pinhole_rig_sensor_free": (CameraModel.PINHOLE, (("rig_cameras", 3), ("sensor_free", True))),
     "fisheye_rig_sensor_free": (CameraModel.OPENCV_FISHEYE, (("rig_cameras", 2), ("sensor_free", True))),
 }
-SUPPORTED = {"pinhole", "pinhole_1031"}
-"""Cases the core worker has implemented; the rest are expected to fail until it flips them on here."""
-
-
-def _params() -> list:
-    return [pytest.param(name, id=name, marks=() if name in SUPPORTED else NOT_YET) for name in CASES]
 
 
 @cache
@@ -56,9 +56,8 @@ def _problem(name: str) -> BaProblem:
 
 
 @cache
-def _reference(name: str, dtype: type) -> tuple[BaResult, int]:
-    result, trace = reference_solve(_problem(name), OPTIONS, dtype=dtype)
-    return result, len(trace)
+def _reference(name: str, dtype: type) -> tuple[BaResult, list]:
+    return reference_solve(_problem(name), OPTIONS, dtype=dtype)
 
 
 def _solver():
@@ -78,45 +77,45 @@ def _solve(solver, problem: BaProblem) -> BaResult:
         raise
 
 
-def _rotation_difference(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """Angle (rad) between the rotations of pose rows."""
-    cosine = np.abs(np.sum(a[:, :4] * b[:, :4], axis=1)) / (np.linalg.norm(a[:, :4], axis=1) * np.linalg.norm(b[:, :4], axis=1))
-    return 2 * np.arccos(np.clip(cosine, 0.0, 1.0))
+def _converged(trace: list) -> int:
+    """Trials up to and including the first whose best cost is within `CONVERGED` of the final one."""
+    final = trace[-1].cost_best
+    return next(i for i, trial in enumerate(trace) if trial.cost_best <= final * (1 + CONVERGED)) + 1
 
 
-def _state_differences(a: BaResult, b: BaResult) -> dict[str, float]:
-    return {
-        "rotation": float(np.max(_rotation_difference(a.rig_from_world, b.rig_from_world))),
-        "translation": float(np.max(np.abs(a.rig_from_world[:, 4:] - b.rig_from_world[:, 4:]))),
-        "sensor_rotation": float(np.max(_rotation_difference(a.sensor_from_rig, b.sensor_from_rig))),
-        "sensor_translation": float(np.max(np.abs(a.sensor_from_rig[:, 4:] - b.sensor_from_rig[:, 4:]))),
-        "points": float(np.max(np.abs(a.points - b.points))),
-        "intrinsics": float(np.max(np.abs(a.intrinsics - b.intrinsics) / np.maximum(np.abs(b.intrinsics), 1.0))),
-    }
+def _pixels(problem: BaProblem, result: BaResult) -> np.ndarray:
+    state = State(result.rig_from_world, result.sensor_from_rig, result.intrinsics, result.points)
+    residual, _ = residuals_and_jacobians(problem, state, make_groups(problem), with_jacobians=False)
+    return residual
 
 
-@pytest.mark.parametrize("name", _params())
+@pytest.mark.parametrize("name", CASES)
 def test_solve_matches_reference(name: str) -> None:
     solver = _solver()
     problem = _problem(name)
     mojo = _solve(solver, problem)
     reference64, _ = _reference(name, np.float64)
-    reference32, trace32_length = _reference(name, np.float32)
+    reference32, trace32 = _reference(name, np.float32)
 
+    converged = _converged(trace32)
+    assert len(mojo.trace) >= converged, (len(mojo.trace), converged)
+    for index, (trial, expected) in enumerate(zip(mojo.trace[:converged], trace32[:converged], strict=True)):
+        assert isinstance(trial, BaIteration)
+        assert trial.accepted == expected.accepted, (index, trial, expected)
+        assert trial.cost_best == pytest.approx(expected.cost_best, rel=1e-3), (index, trial, expected)
+        assert abs(trial.pcg_iterations - expected.pcg_iterations) <= 1, (index, trial, expected)
     assert mojo.initial_cost == pytest.approx(reference64.initial_cost, rel=1e-4)
     assert mojo.final_cost == pytest.approx(reference64.final_cost, rel=1e-2)
     assert mojo.exit_reason == reference32.exit_reason
-    assert abs(mojo.iterations - reference32.iterations) <= 2, (mojo.iterations, reference32.iterations, trace32_length)
+    assert len(trace32) / 2 <= len(mojo.trace) <= 2 * len(trace32), (len(mojo.trace), len(trace32))
 
-    extent = float(np.ptp(problem.points, axis=0).max())
-    float32_effect = _state_differences(reference32, reference64)
-    error = _state_differences(mojo, reference64)
-    for key, value in error.items():
-        floor = 1e-6 if key in ("rotation", "sensor_rotation", "intrinsics") else 1e-6 * extent
-        assert value <= 10 * float32_effect[key] + floor, (key, value, float32_effect[key])
+    pixels64 = _pixels(problem, reference64)
+    float32_effect = float(np.max(np.abs(_pixels(problem, reference32) - pixels64)))
+    error = float(np.max(np.abs(_pixels(problem, mojo) - pixels64)))
+    assert error <= 10 * float32_effect + PIXEL_FLOOR, (error, float32_effect)
 
 
-@pytest.mark.parametrize("name", _params())
+@pytest.mark.parametrize("name", CASES)
 def test_linearize_matches_reference(name: str) -> None:
     solver = _solver()
     if not hasattr(solver, "linearize"):

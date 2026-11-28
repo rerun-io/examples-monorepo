@@ -12,7 +12,7 @@ from std.time import perf_counter_ns
 from max.gpu.host import DeviceBuffer, DeviceContext
 from layout import TileTensor, row_major
 
-from camera_models import CameraModel, MAX_PARAMS
+from camera_models import CameraModel, FullOpenCV, MAX_PARAMS, OpenCVFisheye, Pinhole, SimpleRadial
 from factor_kernels import (
     BLOCK,
     cross_cameras_kernel,
@@ -99,7 +99,18 @@ struct Options(ImplicitlyCopyable):
 
 
 @fieldwise_init
-struct Stats(ImplicitlyCopyable):
+struct Trial(ImplicitlyCopyable):
+    """One LM trial, the fields of CASPAR's print_progress line."""
+
+    var cost_tried: Float32
+    var cost_best: Float32
+    var damping: Float32
+    var pcg_iterations: Int
+    var accepted: Bool
+
+
+@fieldwise_init
+struct Stats(Movable):
     var initial_cost: Float32
     var final_cost: Float32
     var iterations: Int
@@ -107,6 +118,7 @@ struct Stats(ImplicitlyCopyable):
     var exit_reason: Int
     var solve_seconds: Float64
     var launches: Int
+    var trace: List[Trial]
 
 
 @fieldwise_init
@@ -313,10 +325,9 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
         _download(ctx, linearize_gradient, d_g, lay.n_tan)
         _download(ctx, linearize_hblk, d_h, lay.n_h)
         ctx.synchronize()
-        return Stats(initial_cost, initial_cost, 0, 0, EXIT_MAX_ITERATIONS, 0.0, launches)
+        return Stats(initial_cost, initial_cost, 0, 0, EXIT_MAX_ITERATIONS, 0.0, launches, List[Trial]())
 
-    # CASPAR's print_progress, for comparing traces.
-    var print_progress = getenv("CASPAR_MOJO_PRINT_PROGRESS") == "1"
+    var trace = List[Trial](capacity=options.solver_iter_max)
     var diag = options.diag_init
     var up_scale = options.diag_scaling_up
     var exit_reason = EXIT_MAX_ITERATIONS
@@ -437,9 +448,9 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
         ctx.enqueue_copy(host2, d_scalars.create_sub_buffer[DType.float64](SLOT_COST_TRIAL, 2))
         ctx.synchronize()
         var score_trial = Float32(host2[0])
-        if print_progress:
-            print(t"solver_iter: {it}  pcg_iter: {k}  score_current: {score_trial}  score_best: {score_best}  diag: {diag}")
-        if score_trial < score_best * options.solver_rel_decrease_min:
+        var damping = diag
+        var accepted = score_trial < score_best * options.solver_rel_decrease_min
+        if accepted:
             var quality = (score_best - score_trial) / Float32(0.5 * host2[1])
             var q = 2.0 * quality - 1.0
             var scale = max(options.diag_scaling_down, 1.0 - q * q * q)
@@ -452,11 +463,12 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
             swap(d_points, t_points)
         else:
             diag = diag * up_scale
-            if diag > options.diag_exit_value:
-                exit_reason = EXIT_CONVERGED_DIAG_EXIT
-                trials = it
-                break
             up_scale *= 2.0
+        trace.append(Trial(score_trial, score_best, damping, k, accepted))
+        if not accepted and diag > options.diag_exit_value:
+            exit_reason = EXIT_CONVERGED_DIAG_EXIT
+            trials = it
+            break
         if score_best <= options.score_exit_value:
             exit_reason = EXIT_CONVERGED_SCORE_THRESHOLD
             trials = it
@@ -470,4 +482,56 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
     _download(ctx, result.rig_from_world, d_poses, nf * 7)
     _download(ctx, result.points, d_points, np * 3)
     ctx.synchronize()
-    return Stats(initial_cost, score_best, trials, pcg_total, exit_reason, solve_seconds, launches)
+    return Stats(initial_cost, score_best, trials, pcg_total, exit_reason, solve_seconds, launches, trace^)
+
+
+def _any(mask: U8HostIn, n: Int) -> Bool:
+    for i in range(n):
+        if mask[unsafe_offset=i] != 0:
+            return True
+    return False
+
+
+def _solve_flags[Model: CameraModel](
+    ctx: DeviceContext,
+    problem: HostProblem,
+    options: Options,
+    result: HostState,
+    linearize_gradient: F32HostOut,
+    linearize_hblk: F32HostOut,
+    linearize_only: Bool,
+) raises -> Stats:
+    match (_any(problem.intrinsics_free, problem.n_cameras), _any(problem.sensor_free, problem.n_cameras)):
+        case (True, True):
+            return solve[Model, True, True](ctx, problem, options, result, linearize_gradient, linearize_hblk, linearize_only)
+        case (True, False):
+            return solve[Model, True, False](ctx, problem, options, result, linearize_gradient, linearize_hblk, linearize_only)
+        case (False, True):
+            return solve[Model, False, True](ctx, problem, options, result, linearize_gradient, linearize_hblk, linearize_only)
+        case (False, False):
+            return solve[Model, False, False](ctx, problem, options, result, linearize_gradient, linearize_hblk, linearize_only)
+
+
+def solve_model(
+    ctx: DeviceContext,
+    model: Int,
+    problem: HostProblem,
+    options: Options,
+    result: HostState,
+    linearize_gradient: F32HostOut,
+    linearize_hblk: F32HostOut,
+    linearize_only: Bool,
+) raises -> Stats:
+    """`solve` for a runtime camera model (the `CameraModel` value of `caspar_mojo.problem`) and the refined groups the
+    masks free."""
+    match model:
+        case 0:
+            return _solve_flags[Pinhole](ctx, problem, options, result, linearize_gradient, linearize_hblk, linearize_only)
+        case 1:
+            return _solve_flags[SimpleRadial](ctx, problem, options, result, linearize_gradient, linearize_hblk, linearize_only)
+        case 2:
+            return _solve_flags[OpenCVFisheye](ctx, problem, options, result, linearize_gradient, linearize_hblk, linearize_only)
+        case 3:
+            return _solve_flags[FullOpenCV](ctx, problem, options, result, linearize_gradient, linearize_hblk, linearize_only)
+        case _:
+            raise Error(t"unknown camera model {model}")
