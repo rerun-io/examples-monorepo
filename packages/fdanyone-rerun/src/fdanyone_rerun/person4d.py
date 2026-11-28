@@ -49,6 +49,7 @@ from fdanyone_rerun.rerun_log import (
     TRAIN_LOSS,
     TRAIN_PREVIEW,
     TRAIN_TIMELINE,
+    BodyTrack,
     camera_entity,
     load_body,
     person_blueprint,
@@ -124,9 +125,10 @@ def read_run_clip(
     def decode(video: str) -> UInt8[Tensor, "frames h w 3"]:
         return torch.from_numpy(np.stack(read_rgb_video(output_dir / video, expected_frames=num_frames)))
 
-    # PyAV decodes without the GIL: every view decodes on its own thread while the body and BiRefNet load and the
-    # earlier views' mattes run, instead of one view after another on the critical path.
-    pool: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=len(rig.cameras))
+    # PyAV decodes without the GIL: every view decodes on its own thread, and the body is rebuilt on another, while the
+    # matte model loads and the earlier views' mattes run, instead of one after another on the critical path.
+    pool: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=len(rig.cameras) + 1)
+    pending_body: Future[BodyTrack] = pool.submit(load_body, output_dir, models)
     decoded: list[Future[UInt8[Tensor, "frames h w 3"]]] = [pool.submit(decode, camera.video) for camera in rig.cameras]
     frames: list[UInt8[Tensor, "frames h w 3"]] = []
     masks: list[Float32[Tensor, "frames h w"]] = []
@@ -134,11 +136,11 @@ def read_run_clip(
     sizes: list[tuple[int, int]] = []
     matte_model: MatteNet | None = None
     try:
-        body = load_body(output_dir, models)
+        matte_model = load_matte_model(models / "birefnet", device)
+        body: BodyTrack = pending_body.result()
         if len(body.vertices) != num_frames:
             raise ValueError(f"{output_dir}: the body has {len(body.vertices)} frames, the clip {num_frames}")
         vertices: Float32[np.ndarray, "frames verts 3"] = body.vertices.astype(np.float32)
-        matte_model = load_matte_model(models / "birefnet", device)
         for camera, pending in zip(rig.cameras, decoded, strict=True):
             raise_if_stopped(cancel)
             stored_wh: tuple[int, int] = (camera.image_width, camera.image_height)
