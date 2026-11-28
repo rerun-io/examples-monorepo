@@ -222,7 +222,9 @@ class SharedTimeGroup:
         if hook is not None:
             if depth is None:
                 return None
-            hook_loss = hook.batch(step=step, frame_idx=frame_idx, cams=cams, depth=depth[..., 0], alphas=alphas[..., 0], offset=trainer.stride_state.offset)
+            hook_loss = hook.batch(
+                step=step, frame_idx=frame_idx, cams=cams, depth=depth[..., 0], alphas=alphas[..., 0], offset=trainer.stride_state.offset
+            )
             if hook_loss is None:
                 return None
         bg: Tensor = trainer._const_tensor(tuple(config.masked_rgb_bg_color), colors.device, colors.dtype)
@@ -370,6 +372,17 @@ class Open4dgsTrainer(TrigsTrainer):
             )
             for i, (name, opt) in enumerate(optimizers.items())
         }
+
+    def _optimizer_step(self, optimizers: dict[str, torch.optim.Optimizer]) -> None:
+        """Lever 5 (recipe patch 0012's seam): every ``AdamBf16`` steps in ONE launch (``adam_bf16.fused_step``, bit-identical
+        to their own steps); anything else steps as TRiGS does."""
+        from open4dgs.adam_bf16 import AdamBf16, fused_step
+
+        opts: list[torch.optim.Optimizer] = list(optimizers.values())
+        if opts and all(isinstance(o, AdamBf16) for o in opts):
+            fused_step(opts)  # pyrefly: ignore[bad-argument-type]  # checked above
+            return
+        super()._optimizer_step(optimizers)  # pyrefly: ignore[missing-attribute]  # recipe patch 0012
 
     def strided_cameras(self, cameras: CameraConfig, offset: tuple[int, int]) -> CameraConfig:
         """Lever 4: ``strided_camera_config(cameras, offset)``, built once per offset of one ``cameras`` object."""

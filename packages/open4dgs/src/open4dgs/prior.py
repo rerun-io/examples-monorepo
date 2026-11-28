@@ -313,7 +313,14 @@ class MonoPriorLoss:
         return weight * (self.config.lambda_depth * terms.depth + self.config.lambda_normal * terms.normal)
 
     def batch(
-        self, *, step: int, frame_idx: int, cams: Sequence[int], depth: Float32[Tensor, "b h w"], alphas: Float32[Tensor, "b h w"], offset: tuple[int, int] | None
+        self,
+        *,
+        step: int,
+        frame_idx: int,
+        cams: Sequence[int],
+        depth: Float32[Tensor, "b h w"],
+        alphas: Float32[Tensor, "b h w"],
+        offset: tuple[int, int] | None,
     ) -> Float32[Tensor, " b"] | None:
         """``__call__`` for the same-size cameras ``cams`` of one step at once (``depth``/``alphas`` their renders, one per
         camera): the per-camera losses, or None when a camera has no maps (the caller then calls per camera)."""
@@ -331,7 +338,9 @@ class MonoPriorLoss:
         assert self._K is not None
         slots: list[int] = [self.positions.index(c) for c in cams]
         Ks: Tensor = self._K if offset is None else self._K_strided[offset]
-        maps: list[tuple[Tensor, Tensor, Tensor]] = [(self._normals[s][frame_idx], self._static[s][frame_idx], self._depth[s][frame_idx]) for s in slots]
+        maps: list[tuple[Tensor, Tensor, Tensor]] = [
+            (self._normals[s][frame_idx], self._static[s][frame_idx], self._depth[s][frame_idx]) for s in slots
+        ]
         if offset is not None:
             maps = [(strided_pixels(n, offset), strided_pixels(v, offset), strided_pixels(d, offset)) for n, v, d in maps]
         normals, static, prior_depth = (torch.stack(parts) for parts in zip(*maps, strict=True))

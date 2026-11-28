@@ -108,6 +108,53 @@ def test_adam_bf16_tracks_torch_adam() -> None:
 
 
 @pytest.mark.integration
+def test_fused_step_equals_each_optimizer_step() -> None:
+    """adam_bf16.fused_step (one launch for every parameter of several AdamBf16s) equals each optimizer's own step bit for
+    bit (parameters, both moments, step counters), across lr changes, a parameter without a gradient and cleared state."""
+    if not torch.cuda.is_available():
+        pytest.skip("needs a CUDA GPU (Triton)")
+    from open4dgs.adam_bf16 import AdamBf16, fused_step
+
+    def make() -> tuple[list[torch.Tensor], list[AdamBf16]]:
+        torch.manual_seed(0)
+        shapes = [(3001, 3), (3001,), (3001, 15, 3), (7,), (5000, 4)]
+        ps = [torch.randn(s, device="cuda").requires_grad_(True) for s in shapes]
+        opts = [
+            AdamBf16([ps[0], ps[1]], lr=1e-2, betas=(0.9, 0.999), eps=1e-15, seed=0),
+            AdamBf16([{"params": [ps[2]], "lr": 3e-3, "betas": (0.8, 0.99), "eps": 1e-8}], seed=1),
+            AdamBf16([ps[3], ps[4]], lr=1e-1, betas=(0.5, 0.9), eps=1e-6, seed=2),
+        ]
+        return ps, opts
+
+    ref_p, ref_o = make()
+    new_p, new_o = make()
+    g = torch.Generator(device="cuda").manual_seed(1)
+    for step in range(12):
+        grads = [torch.randn(p.shape, device="cuda", generator=g) for p in ref_p]
+        for i, (a, b) in enumerate(zip(ref_p, new_p, strict=True)):
+            skip = i == 3 and step % 3 == 1
+            a.grad = None if skip else grads[i].clone()
+            b.grad = None if skip else grads[i].clone()
+        if step == 5:
+            for opts in (ref_o, new_o):
+                opts[1].param_groups[0]["lr"] = 1e-3
+                opts[2].state[opts[2].param_groups[0]["params"][1]].clear()
+        for o in ref_o:
+            o.step()
+            o.zero_grad(set_to_none=True)
+        fused_step(new_o)
+        assert all(p.grad is None for p in new_p)
+    for opt_ref, opt_new in zip(ref_o, new_o, strict=True):
+        params_ref = [p for grp in opt_ref.param_groups for p in grp["params"]]
+        params_new = [p for grp in opt_new.param_groups for p in grp["params"]]
+        for a, b in zip(params_ref, params_new, strict=True):
+            assert torch.equal(a.detach(), b.detach())
+            sa, sb = opt_ref.state[a], opt_new.state[b]
+            assert float(sa["step"]) == float(sb["step"])
+            assert torch.equal(sa["exp_avg"], sb["exp_avg"]) and torch.equal(sa["exp_avg_sq"], sb["exp_avg_sq"])
+
+
+@pytest.mark.integration
 def test_bf16_stochastic_rounding_is_unbiased() -> None:
     """Rounding one value 20k times: the mean of the bf16 results equals the float32 value (nearest rounding would not)."""
     if not torch.cuda.is_available():

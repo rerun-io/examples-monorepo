@@ -479,7 +479,12 @@ def test_hook_batch_equals_per_camera_calls(offset: tuple[int, int] | None) -> N
     per_cam = MonoPriorLoss(config, priors, masks, (2, 0), K)
     single = rendered.clone().requires_grad_(True)
     info = [{"render_depth": single[i][None, ..., None], "stride_offset": offset} for i in range(2)]
-    ref = torch.stack([per_cam(step=4, frame_idx=1, cam_idx=c, colors=torch.zeros(1), alphas=alphas[i][None, ..., None], info=info[i], cameras=None) for i, c in enumerate((2, 0))])
+    ref = torch.stack(
+        [
+            per_cam(step=4, frame_idx=1, cam_idx=c, colors=torch.zeros(1), alphas=alphas[i][None, ..., None], info=info[i], cameras=None)
+            for i, c in enumerate((2, 0))
+        ]
+    )
     per_cam.finish()
 
     batch = MonoPriorLoss(config, priors, masks, (2, 0), K)

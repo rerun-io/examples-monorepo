@@ -1,0 +1,27 @@
+diff --git a/src/trigs/core/trainer.py b/src/trigs/core/trainer.py
+--- a/src/trigs/core/trainer.py
++++ b/src/trigs/core/trainer.py
+@@ -4573,6 +4573,12 @@
+             return max(int(total.reshape(()).item()), 1)
+         return max(int(params["means"].shape[0]), 1)
+ 
++    def _optimizer_step(self, optimizers: Dict[str, torch.optim.Optimizer]) -> None:
++        """Seam: every optimizer's step, then its gradients set to None (a subclass may fuse them)."""
++        for opt in optimizers.values():
++            opt.step()
++            opt.zero_grad(set_to_none=True)
++
+     def _const_tensor(self, value, device, dtype) -> Tensor:
+         """``torch.tensor(value)`` on ``device``; a seam for a cached version (never modify the result in place)."""
+         return torch.tensor(value, device=device, dtype=dtype)
+@@ -5733,9 +5739,7 @@
+                 )
+                 opdiag_logit_before = params["opacities"].data.reshape(-1).clone()
+ 
+-            for opt in optimizers.values():
+-                opt.step()
+-                opt.zero_grad(set_to_none=True)
++            self._optimizer_step(optimizers)
+ 
+             self._cuda_probe(
+                 f"step={step} after optimizer step"

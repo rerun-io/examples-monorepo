@@ -66,6 +66,9 @@ source:
     # device, the direct active-row query's time as a cached device scalar, and the demoted-row count read only when
     # the temporal hierarchy needs it.
     - patches/0011-train-step-host-syncs-2.patch
+    # Hook only: the train loop's optimizer steps go through TrigsTrainer._optimizer_step (default: each optimizer's
+    # step + zero_grad(set_to_none=True)); packages/open4dgs (open4dgs.adam_bf16.fused_step) runs every AdamBf16 in one launch.
+    - patches/0012-optimizer-step-seam.patch
 
 build:
   # Bump with every patch or build script change: the build string hash does not follow the recipe content, and the

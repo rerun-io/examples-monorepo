@@ -48,8 +48,19 @@ def _one_step(batched: bool, prior: bool, monkeypatch: pytest.MonkeyPatch) -> tu
     with torch.no_grad():
         for f in range(F):
             moved = pos + torch.tensor([0.01 * f, 0.0, 0.0], device=dev)
-            rgbd, alpha, _ = rasterization(moved, torch.tensor([1.0, 0, 0, 0], device=dev).expand(n, 4), torch.full((n, 3), 0.03, device=dev),
-                                           torch.full((n,), 0.9, device=dev), color, viewmats, K, W, H, packed=False, render_mode="RGB+ED")
+            rgbd, alpha, _ = rasterization(
+                moved,
+                torch.tensor([1.0, 0, 0, 0], device=dev).expand(n, 4),
+                torch.full((n, 3), 0.03, device=dev),
+                torch.full((n,), 0.9, device=dev),
+                color,
+                viewmats,
+                K,
+                W,
+                H,
+                packed=False,
+                render_mode="RGB+ED",
+            )
             gt_images[f] = [(rgbd[c, ..., :3].clamp(0, 1) * 255).round().to(torch.uint8) for c in range(C)]
             gt_masks[f] = [(alpha[c, ..., 0] > 0.5).float() for c in range(C)]
             for c in range(C):
@@ -67,29 +78,47 @@ def _one_step(batched: bool, prior: bool, monkeypatch: pytest.MonkeyPatch) -> tu
         "velocity_units": np.asarray("world_per_video_frame"),
     }
     params, sh_degree, scene_extent = build_canonical_from_npz(keyframes, fps=FPS, keyframe_stride=3, device=dev)
-    config = TrigsTrainingConfig(n_steps=1, fps=FPS, keyframe_stride=3, holdout_views=(), psnr_eval_every=0, tb_log_every=1, tb_stats_every=0,
-                                 viewer_snapshot_every=0, train_seed=0, batch_cameras=4, masked_rgb_loss=True, masked_rgb_composite=True,
-                                 masked_rgb_bg_color=(0.0, 0.0, 0.0), render_depth=prior)
+    config = TrigsTrainingConfig(
+        n_steps=1,
+        fps=FPS,
+        keyframe_stride=3,
+        holdout_views=(),
+        psnr_eval_every=0,
+        tb_log_every=1,
+        tb_stats_every=0,
+        viewer_snapshot_every=0,
+        train_seed=0,
+        batch_cameras=4,
+        masked_rgb_loss=True,
+        masked_rgb_composite=True,
+        masked_rgb_bg_color=(0.0, 0.0, 0.0),
+        render_depth=prior,
+    )
     trainer = Open4dgsTrainer(device=dev, pixel_stride=2, adam_moments="bf16", fused_loss=True)
     if prior:
-        maps = ClipPriors(tuple(f"c{c}" for c in range(C)), torch.arange(F),
-                          tuple(torch.stack(d).half() for d in depths),
-                          tuple(torch.zeros(F, H, W, 3, dtype=torch.uint8) + encode_normals(torch.tensor([0.0, 0.0, -1.0]), torch.tensor(True)) for _ in range(C)))
-        trainer.camera_loss_hook = MonoPriorLoss(PriorConfig(schedule="steps", start_step=0, ramp_end_step=0, log_every=1, depth_edge_max=10.0,
-                                                             min_valid_fraction=0.0), maps, tuple(torch.stack([m[c].cpu() for m in gt_masks.values()]) for c in range(C)),
-                                                 tuple(range(C)), K.cpu())
+        maps = ClipPriors(
+            tuple(f"c{c}" for c in range(C)),
+            torch.arange(F),
+            tuple(torch.stack(d).half() for d in depths),
+            tuple(torch.zeros(F, H, W, 3, dtype=torch.uint8) + encode_normals(torch.tensor([0.0, 0.0, -1.0]), torch.tensor(True)) for _ in range(C)),
+        )
+        trainer.camera_loss_hook = MonoPriorLoss(
+            PriorConfig(schedule="steps", start_step=0, ramp_end_step=0, log_every=1, depth_edge_max=10.0, min_valid_fraction=0.0),
+            maps,
+            tuple(torch.stack([m[c].cpu() for m in gt_masks.values()]) for c in range(C)),
+            tuple(range(C)),
+            K.cpu(),
+        )
     grads: dict[str, torch.Tensor] = {}
-    adam_step = AdamBf16.step
+    optimizer_step = Open4dgsTrainer._optimizer_step
 
-    def step(self, *x, **k):
-        for group in self.param_groups:
-            for p in group["params"]:
-                for name, q in params.items():
-                    if q is p and p.grad is not None:
-                        grads[name] = p.grad.detach().clone()
-        return adam_step(self, *x, **k)
+    def step(self, optimizers):
+        assert all(isinstance(o, AdamBf16) for o in optimizers.values())
+        if not grads:
+            grads.update({name: p.grad.detach().clone() for name, p in params.items() if p.grad is not None})
+        return optimizer_step(self, optimizers)
 
-    monkeypatch.setattr(AdamBf16, "step", step)
+    monkeypatch.setattr(Open4dgsTrainer, "_optimizer_step", step)
     calls = {"batched": 0}
     camera_losses = SharedTimeGroup.camera_losses
 
@@ -110,8 +139,17 @@ def _one_step(batched: bool, prior: bool, monkeypatch: pytest.MonkeyPatch) -> tu
 
     cameras = HostSizedCameraConfig.from_matrices(viewmats=viewmats, Ks=K, widths=[W] * C, heights=[H] * C)
     trainer._sequence_t_max = (F - 1) / FPS
-    trainer.train_from_params(params=params, sh_degree=sh_degree, scene_extent=scene_extent, cameras=cameras, n_frames=F,
-                              gt_images_per_frame=gt_images, gt_alphas_per_frame=gt_masks, config=config, writer=Scalars())
+    trainer.train_from_params(
+        params=params,
+        sh_degree=sh_degree,
+        scene_extent=scene_extent,
+        cameras=cameras,
+        n_frames=F,
+        gt_images_per_frame=gt_images,
+        gt_alphas_per_frame=gt_masks,
+        config=config,
+        writer=Scalars(),
+    )
     monkeypatch.undo()
     if prior:
         trainer.camera_loss_hook.finish()
