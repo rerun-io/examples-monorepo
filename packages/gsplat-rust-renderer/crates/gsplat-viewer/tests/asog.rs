@@ -304,6 +304,36 @@ fn parallel_inflate_gives_the_serial_parts() {
     }
 }
 
+/// `g` codes beyond i32 (a clip whose angular speed nearly reaches zero) reach the GPU as f32 bits: its motion rows
+/// match the CPU oracle for a row whose five `g` codes are 3 x `i32::MAX`.
+#[test]
+#[ignore = "integration: GPU"]
+fn gpu_load_path_reads_g_codes_beyond_i32() {
+    let f = fixture();
+    let bytes =
+        row(&f.all["/asog"], "AnimatedSogSplats3D", "asog").expect("AnimatedSogSplats3D:asog");
+    let mut parts = gsplat_core::asog::decode_parts(
+        bytes.as_primitive::<UInt8Type>().values(),
+        ASOG_ACTIVE_THRESHOLD,
+    )
+    .expect("decode_parts");
+    let wide = (f64::from(i32::MAX) * 3.0) as f32;
+    parts.motion_codes[15..20].fill(wide.to_bits().cast_signed());
+    let load = gsplat_core::test_utils::asog_gpu_load(&parts, &[]);
+    // The packed row: opacity, mu, sigma, flags, anchor (3), omega (9), g (5).
+    let (gpu, cpu) = (&load.gpu_rows[16..21], &load.cpu_rows[16..21]);
+    assert!(
+        cpu.iter().all(|v| v.is_finite()) && cpu.iter().any(|&v| v != 0.0),
+        "row 0 g: {cpu:?}"
+    );
+    for (a, b) in gpu.iter().zip(cpu) {
+        assert!(
+            (a - b).abs() <= 1e-5 * b.abs(),
+            "row 0 g: gpu {gpu:?}, cpu {cpu:?}"
+        );
+    }
+}
+
 /// Load path: the GPU de-quantises the fixture (`sog_dequant.wgsl` + `asog_motion.wgsl`) and evaluates it
 /// (`trigs_deform.wgsl`); its motion rows match the CPU oracle `AsogParts::motion` (f64, rounded once) within f32
 /// rounding, and the evaluated rows match the asog reference itself within the bounds of `evaluate_matches_the_reference`.

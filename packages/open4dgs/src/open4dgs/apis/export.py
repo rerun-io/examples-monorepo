@@ -25,17 +25,27 @@ from gsplat_rust_renderer.sog3d import PREVIEW_ROWS
 from rerun.catalog import CatalogClient
 from rerun.chunk import RrdReader
 from simplecv.catalog_layers import register_layer
+from simplecv.run_record import RunStart, start_run, write_run_record
 from trigs.core.trainer import TrigsTrainingConfig
 
 from open4dgs.asog import AsogSettings, decode_asog, encode_asog, tiny_omega_fraction
 from open4dgs.catalog_clip import LOCAL_CATALOG
 from open4dgs.properties import rrd_cells
 from open4dgs.run_log import RUNS_DATASET, RunProperties
-from open4dgs.splat_export import ASOG_CUT_FORMAT, SPLAT_ENTITY, STOCK_VIEWER_NOTE, log_splat_frames, run_recording, splats_at, write_asog_rrd
+from open4dgs.splat_export import (
+    ASOG_CUT_FORMAT,
+    ASOG_LAYER,
+    SPLAT_ENTITY,
+    STOCK_VIEWER_NOTE,
+    log_splat_frames,
+    run_recording,
+    splats_at,
+    write_asog_rrd,
+)
 from open4dgs.trigs_adapter import TrainedClip
 
 ExportFormat = Literal["asog", "per-frame"]
-OUTPUTS: dict[str, tuple[str, str]] = {"asog": ("asog.rrd", "asog"), "per-frame": ("splats.rrd", "splats")}
+OUTPUTS: dict[str, tuple[str, str]] = {"asog": ("asog.rrd", ASOG_LAYER), "per-frame": ("splats.rrd", "splats")}
 """Per format: the default file in the run directory and the layer name."""
 
 
@@ -72,7 +82,7 @@ class Config:
     runs_catalog_url: str = LOCAL_CATALOG
 
 
-def write_asog(config: Config, trained: TrainedClip, out: Path) -> dict[str, object]:
+def write_asog(config: Config, trained: TrainedClip, out: Path, run: RunStart) -> dict[str, object]:
     """``out``: the ``--asog`` file or the encoded checkpoint as ``AnimatedSogSplats3D`` (``write_asog_rrd``); the summary."""
     summary: dict[str, object] = {"rows_checkpoint": int(trained.params["means"].shape[0])}
     if config.asog is not None:
@@ -101,11 +111,11 @@ def write_asog(config: Config, trained: TrainedClip, out: Path) -> dict[str, obj
     summary["bytes_checkpoint"] = (config.run / "trigs_ckpt.pt").stat().st_size
     summary["bytes_asog"] = len(asog)
     cut: float = ASOG_CUT_FORMAT if config.asog_cut == "format" else TrigsTrainingConfig().temporal_active_threshold
-    summary.update(write_asog_rrd(config.run, asog, out, cut, config.preview_rows))
+    summary.update(write_asog_rrd(config.run, asog, out, cut, config.preview_rows, run))
     return summary
 
 
-def write_per_frame(config: Config, trained: TrainedClip, out: Path) -> dict[str, object]:
+def write_per_frame(config: Config, trained: TrainedClip, out: Path, run: RunStart) -> dict[str, object]:
     """``out``: one ``GaussianSplats3D`` row per (``frame_step``-th) clip frame of the checkpoint or the decoded ``--asog``."""
     device: torch.device = torch.device(config.device)
     if config.asog is not None:
@@ -119,6 +129,7 @@ def write_per_frame(config: Config, trained: TrainedClip, out: Path) -> dict[str
     counts: list[int] = log_splat_frames(
         recording, ((frame_start + f, splats_at(trained, f / trained.fps, config.with_sh)) for f in frames), SPLAT_ENTITY
     )
+    write_run_record(recording, run.finish(OUTPUTS["per-frame"][1], config.run.name))
     recording.flush()
     recording.disconnect()
     return {
@@ -136,12 +147,14 @@ def write_per_frame(config: Config, trained: TrainedClip, out: Path) -> dict[str
 
 
 def main(config: Config) -> dict[str, object]:
-    """Write the run's ``--format`` recording, register it as that format's layer; prints and returns the summary."""
+    """Write the run's ``--format`` recording with this export's run record (``simplecv.run_record``), register it as that
+    format's layer; prints and returns the summary."""
+    run: RunStart = start_run(config, source=Path(__file__))
     device: torch.device = torch.device(config.device if config.format == "per-frame" else "cpu")
     trained: TrainedClip = TrainedClip.load(config.run / "trigs_ckpt.pt", device)
     file, layer = OUTPUTS[config.format]
     out: Path = config.output or config.run / file
-    summary: dict[str, object] = (write_asog if config.format == "asog" else write_per_frame)(config, trained, out)
+    summary: dict[str, object] = (write_asog if config.format == "asog" else write_per_frame)(config, trained, out, run)
     out.chmod(0o644)
     # A per-frame export of another encoder's .asog is a comparison, not the run's layer.
     if config.register and not (config.format == "per-frame" and config.asog is not None):

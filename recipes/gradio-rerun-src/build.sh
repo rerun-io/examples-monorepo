@@ -9,6 +9,9 @@ rm -rf "$SP_DIR"/gradio_rerun "$SP_DIR"/gradio_rerun-*.dist-info
 mkdir -p "$SRC_DIR/stock"
 cp -r "$SRC_DIR/web-viewer-npm" "$SRC_DIR/stock/npm"
 export CARGO_HOME="$SRC_DIR/.cargo"
+# Cargo still reads ~/.cargo/config.toml above the build directory, whose rustc wrapper (kache) remaps crate roots to
+# /proc/self/cwd in file!(); the release build stays hermetic without it.
+export RUSTC_WRAPPER=""
 export CARGO_BUILD_JOBS="${CPU_COUNT:-8}"
 # canonical-viewer-web-build's code, with clang and ar from the build prefix.
 PYTHONPATH="$CV" python -c "

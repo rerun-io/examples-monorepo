@@ -3484,6 +3484,11 @@ cmd = "python tools/apps/capture_to_splat.py"
 cwd = "packages/pipelines"
 description = "Plan, run or show the capture_to_splat flow on a registered base segment ({plan,run,show} --profile --segment --catalog-url)"
 
+[feature.pipelines.tasks.pipelines-person-to-4d]
+cmd = "python tools/apps/person_to_4d.py"
+cwd = "packages/pipelines"
+description = "Plan, run or show the person_to_4d flow on a person video: 4DAnyone views -> Open4DGS mattes -> the trained 4D person as ASOG ({plan,run,show} --video --clip --catalog-url)"
+
 # agent-traces — one Claude or Codex session per recording, without torch.
 [feature.agent-traces]
 platforms = ["linux-64", "linux-aarch64", "osx-arm64"]

@@ -28,6 +28,7 @@ RERUN_COMMIT: str = "f346ba2728b9f55afdfd5afdb2b976fecb98dcdd"
 """The tag's commit, checked after a fetch."""
 RERUN_PATCHES: tuple[str, ...] = (
     "patches/re_viewer-0.44.0-extension-hooks.patch",
+    "patches/re_renderer-0.44.0-remapped-shader-path.patch",
     # From ai-demos .github/rerun-source-build/ (main acaa65f), which builds the same fixes into its rerun-sdk wheels:
     # native AV1 decoding on Linux arm64 (rerun-io/rerun#7755; re_rav1d 0.1.4 from a pinned git revision) and a stalled
     # live-proxy reader that no longer blocks the logger and every other viewer.
