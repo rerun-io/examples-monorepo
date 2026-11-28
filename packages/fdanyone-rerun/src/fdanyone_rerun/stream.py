@@ -9,6 +9,7 @@
 """
 
 import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 import rerun as rr
@@ -116,13 +117,16 @@ class RunStreamer:
         self.recording.send_blueprint(motion_blueprint())
         self.recording.log("world", rr.ViewCoordinates.RIGHT_HAND_Y_UP, static=True)
         metadata: RunMetadata = run_views(self.config, on_stage=self.on_stage, on_step=self.on_step, cancel=self.stop)
-        log_cameras(read_camera_rig(self.output_dir), self.output_dir, self.recording)
-        self.recording.send_blueprint(result_blueprint(self.config.layout.num_views))
-        generation = metadata.generation
-        self.message(
-            f"views done in {generation.total_elapsed_seconds:.1f} s ({generation.attention_backend}, "
-            f"{generation.peak_vram_reserved_bytes / 1e9:.2f} GB reserved)"
-        )
-        if self.person is not None:
-            self.person_summary = train_person(self.output_dir, self.person, self.recording, report=self.message, cancel=self.stop)
+        # The views' B-frame mp4s are re-encoded for the recording (NVENC, seconds): that runs beside the person's mattes.
+        with ThreadPoolExecutor(1, thread_name_prefix="fdanyone-log-cameras") as pool:
+            cameras: Future[None] = pool.submit(log_cameras, read_camera_rig(self.output_dir), self.output_dir, self.recording)
+            self.recording.send_blueprint(result_blueprint(self.config.layout.num_views))
+            generation = metadata.generation
+            self.message(
+                f"views done in {generation.total_elapsed_seconds:.1f} s ({generation.attention_backend}, "
+                f"{generation.peak_vram_reserved_bytes / 1e9:.2f} GB reserved)"
+            )
+            if self.person is not None:
+                self.person_summary = train_person(self.output_dir, self.person, self.recording, report=self.message, cancel=self.stop)
+            cameras.result()
         return metadata
