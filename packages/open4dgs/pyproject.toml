@@ -50,6 +50,8 @@ ignore_names = [
     "rgb_sum", "alpha_outside_sum", "alpha_mask_sum", "gamma_sum", "cam_idx_log", "render_log", "camera_losses",
     # recipe seam (patch 0012)
     "_optimizer_step", "_core_regularisers",
+    # tests: run by name in a clean child interpreter (the compiled-graph parity checks)
+    "check_compiled_render_inputs_on_cuda", "check_compiled_core_regularisers_on_cuda",
 ]
 
 [tool.pytest.ini_options]
