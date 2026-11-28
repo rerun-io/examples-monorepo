@@ -138,3 +138,15 @@ def test_save_only_inside_another_recording_keeps_its_own_id_and_file(tmp_path: 
     assert config.rec_stream.get_recording_id() == "PINNED"
     assert [chunk.num_rows for chunk in RrdReader(save).stream().to_chunks() if str(chunk.entity_path) == "/stats/value"] == [1]
 
+
+
+@pytest.mark.parametrize("installed", [True, False])
+def test_spawn_prefers_rerun_canonical_on_path(rr_spy: dict[str, list[Any]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, installed: bool) -> None:
+    if installed:
+        viewer = tmp_path / "rerun-canonical"
+        viewer.write_text("#!/bin/sh\n")
+        viewer.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    RerunTyroConfig()
+
+    assert rr_spy["spawn"][0]["executable_name"] == ("rerun-canonical" if installed else "rerun")
