@@ -26,6 +26,7 @@ from gsplat_rust_renderer.sog3d import log_asog
 from jaxtyping import Float16, Float32, Float64, UInt8
 from numpy import ndarray
 from rerun.chunk import RrdReader
+from simplecv.run_record import RunStart, write_run_record
 from torch import Tensor
 
 from open4dgs.catalog_clip import FRAME_TIMELINE
@@ -38,6 +39,8 @@ SH_C0: float = 0.28209479177387814
 MIN_OPACITY: float = 1.0 / 255.0
 """Rows at or below this opacity are dropped (they round to alpha 0)."""
 SPLAT_ENTITY: str = "/world/person/splats"
+ASOG_LAYER: str = "asog"
+"""The layer name of the ASOG recording on ``open4dgs-runs``."""
 ASOG_CUT_FORMAT: float = 0.05
 """The ``.asog`` v1 temporal cut (no manifest field; what every other player applies)."""
 STOCK_VIEWER_NOTE: str = "a stock Rerun viewer shows one still pose; use --format per-frame for playback in stock viewers"
@@ -180,10 +183,11 @@ def run_recording(
     return recording, view_coordinates, view
 
 
-def write_asog_rrd(run_dir: Path, asog: bytes, out: Path, cut: float, preview_rows: int) -> dict[str, object]:
+def write_asog_rrd(run_dir: Path, asog: bytes, out: Path, cut: float, preview_rows: int, run: RunStart | None = None) -> dict[str, object]:
     """``out``: the run's cameras and meshes (``run_recording``) and the ``asog`` bytes verbatim as the gsplat viewer's
     ``AnimatedSogSplats3D`` payload (``gsplat_rust_renderer.sog3d.log_asog``, ``frame_origin`` = the clip's first frame,
-    temporal cut ``cut``) with a stock preview of the clip-middle pose (at most ``preview_rows`` rows); mode 644.
+    temporal cut ``cut``) with a stock preview of the clip-middle pose (at most ``preview_rows`` rows); mode 644. With
+    ``run``, also the record of that run as the ``asog`` layer's (``simplecv.run_record``).
 
     The ASOG writer of ``open4dgs-export`` (which registers).
     """
@@ -195,6 +199,8 @@ def write_asog_rrd(run_dir: Path, asog: bytes, out: Path, cut: float, preview_ro
     t0: float = time.perf_counter()
     log_asog(SPLAT_ENTITY, parsed, float(frame_start), cut, preview_rows, recording=recording)
     log_s: float = time.perf_counter() - t0
+    if run is not None:
+        write_run_record(recording, run.finish(ASOG_LAYER, run_dir.name))
     recording.flush()
     recording.disconnect()
     out.chmod(0o644)
