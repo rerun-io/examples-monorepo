@@ -592,13 +592,20 @@ class Open4dgsTrainer(TrigsTrainer):
         return {k: v.index_select(0, idx) if isinstance(v, Tensor) and v.ndim >= 1 and int(v.shape[0]) == n else v for k, v in params.items()}
 
     def _const_tensor(self, value: object, device: torch.device | str, dtype: torch.dtype) -> Tensor:
-        """Lever 1: ``torch.tensor(value)`` on ``device``, built once per (value, device, dtype); never modify it in place."""
+        """Lever 1: ``torch.tensor(value)`` on ``device``, built once per (value, device, dtype); never modify it in place.
+
+        On CUDA the first build is an asynchronous copy from pinned memory: a new key (a frame's time, a step's new draw
+        pattern) costs no host sync either."""
         key = (value, str(device), dtype)
         out = self._const_cache.get(key)
         if out is None:
             if len(self._const_cache) >= CONST_CACHE_LIMIT:
                 self._const_cache.clear()
-            out = self._const_cache[key] = torch.tensor(value, device=device, dtype=dtype)
+            if torch.device(device).type == "cuda":
+                out = torch.tensor(value, dtype=dtype).pin_memory().to(device, non_blocking=True)
+            else:
+                out = torch.tensor(value, device=device, dtype=dtype)
+            self._const_cache[key] = out
         return out
 
     def _camera_group(  # pyrefly: ignore[bad-override]  # the recipe's default seam returns None (untyped)
