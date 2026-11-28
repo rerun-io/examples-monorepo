@@ -4194,8 +4194,8 @@ platforms = ["linux-64", "linux-aarch64"]
 
 [feature.fdanyone-rerun.dependencies]
 python = "3.12.*"
-# The app's viewer: gradio-rerun built with our gsplat web viewer (recipes/gradio-rerun-src), so the 4D person plays
-# in the app. gradio restates [feature.common]'s pin, which these envs do not compose.
+# The app's viewer: gradio-rerun built with the canonical web viewer (recipes/gradio-rerun-src), so the 4D person
+# plays in the app. gradio restates [feature.common]'s pin, which these envs do not compose.
 gradio-rerun-src = { path = "recipes/gradio-rerun-src" }
 gradio = "==6.32.0"  # pin-bump: hold
 gvhmr-src = { path = "recipes/gvhmr-src" }
@@ -4901,7 +4901,7 @@ metrictrail-dev = { features = [
     "ffmpeg",
 ], solve-group = "metrictrail", no-default-feature = true }
 fdanyone-rerun = { features = [
-    # Not "common": its PyPI gradio-rerun wheel would install beside gradio-rerun-src (the viewer with our gsplat web build).
+    # Not "common": its PyPI gradio-rerun wheel would install beside gradio-rerun-src (the viewer with the canonical web build).
     "catalog-common",
     "rerun-prerelease",
     "cuda",
@@ -4913,7 +4913,7 @@ fdanyone-rerun = { features = [
     "ffmpeg",
 ], solve-group = "fdanyone-rerun", no-default-feature = true }
 fdanyone-rerun-dev = { features = [
-    # Not "common": its PyPI gradio-rerun wheel would install beside gradio-rerun-src (the viewer with our gsplat web build).
+    # Not "common": its PyPI gradio-rerun wheel would install beside gradio-rerun-src (the viewer with the canonical web build).
     "catalog-common",
     "rerun-prerelease",
     "cuda",

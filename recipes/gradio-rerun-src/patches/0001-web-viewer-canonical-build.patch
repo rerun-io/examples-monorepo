@@ -7,7 +7,7 @@ index 9fb577f..787debf 100644
  		"@gradio/utils": "0.12.2",
  		"@gradio/wasm": "0.18.1",
 -		"@rerun-io/web-viewer": "0.44.0",
-+		"@rerun-io/web-viewer": "file:./gsplat-web-viewer",
++		"@rerun-io/web-viewer": "file:./canonical-web-viewer",
  		"cropperjs": "^2.1.0",
  		"lazy-brush": "^2.0.2",
  		"resize-observer-polyfill": "^1.5.1",
@@ -21,8 +21,8 @@ index 6fcbea0..02534e9 100644
        '@rerun-io/web-viewer':
 -        specifier: 0.44.0
 -        version: 0.44.0
-+        specifier: file:./gsplat-web-viewer
-+        version: file:gsplat-web-viewer
++        specifier: file:./canonical-web-viewer
++        version: file:canonical-web-viewer
        cropperjs:
          specifier: ^2.1.0
          version: 2.1.0
@@ -32,8 +32,8 @@ index 6fcbea0..02534e9 100644
  
 -  '@rerun-io/web-viewer@0.44.0':
 -    resolution: {integrity: sha512-7qWL9qBsSLA1RYvIuY/jybAYRk0+iNeK5WGp2+SgUYFxNJHcBWDvaen+lAfaCS30fIEwypEv5ME9hOM807bOMg==}
-+  '@rerun-io/web-viewer@file:gsplat-web-viewer':
-+    resolution: {directory: gsplat-web-viewer, type: directory}
++  '@rerun-io/web-viewer@file:canonical-web-viewer':
++    resolution: {directory: canonical-web-viewer, type: directory}
  
    '@rollup/rollup-android-arm-eabi@4.53.5':
      resolution: {integrity: sha512-iDGS/h7D8t7tvZ1t6+WPK04KD0MwzLZrG0se1hzBjSi5fyxlsiggoJHwh18PCFNn7tG43OWb6pdZ6Y+rMlmyNQ==}
@@ -42,7 +42,7 @@ index 6fcbea0..02534e9 100644
    '@pkgr/core@0.2.9': {}
  
 -  '@rerun-io/web-viewer@0.44.0':
-+  '@rerun-io/web-viewer@file:gsplat-web-viewer':
++  '@rerun-io/web-viewer@file:canonical-web-viewer':
      dependencies:
        '@bufbuild/protobuf': 2.17.0
  
