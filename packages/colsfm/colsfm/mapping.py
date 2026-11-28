@@ -668,6 +668,23 @@ def rig_camera_models(reconstruction: pycolmap.Reconstruction) -> tuple[frozense
     )
 
 
+def shared_rig_cameras(reconstruction: pycolmap.Reconstruction) -> frozenset[int]:
+    """Camera ids that are a non-reference sensor of more than one rig.
+
+    Args:
+        reconstruction: The model about to be adjusted.
+
+    Returns:
+        The ids; empty for colsfm's own one-rig models.
+    """
+    seen: dict[int, int] = {}
+    for rig in reconstruction.rigs.values():
+        for sensor in rig.sensor_ids():
+            if sensor.type == pycolmap.SensorType.CAMERA and not rig.is_ref_sensor(sensor):
+                seen[sensor.id] = seen.get(sensor.id, 0) + 1
+    return frozenset(camera_id for camera_id, count in seen.items() if count > 1)
+
+
 def _check_extrinsics_are_refinable(model: PosedModel) -> None:
     """Refuse an extrinsic refinement COLMAP would silently turn into a no-op.
 
@@ -829,6 +846,7 @@ def run_mapping(
         (camera.model.name for camera in reconstruction.cameras.values()),
         refine_intrinsics=given_options.refine_focal_length,
         rig_camera_models=rig_camera_models(reconstruction),
+        shared_rig_cameras=shared_rig_cameras(reconstruction),
     )
     if plan.fallback_reason != given_options.ba_plan.fallback_reason:
         plan.announce()

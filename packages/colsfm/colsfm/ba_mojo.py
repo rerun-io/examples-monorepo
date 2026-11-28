@@ -11,8 +11,8 @@ is left out, as CASPAR leaves it out.
 What the contract does not carry raises `ValueError` instead of solving a different problem: a camera model outside
 the four, a refined principal point, focal and distortion refined separately, the config's explicit variable or
 constant points (CASPAR's "external" observations), the THREE_POINTS gauge, a frame whose images mix camera models
-(CASPAR then keeps one unlinked pose per model), and a camera that is the reference sensor in one frame and not in
-another.
+(CASPAR then keeps one unlinked pose per model), a camera that is the reference sensor in one frame and not in
+another, and a camera that is a non-reference sensor of two rigs (the contract holds one `sensor_from_rig` per camera).
 
 Extraction reads the observations from `images.bin` and `points3D.bin` written to a RAM disk, because pycolmap has no
 bulk accessor for points2D and a per-observation Python loop costs about 1 µs each (2.5 s for P1's 2.4 M).
@@ -35,6 +35,8 @@ import pycolmap
 from caspar_mojo.problem import MAX_INTRINSICS, BaOptions, BaProblem, BaResult, CameraModel
 from jaxtyping import Bool, Float64, Int32, Int64
 from numpy import ndarray
+
+from colsfm.solver_report import SolverFailure
 
 CAMERA_MODEL_BY_NAME: Final[dict[str, CameraModel]] = {model.name: model for model in CameraModel}
 """COLMAP's model name to the contract's enum; the four models CASPAR projects."""
@@ -217,10 +219,15 @@ def problem_from_reconstruction(
         is_ref: bool = image.is_ref_in_frame()
         if camera_is_ref.setdefault(image.camera_id, is_ref) != is_ref:
             raise ValueError(f"camera {image.camera_id} is the reference sensor in some frames and not in others")
+        rig_id: int = reconstruction.frame(image.frame_id).rig_id
         if camera_sensor_ids[row] >= 0:
+            if not is_ref and camera_rig_ids[row] != rig_id:
+                raise ValueError(
+                    f"camera {image.camera_id} is a non-reference sensor of rigs {int(camera_rig_ids[row])} and {rig_id}: "
+                    "the Mojo solver holds one sensor_from_rig per camera"
+                )
             continue
         sensor: pycolmap.sensor_t = image.data_id.sensor_id
-        rig_id: int = reconstruction.frame(image.frame_id).rig_id
         camera_sensor_ids[row] = sensor.id
         camera_rig_ids[row] = rig_id
         if is_ref:
@@ -292,22 +299,63 @@ def problem_from_reconstruction(
     return BridgedProblem(problem=problem, ids=ids)
 
 
+def check_result(bridged: BridgedProblem, result: BaResult) -> None:
+    """Refuse a result that must not reach the reconstruction: wrong row counts, a non-finite free row or cost, an
+    increased cost, a degenerate quaternion, or an exit COLMAP's adapter does not map.
+
+    Args:
+        bridged: The problem the result solves.
+        result: The solver's refined state.
+
+    Raises:
+        SolverFailure: Naming the first cause found, as the mapper's solve boundary expects of an unusable solve.
+    """
+    problem = bridged.problem
+    if result.exit_reason not in TERMINATION_BY_EXIT:
+        raise SolverFailure(f"the Mojo solve ended with an unknown exit {result.exit_reason!r}")
+    if not (np.isfinite(result.final_cost) and result.final_cost <= result.initial_cost):
+        raise SolverFailure(f"the Mojo solve's cost went from {result.initial_cost} to {result.final_cost}")
+    blocks: tuple[tuple[str, ndarray, ndarray, ndarray], ...] = (
+        ("points", result.points, problem.points, problem.point_free),
+        ("rig_from_world", result.rig_from_world, problem.rig_from_world, problem.pose_free),
+        ("sensor_from_rig", result.sensor_from_rig, problem.sensor_from_rig, problem.sensor_free),
+        ("intrinsics", result.intrinsics, problem.intrinsics, problem.intrinsics_free),
+    )
+    for name, solved, given, free in blocks:
+        if solved.shape != given.shape:
+            raise SolverFailure(f"the Mojo solve returned {name} of shape {solved.shape}, the problem has {given.shape}")
+        bad: ndarray = np.flatnonzero(free & ~np.isfinite(solved).all(axis=1))
+        if len(bad):
+            raise SolverFailure(f"the Mojo solve returned non-finite {name} in {len(bad)} free rows (first row {int(bad[0])})")
+    for name, solved, free in (("rig_from_world", result.rig_from_world, problem.pose_free), ("sensor_from_rig", result.sensor_from_rig, problem.sensor_free)):
+        if np.any(np.linalg.norm(solved[free, :4], axis=1) < 1e-12):
+            raise SolverFailure(f"the Mojo solve returned a zero quaternion in {name}")
+
+
 def apply_result(reconstruction: pycolmap.Reconstruction, bridged: BridgedProblem, result: BaResult) -> None:
     """Write a solve back the way CASPAR's adapter does: only free nodes change, quaternions normalised.
+
+    The result is checked (`check_result`) and every typed value built before the first write, so a refused result
+    leaves the reconstruction as it was.
 
     Args:
         reconstruction: The model the problem was read from, changed in place.
         bridged: The problem and its ids.
         result: The solver's refined state.
+
+    Raises:
+        SolverFailure: From `check_result`, with nothing written.
     """
+    check_result(bridged, result)
     problem, ids = bridged.problem, bridged.ids
-    for row in np.flatnonzero(problem.point_free):
-        reconstruction.point3D(int(ids.point3D_ids[row])).xyz = result.points[row]
-    for row in np.flatnonzero(problem.pose_free):
-        reconstruction.frame(int(ids.frame_ids[row])).rig_from_world = _normalised(result.rig_from_world[row])
-    for row in np.flatnonzero(problem.sensor_free):
-        sensor = pycolmap.sensor_t(pycolmap.SensorType.CAMERA, int(ids.camera_sensor_ids[row]))
-        reconstruction.rig(int(ids.camera_rig_ids[row])).set_sensor_from_rig(sensor, _normalised(result.sensor_from_rig[row]))
+    poses: list[tuple[int, pycolmap.Rigid3d]] = [
+        (int(ids.frame_ids[row]), _normalised(result.rig_from_world[row])) for row in np.flatnonzero(problem.pose_free)
+    ]
+    extrinsics: list[tuple[int, pycolmap.sensor_t, pycolmap.Rigid3d]] = [
+        (int(ids.camera_rig_ids[row]), pycolmap.sensor_t(pycolmap.SensorType.CAMERA, int(ids.camera_sensor_ids[row])), _normalised(result.sensor_from_rig[row]))
+        for row in np.flatnonzero(problem.sensor_free)
+    ]
+    calibrations: list[tuple[pycolmap.Camera, list[float]]] = []
     for row in np.flatnonzero(problem.intrinsics_free):
         camera: pycolmap.Camera = reconstruction.camera(int(ids.camera_ids[row]))
         params: Float64[ndarray, " k"] = np.asarray(camera.params).copy()
@@ -315,7 +363,15 @@ def apply_result(reconstruction: pycolmap.Reconstruction, bridged: BridgedProble
         # The principal point is never refined, so write-back keeps it as stored.
         keep: list[int] = list(camera.principal_point_idxs())
         refined[keep] = params[keep]
-        camera.params = refined.tolist()
+        calibrations.append((camera, refined.tolist()))
+    for row in np.flatnonzero(problem.point_free):
+        reconstruction.point3D(int(ids.point3D_ids[row])).xyz = result.points[row]
+    for frame_id, pose in poses:
+        reconstruction.frame(frame_id).rig_from_world = pose
+    for rig_id, sensor, pose in extrinsics:
+        reconstruction.rig(rig_id).set_sensor_from_rig(sensor, pose)
+    for camera, values in calibrations:
+        camera.params = values
 
 
 TERMINATION_BY_EXIT: Final[dict[str, pycolmap.BundleAdjustmentTerminationType]] = {
