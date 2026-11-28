@@ -270,9 +270,14 @@ class SelfAttention(nn.Module):
     def forward(self, x: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
         if fused.active(x):
             return self._forward_fused(x, freqs)
-        q = self.norm_q.forward_inplace(self.q(x))
-        k = self.norm_k.forward_inplace(self.k(x))
-        v = self.v(x)
+        if all(type(layer).__name__ == "Nvfp4Linear" for layer in (self.q, self.k, self.v)):
+            q, k, v = self._project_qkv(x)
+            q = self.norm_q.forward_inplace(q)
+            k = self.norm_k.forward_inplace(k)
+        else:
+            q = self.norm_q.forward_inplace(self.q(x))
+            k = self.norm_k.forward_inplace(self.k(x))
+            v = self.v(x)
         q = rope_apply(q, freqs, self.num_heads)
         k = rope_apply(k, freqs, self.num_heads)
         return self.o(attention(q, k, v, self.num_heads, self.attention_backend))
@@ -282,6 +287,10 @@ class SelfAttention(nn.Module):
         projections = (self.q, self.k, self.v)
         if all(isinstance(p, Fp8RowwiseLinear) for p in projections):
             return project_fp8_shared(projections, x)
+        if all(type(p).__name__ == "Nvfp4Linear" for p in projections):
+            from fdanyone.model.nvfp4 import project_shared
+
+            return project_shared(projections, x)  # one NVFP4 activation quantization for the three
         return [projection(x) for projection in projections]
 
     def _forward_fused(self, x: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:

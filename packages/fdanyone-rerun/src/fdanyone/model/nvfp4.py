@@ -143,11 +143,11 @@ def _quantize_kernel(x_ptr, q_ptr, s_ptr, amax_ptr, x_stride, half_cols, tile_co
     if GELU:
         inner = 0.7978845608028654 * (x + 0.044715 * (x * x * x))
         x = _bf16(0.5 * x * (1.0 + libdevice.tanh(inner)))
-    encode = 2688.0 / tl.maximum(tl.load(amax_ptr), 1e-30)
+    encode = tl.math.div_rn(2688.0, tl.maximum(tl.load(amax_ptr), 1e-30))  # IEEE division, as eager
     blocks = tl.reshape(x, (SPAN // 16, 16))
-    scale = tl.minimum(tl.max(tl.abs(blocks), axis=1) / 6.0 * encode, 448.0).to(tl.float8e4nv)
+    scale = tl.minimum(tl.math.div_rn(tl.max(tl.abs(blocks), axis=1), 6.0) * encode, 448.0).to(tl.float8e4nv)
     scale_f = scale.to(tl.float32)
-    v = blocks * tl.where(scale_f == 0.0, 0.0, encode / scale_f)[:, None]
+    v = blocks * tl.where(scale_f == 0.0, 0.0, tl.math.div_rn(encode, scale_f))[:, None]
     a = tl.abs(v)
     code = tl.where(a > 0.25, 1, 0)
     code = tl.where(a >= 0.75, 2, code)
@@ -234,3 +234,13 @@ class Nvfp4Linear(torch.nn.Module):
         with torch.autocast(device_type=x.device.type, enabled=False):
             out = nvfp4_gemm(quantize_activation(rows.to(torch.bfloat16), gelu=gelu), self.weight_operand, self.bias)
         return out.view(*x.shape[:-1], self.out_features)
+
+
+def project_shared(linears: tuple[Nvfp4Linear, ...], x: torch.Tensor) -> list[torch.Tensor]:
+    """Apply NVFP4 linears that read the same input (q, k, v), quantizing it once."""
+
+    rows = x.reshape(-1, linears[0].in_features)
+    with torch.autocast(device_type=x.device.type, enabled=False):
+        quantized = quantize_activation(rows.to(torch.bfloat16))
+        outs = [nvfp4_gemm(quantized, linear.weight_operand, linear.bias) for linear in linears]
+    return [out.view(*x.shape[:-1], linear.out_features) for out, linear in zip(outs, linears, strict=True)]
