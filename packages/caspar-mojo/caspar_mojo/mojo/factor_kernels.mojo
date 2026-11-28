@@ -1,13 +1,15 @@
 """Per-observation kernels of the reprojection factor, generic over the camera model and the refined groups.
 
-One thread per observation. The factor joins up to four nodes: the frame's `rig_from_world` (pose), the
+The factor joins up to four nodes: the frame's `rig_from_world` (pose), the
 camera's `sensor_from_rig` (rig), the camera's focal-and-extra (calib) and the point. A node with tangent
 offset -1 is fixed: its blocks are skipped at run time. `REFINE_RIG` / `REFINE_INTRINSICS` remove the rig and
 calib Jacobians at compile time. The matrix-free products recompute the Jacobians from the linearisation state
 instead of reading a cache: a cache streams 18-50 floats per observation per pass, the state is a few hundred KB
 that stays in L2, and the arithmetic is far cheaper than the memory traffic on every GPU.
 
-Scatter-adds into the gradient, the block diagonal and the products use relaxed device-scope float atomics.
+Sums into camera-side nodes walk the observations in camera-then-frame order, in tiles of BLOCK per block, and reach
+memory through `Running` and relaxed device-scope float atomics. Sums into points run POINT_LANES lanes per point
+over a point-sorted copy of the observations and need no atomics.
 """
 
 from std.atomic import Atomic, Ordering
