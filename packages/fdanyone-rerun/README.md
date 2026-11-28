@@ -119,9 +119,14 @@ RTX 5090, prod env (no beartype), busy host (load ~10 unless noted), whole CLI r
 | build | wall | own CPU | denoise | peak reserved |
 | --- | ---: | ---: | ---: | ---: |
 | default (FP8 W8A8 row-wise) | 199 s | 1,342 CPU-s | 86 s | 24.5 GB |
+| default + fused DiT glue (`dit_fused_glue`, 2026-11-27, load 4-11; `FDANYONE_DIT_FUSED=0` turns it off) | 195 s | - | 47 s | - |
 | `FDANYONE_DIT_FP8=0` (BF16) | 230 s | 1,389 CPU-s | 112 s | 29.2 GB |
 | `FDANYONE_TURBO_KEPT_STEPS=0,2,3` (3 steps, BF16) | 184 s | 1,324 CPU-s | 72 s | 29.2 GB |
 | default, 24-view orbit (RCP + 4 TCR groups, 8-view groups), busy host (load 16-38) | 767 s | 4,444 CPU-s | 85 s RCP + 389 s | 25.8 GB |
+
+The fused glue (`fdanyone/model/fused.py`, Triton) replaces the eager FP32 RMSNorm + RoPE, LayerNorm + modulation,
+gated residuals and FP8 activation quantisation of every block with one pass each; one six-view forward drops from
+19.7 to 11.6 s at equal load. What is left is GEMM and attention at the hardware peak.
 
 The 3-step Turbo schedule is opt-in: it is visibly softer (mean per-view SSIM 0.862 against the full-VAE reference,
 versus 0.897 for the default).
