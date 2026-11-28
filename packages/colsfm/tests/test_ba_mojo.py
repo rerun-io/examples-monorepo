@@ -15,6 +15,11 @@ def _tiny(model: str = "PINHOLE", num_cameras: int = 1) -> pycolmap.Reconstructi
     return synthetic_reconstruction(6, 400, model, num_cameras)  # type: ignore[arg-type]
 
 
+def _matrix(pose: pycolmap.Rigid3d | None) -> Float64[ndarray, "3 4"]:
+    assert pose is not None
+    return np.asarray(pose.matrix())
+
+
 def _config(reconstruction: pycolmap.Reconstruction) -> pycolmap.BundleAdjustmentConfig:
     config = pycolmap.BundleAdjustmentConfig()
     for image_id in sorted(reconstruction.reg_image_ids()):
@@ -136,11 +141,11 @@ def test_round_trip_leaves_the_model_unchanged() -> None:
     for point3D_id in before.point3D_ids():
         np.testing.assert_allclose(reconstruction.point3D(point3D_id).xyz, before.point3D(point3D_id).xyz, rtol=0, atol=0)
     for frame_id in before.frames:
-        np.testing.assert_allclose(reconstruction.frame(frame_id).rig_from_world.matrix(), before.frame(frame_id).rig_from_world.matrix(), atol=1e-12)
+        np.testing.assert_allclose(_matrix(reconstruction.frame(frame_id).rig_from_world), _matrix(before.frame(frame_id).rig_from_world), atol=1e-12)
     for camera_id in before.cameras:
         np.testing.assert_allclose(reconstruction.camera(camera_id).params, before.camera(camera_id).params, rtol=0, atol=0)
     sensor = pycolmap.sensor_t(pycolmap.SensorType.CAMERA, 2)
-    np.testing.assert_allclose(reconstruction.rig(1).sensor_from_rig(sensor).matrix(), before.rig(1).sensor_from_rig(sensor).matrix(), atol=1e-12)
+    np.testing.assert_allclose(_matrix(reconstruction.rig(1).sensor_from_rig(sensor)), _matrix(before.rig(1).sensor_from_rig(sensor)), atol=1e-12)
 
 
 def test_apply_result_writes_free_nodes_only_and_keeps_principal_point() -> None:
@@ -151,7 +156,7 @@ def test_apply_result_writes_free_nodes_only_and_keeps_principal_point() -> None
     reconstruction = _tiny("SIMPLE_RADIAL")
     bridged = problem_from_reconstruction(reconstruction, _config(reconstruction), _options(refine_intrinsics=True))
     p = bridged.problem
-    gauge_pose = reconstruction.frame(int(bridged.ids.frame_ids[0])).rig_from_world.matrix()
+    gauge_pose = _matrix(reconstruction.frame(int(bridged.ids.frame_ids[0])).rig_from_world)
     rig_from_world = p.rig_from_world + 0.01
     result = BaResult(
         intrinsics=p.intrinsics + 1.0,
@@ -167,8 +172,9 @@ def test_apply_result_writes_free_nodes_only_and_keeps_principal_point() -> None
         total_seconds=0.0,
     )
     apply_result(reconstruction, bridged, result)
-    np.testing.assert_array_equal(reconstruction.frame(int(bridged.ids.frame_ids[0])).rig_from_world.matrix(), gauge_pose)
+    np.testing.assert_array_equal(_matrix(reconstruction.frame(int(bridged.ids.frame_ids[0])).rig_from_world), gauge_pose)
     written = reconstruction.frame(int(bridged.ids.frame_ids[1])).rig_from_world
+    assert written is not None
     np.testing.assert_allclose(written.rotation.quat, rig_from_world[1, :4] / np.linalg.norm(rig_from_world[1, :4]))
     f, cx, cy, k = p.intrinsics[0, :4]
     np.testing.assert_allclose(reconstruction.camera(1).params, [f + 1.0, cx, cy, k + 1.0])
@@ -208,8 +214,9 @@ def test_compare_solutions_of_identical_and_moved_models() -> None:
 
     b = pycolmap.Reconstruction(a)
     frame = b.frame(3)
-    turn = pycolmap.Rotation3d(np.deg2rad([0.0, 1.0, 0.0])) * frame.rig_from_world.rotation
-    frame.rig_from_world = pycolmap.Rigid3d(turn, np.asarray(frame.rig_from_world.translation))
+    pose = frame.rig_from_world
+    assert pose is not None
+    frame.rig_from_world = pycolmap.Rigid3d(pycolmap.Rotation3d(np.deg2rad([0.0, 1.0, 0.0])) * pose.rotation, np.asarray(pose.translation))
     moved = compare_solutions(a, b, _config(a), _options())
     assert np.isclose(moved.rotation_difference_max_deg, 1.0, atol=1e-6) and moved.rotation_difference_median_deg < 1e-6
     assert moved.cost_b > moved.cost_a and moved.reprojection_relative_difference > 0

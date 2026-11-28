@@ -133,7 +133,9 @@ def _read_points3D(path: Path) -> tuple[Int64[ndarray, " p"], Float64[ndarray, "
     return ids, xyz, track_lengths
 
 
-def _pose_row(pose: pycolmap.Rigid3d) -> Float64[ndarray, " 7"]:
+def _pose_row(pose: pycolmap.Rigid3d | None) -> Float64[ndarray, " 7"]:
+    if pose is None:
+        raise ValueError("a frame of the problem has no rig_from_world (not registered)")
     return np.concatenate([np.asarray(pose.rotation.quat), np.asarray(pose.translation)])
 
 
@@ -320,7 +322,7 @@ def apply_result(reconstruction: pycolmap.Reconstruction, bridged: BridgedProble
         refined: Float64[ndarray, " k"] = result.intrinsics[row, : len(params)].copy()
         keep = list(PRINCIPAL_POINT_COLUMNS[CameraModel(int(problem.camera_model[row]))])
         refined[keep] = params[keep]
-        camera.params = refined
+        camera.params = refined.tolist()
 
 
 TERMINATION_BY_EXIT: Final[dict[str, pycolmap.BundleAdjustmentTerminationType]] = {
