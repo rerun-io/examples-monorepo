@@ -3,8 +3,9 @@
 One thread per observation. The factor joins up to four nodes: the frame's `rig_from_world` (pose), the
 camera's `sensor_from_rig` (rig), the camera's focal-and-extra (calib) and the point. A node with tangent
 offset -1 is fixed: its blocks are skipped at run time. `REFINE_RIG` / `REFINE_INTRINSICS` remove the rig and
-calib Jacobians at compile time. Jacobians are cached per observation, column-major over observations
-(`jac[column, observation]`), so the matrix-free products need no camera model.
+calib Jacobians at compile time. The matrix-free products recompute the Jacobians from the linearisation state
+instead of reading a cache: a cache streams 18-50 floats per observation per pass, the state is a few hundred KB
+that stays in L2, and the arithmetic is far cheaper than the memory traffic on every GPU.
 
 Scatter-adds into the gradient, the block diagonal and the products use relaxed device-scope float atomics.
 """
@@ -28,22 +29,6 @@ comptime F64Ptr = MutPointer[Float64, MutUntrackedOrigin]
 comptime F32In = ImmTileTensor[DType.float32, L2, ImmUntrackedOrigin]
 comptime I32In = ImmTileTensor[DType.int32, L1, ImmUntrackedOrigin]
 comptime VecIn = ImmTileTensor[DType.float32, L1, ImmUntrackedOrigin]
-comptime Jac = MutTileTensor[DType.float32, L2, MutUntrackedOrigin]
-comptime JacIn = ImmTileTensor[DType.float32, L2, ImmUntrackedOrigin]
-
-# Jacobian cache columns: pose 2x6, point 2x3, then rig 2x6 and calib 2xK when refined.
-comptime J_POSE = 0
-comptime J_POINT = 12
-comptime J_RIG = 18
-
-
-def jac_width[K: Int, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool]() -> Int:
-    return 18 + (12 if REFINE_RIG else 0) + (2 * K if REFINE_INTRINSICS else 0)
-
-
-def calib_column[REFINE_RIG: Bool]() -> Int:
-    return 30 if REFINE_RIG else 18
-
 
 def tri(d: Int) -> Int:
     """Packed upper-triangle size of a d x d block."""
@@ -156,23 +141,22 @@ def load_params(t: F32In, i: Int) -> Params:
 
 
 @fieldwise_init
-struct Observed[K: Int](Movable):
-    """One observation projected at the current state, with what its Jacobians need."""
+struct Linearized[K: Int](Movable):
+    """One observation at a state: its projection and the 2xD Jacobian of each node block, row-major."""
 
-    var e0: Float32
-    var e1: Float32
-    var world: Vec3
-    var rig_point: Vec3
-    var r_rig: Mat3
-    var r_sensor: Mat3
-    var proj: Projection[Self.K]
+    var u: Float32
+    var v: Float32
+    var pose: Array[Float32, 12]
+    var point: Array[Float32, 6]
+    var rig: Array[Float32, 12]
+    var calib: Array[Float32, 2 * Self.K]
 
 
 @always_inline
-def observe[Model: CameraModel](
-    n: Int, poses: F32In, rigs: F32In, intrinsics: F32In, points: F32In, frame: Int, camera: Int, point: Int, pixels: F32In
-) -> Observed[Model.NUM_CALIB]:
-    comptime assert points.flat_rank == 2 and pixels.flat_rank == 2
+def project_observation[Model: CameraModel](
+    poses: F32In, rigs: F32In, intrinsics: F32In, points: F32In, frame: Int, camera: Int, point: Int
+) -> Linearized[Model.NUM_CALIB]:
+    comptime assert points.flat_rank == 2
     var pose = load_pose(poses, frame)
     var rig = load_pose(rigs, camera)
     var world = Vec3(points[point, 0][0], points[point, 1][0], points[point, 2][0])
@@ -181,21 +165,47 @@ def observe[Model: CameraModel](
     var rig_point = apply(r_rig, translation(pose), world)
     var cam = apply(r_sensor, translation(rig), rig_point)
     var proj = Model.project(cam.x, cam.y, cam.z, load_params(intrinsics, camera))
-    var e0 = proj.u - pixels[n, 0][0]
-    var e1 = proj.v - pixels[n, 1][0]
-    return Observed[Model.NUM_CALIB](e0, e1, world, rig_point, r_rig, r_sensor, proj^)
+    var j_pose = Array[Float32, 12](fill=0.0)
+    var j_point = Array[Float32, 6](fill=0.0)
+    var j_rig = Array[Float32, 12](fill=0.0)
+    comptime for r in range(2):
+        var dp = Vec3(proj.d_point[3 * r], proj.d_point[3 * r + 1], proj.d_point[3 * r + 2])
+        # a = d pixel / d camera point * R_sensor (w.r.t. the rig-frame point), b = a * R_rig (w.r.t. the world point).
+        var a = Vec3(
+            dp.x * r_sensor[0, 0] + dp.y * r_sensor[1, 0] + dp.z * r_sensor[2, 0],
+            dp.x * r_sensor[0, 1] + dp.y * r_sensor[1, 1] + dp.z * r_sensor[2, 1],
+            dp.x * r_sensor[0, 2] + dp.y * r_sensor[1, 2] + dp.z * r_sensor[2, 2],
+        )
+        var b = Vec3(
+            a.x * r_rig[0, 0] + a.y * r_rig[1, 0] + a.z * r_rig[2, 0],
+            a.x * r_rig[0, 1] + a.y * r_rig[1, 1] + a.z * r_rig[2, 1],
+            a.x * r_rig[0, 2] + a.y * r_rig[1, 2] + a.z * r_rig[2, 2],
+        )
+        # Right perturbation R exp(w): d/dw = -J R [X]x, whose row is X x (J R); likewise P_rig x a for the rig.
+        var rot = cross(world, b)
+        j_pose[6 * r + 0] = rot.x
+        j_pose[6 * r + 1] = rot.y
+        j_pose[6 * r + 2] = rot.z
+        j_pose[6 * r + 3] = a.x
+        j_pose[6 * r + 4] = a.y
+        j_pose[6 * r + 5] = a.z
+        j_point[3 * r + 0] = b.x
+        j_point[3 * r + 1] = b.y
+        j_point[3 * r + 2] = b.z
+        var rig_rot = cross(rig_point, a)
+        j_rig[6 * r + 0] = rig_rot.x
+        j_rig[6 * r + 1] = rig_rot.y
+        j_rig[6 * r + 2] = rig_rot.z
+        j_rig[6 * r + 3] = dp.x
+        j_rig[6 * r + 4] = dp.y
+        j_rig[6 * r + 5] = dp.z
+    return Linearized[Model.NUM_CALIB](proj.u, proj.v, j_pose^, j_point^, j_rig^, proj.d_calib.copy())
 
 
 @always_inline
-def accumulate_block[D: Int](
-    j: Array[Float32, 2 * D], jac: Jac, n: Int, valid: Bool, col: Int, e0: Float32, e1: Float32, v: Int, h: Int, g: F32Ptr, hblk: F32Ptr
-):
-    """Cache J in jac[col:col+2D, n]; for a free node (v >= 0), g[v:v+D] -= J^T e and J^T J into hblk[h:].
+def accumulate_block[D: Int](j: Array[Float32, 2 * D], valid: Bool, e0: Float32, e1: Float32, v: Int, h: Int, g: F32Ptr, hblk: F32Ptr):
+    """For a free node (v >= 0), g[v:v+D] -= J^T e and J^T J into hblk[h:].
     Every lane must call it; `valid` is False past the last observation."""
-    comptime assert jac.flat_rank == 2
-    if valid:
-        comptime for i in range(2 * D):
-            jac[col + i, n] = j[i]
     var key = v if valid else -1
     var grad = Array[Float32, D](fill=0.0)
     var hess = Array[Float32, tri(D)](fill=0.0)
@@ -232,7 +242,6 @@ def linearize_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bo
     obs_camera: I32In,
     obs_point: I32In,
     pixels: F32In,
-    jac: Jac,
     g: F32Ptr,
     hblk: F32Ptr,
     scalars: F64Ptr,
@@ -240,10 +249,10 @@ def linearize_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bo
     n6: Int32,
     n_calib: Int32,
 ):
-    """Residual, Jacobians (cached), -J^T e and the block diagonal of J^T J, and the cost 1/2 sum |e|^2."""
+    """Residual, -J^T e and the block diagonal of J^T J, and the cost 1/2 sum |e|^2."""
     comptime assert obs_frame.flat_rank == 1 and obs_camera.flat_rank == 1 and obs_point.flat_rank == 1
     comptime assert pose_off.flat_rank == 1 and rig_off.flat_rank == 1 and calib_off.flat_rank == 1
-    comptime assert point_off.flat_rank == 1 and jac.flat_rank == 2
+    comptime assert point_off.flat_rank == 1 and pixels.flat_rank == 2
     comptime K = Model.NUM_CALIB
     # Lanes past the end recompute the last observation and add nothing, so every lane reaches the warp sums.
     var n_obs = Int(obs_frame.dim[0]())
@@ -252,54 +261,22 @@ def linearize_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bo
     var frame = Int(obs_frame[n][0])
     var camera = Int(obs_camera[n][0])
     var point = Int(obs_point[n][0])
-    var o = observe[Model](n, poses, rigs, intrinsics, points, frame, camera, point, pixels)
-    var cost: Float32 = 0.5 * (o.e0 * o.e0 + o.e1 * o.e1) if valid else 0.0
-    var j_pose = Array[Float32, 12](fill=0.0)
-    var j_point = Array[Float32, 6](fill=0.0)
-    var j_rig = Array[Float32, 12](fill=0.0)
-    comptime for r in range(2):
-        var dp = Vec3(o.proj.d_point[3 * r], o.proj.d_point[3 * r + 1], o.proj.d_point[3 * r + 2])
-        # a = d pixel / d camera point * R_sensor (w.r.t. the rig-frame point), b = a * R_rig (w.r.t. the world point).
-        var a = Vec3(
-            dp.x * o.r_sensor[0, 0] + dp.y * o.r_sensor[1, 0] + dp.z * o.r_sensor[2, 0],
-            dp.x * o.r_sensor[0, 1] + dp.y * o.r_sensor[1, 1] + dp.z * o.r_sensor[2, 1],
-            dp.x * o.r_sensor[0, 2] + dp.y * o.r_sensor[1, 2] + dp.z * o.r_sensor[2, 2],
-        )
-        var b = Vec3(
-            a.x * o.r_rig[0, 0] + a.y * o.r_rig[1, 0] + a.z * o.r_rig[2, 0],
-            a.x * o.r_rig[0, 1] + a.y * o.r_rig[1, 1] + a.z * o.r_rig[2, 1],
-            a.x * o.r_rig[0, 2] + a.y * o.r_rig[1, 2] + a.z * o.r_rig[2, 2],
-        )
-        # Right perturbation R exp(w): d/dw = -J R [X]x, whose row is X x (J R); likewise P_rig x a for the rig.
-        var rot = cross(o.world, b)
-        j_pose[6 * r + 0] = rot.x
-        j_pose[6 * r + 1] = rot.y
-        j_pose[6 * r + 2] = rot.z
-        j_pose[6 * r + 3] = a.x
-        j_pose[6 * r + 4] = a.y
-        j_pose[6 * r + 5] = a.z
-        j_point[3 * r + 0] = b.x
-        j_point[3 * r + 1] = b.y
-        j_point[3 * r + 2] = b.z
-        var rig_rot = cross(o.rig_point, a)
-        j_rig[6 * r + 0] = rig_rot.x
-        j_rig[6 * r + 1] = rig_rot.y
-        j_rig[6 * r + 2] = rig_rot.z
-        j_rig[6 * r + 3] = dp.x
-        j_rig[6 * r + 4] = dp.y
-        j_rig[6 * r + 5] = dp.z
+    var o = project_observation[Model](poses, rigs, intrinsics, points, frame, camera, point)
+    var e0 = o.u - pixels[n, 0][0]
+    var e1 = o.v - pixels[n, 1][0]
+    var cost: Float32 = 0.5 * (e0 * e0 + e1 * e1) if valid else 0.0
     var nn6 = Int(n6)
     var nc = Int(n_calib)
     var po = Int(pose_off[frame][0])
-    accumulate_block[6](j_pose, jac, n, valid, J_POSE, o.e0, o.e1, po, h_offset[K](po, nn6, nc), g, hblk)
+    accumulate_block[6](o.pose, valid, e0, e1, po, h_offset[K](po, nn6, nc), g, hblk)
     var pto = Int(point_off[point][0])
-    accumulate_block[3](j_point, jac, n, valid, J_POINT, o.e0, o.e1, pto, h_offset[K](pto, nn6, nc), g, hblk)
+    accumulate_block[3](o.point, valid, e0, e1, pto, h_offset[K](pto, nn6, nc), g, hblk)
     comptime if REFINE_RIG:
         var ro = Int(rig_off[camera][0])
-        accumulate_block[6](j_rig, jac, n, valid, J_RIG, o.e0, o.e1, ro, h_offset[K](ro, nn6, nc), g, hblk)
+        accumulate_block[6](o.rig, valid, e0, e1, ro, h_offset[K](ro, nn6, nc), g, hblk)
     comptime if REFINE_INTRINSICS:
         var co = Int(calib_off[camera][0])
-        accumulate_block[K](o.proj.d_calib, jac, n, valid, calib_column[REFINE_RIG](), o.e0, o.e1, co, h_offset[K](co, nn6, nc), g, hblk)
+        accumulate_block[K](o.calib, valid, e0, e1, co, h_offset[K](co, nn6, nc), g, hblk)
     reduce_add(scalars, Int(cost_slot), cost)
 
 
@@ -317,41 +294,50 @@ def score_kernel[Model: CameraModel](
 ):
     """The cost 1/2 sum |e|^2 at a (trial) state."""
     comptime assert obs_frame.flat_rank == 1 and obs_camera.flat_rank == 1 and obs_point.flat_rank == 1
+    comptime assert points.flat_rank == 2 and pixels.flat_rank == 2
     var n = global_idx.x
     var cost: Float32 = 0.0
     if n < Int(obs_frame.dim[0]()):
-        var o = observe[Model](
-            n, poses, rigs, intrinsics, points, Int(obs_frame[n][0]), Int(obs_camera[n][0]), Int(obs_point[n][0]), pixels
-        )
-        cost = 0.5 * (o.e0 * o.e0 + o.e1 * o.e1)
+        var camera = Int(obs_camera[n][0])
+        var pose = load_pose(poses, Int(obs_frame[n][0]))
+        var rig = load_pose(rigs, camera)
+        var point = Int(obs_point[n][0])
+        var world = Vec3(points[point, 0][0], points[point, 1][0], points[point, 2][0])
+        var cam = apply(rotation(rig), translation(rig), apply(rotation(pose), translation(pose), world))
+        var proj = Model.project(cam.x, cam.y, cam.z, load_params(intrinsics, camera))
+        var e0 = proj.u - pixels[n, 0][0]
+        var e1 = proj.v - pixels[n, 1][0]
+        cost = 0.5 * (e0 * e0 + e1 * e1)
     reduce_add(scalars, Int(cost_slot), cost)
 
 
 @always_inline
-def block_times[D: Int](jac: JacIn, n: Int, col: Int, x: VecIn, v: Int) -> Tuple[Float32, Float32]:
+def block_times[D: Int](j: Array[Float32, 2 * D], x: VecIn, v: Int) -> Tuple[Float32, Float32]:
     """J x[v:v+D] for one 2xD block."""
-    comptime assert jac.flat_rank == 2 and x.flat_rank == 1
+    comptime assert x.flat_rank == 1
     var u0: Float32 = 0.0
     var u1: Float32 = 0.0
     comptime for i in range(D):
         var xi = x[v + i][0]
-        u0 += jac[col + i, n][0] * xi
-        u1 += jac[col + D + i, n][0] * xi
+        u0 += j[i] * xi
+        u1 += j[D + i] * xi
     return (u0, u1)
 
 
 @always_inline
-def add_block_transpose[D: Int](jac: JacIn, n: Int, col: Int, u0: Float32, u1: Float32, dst: F32Ptr, key: Int):
+def add_block_transpose[D: Int](j: Array[Float32, 2 * D], u0: Float32, u1: Float32, dst: F32Ptr, key: Int):
     """dst[key:key+D] += J^T u for one 2xD block; key -1 adds nothing. Every lane must call it."""
-    comptime assert jac.flat_rank == 2
     var values = Array[Float32, D](fill=0.0)
     comptime for i in range(D):
-        values[i] = jac[col + i, n][0] * u0 + jac[col + D + i, n][0] * u1
+        values[i] = j[i] * u0 + j[D + i] * u1
     scatter_values[D](dst, key, values)
 
 
-def cross_cameras_kernel[K: Int, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
-    jac: JacIn,
+def cross_cameras_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
+    poses: F32In,
+    rigs: F32In,
+    intrinsics: F32In,
+    points: F32In,
     pose_off: I32In,
     rig_off: I32In,
     calib_off: I32In,
@@ -362,15 +348,20 @@ def cross_cameras_kernel[K: Int, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
     x: VecIn,
     dst: F32Ptr,
 ):
-    """First Schur pass, x zero on the points: dst_cam += cross camera-camera terms, dst_point += H_pc x_cam."""
+    """First Schur pass at the linearisation state, x zero on the points: dst_cam += cross camera-camera terms,
+    dst_point += H_pc x_cam."""
     comptime assert obs_frame.flat_rank == 1 and obs_camera.flat_rank == 1 and obs_point.flat_rank == 1
     comptime assert pose_off.flat_rank == 1 and rig_off.flat_rank == 1 and calib_off.flat_rank == 1
     comptime assert point_off.flat_rank == 1
+    comptime K = Model.NUM_CALIB
     var n_obs = Int(obs_frame.dim[0]())
     var valid = global_idx.x < n_obs
     var n = min(global_idx.x, n_obs - 1)
+    var frame = Int(obs_frame[n][0])
     var camera = Int(obs_camera[n][0])
-    var po = Int(pose_off[Int(obs_frame[n][0])][0]) if valid else -1
+    var point = Int(obs_point[n][0])
+    var o = project_observation[Model](poses, rigs, intrinsics, points, frame, camera, point)
+    var po = Int(pose_off[frame][0]) if valid else -1
     var ro = -1
     var co = -1
     comptime if REFINE_RIG:
@@ -381,25 +372,28 @@ def cross_cameras_kernel[K: Int, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
     var ur = (Float32(0.0), Float32(0.0))
     var uc = (Float32(0.0), Float32(0.0))
     if po >= 0:
-        up = block_times[6](jac, n, J_POSE, x, po)
+        up = block_times[6](o.pose, x, po)
     if ro >= 0:
-        ur = block_times[6](jac, n, J_RIG, x, ro)
+        ur = block_times[6](o.rig, x, ro)
     if co >= 0:
-        uc = block_times[K](jac, n, calib_column[REFINE_RIG](), x, co)
+        uc = block_times[K](o.calib, x, co)
     var u0 = up[0] + ur[0] + uc[0]
     var u1 = up[1] + ur[1] + uc[1]
     comptime if REFINE_RIG or REFINE_INTRINSICS:
-        add_block_transpose[6](jac, n, J_POSE, u0 - up[0], u1 - up[1], dst, po)
+        add_block_transpose[6](o.pose, u0 - up[0], u1 - up[1], dst, po)
         comptime if REFINE_RIG:
-            add_block_transpose[6](jac, n, J_RIG, u0 - ur[0], u1 - ur[1], dst, ro)
+            add_block_transpose[6](o.rig, u0 - ur[0], u1 - ur[1], dst, ro)
         comptime if REFINE_INTRINSICS:
-            add_block_transpose[K](jac, n, calib_column[REFINE_RIG](), u0 - uc[0], u1 - uc[1], dst, co)
-    var pto = Int(point_off[Int(obs_point[n][0])][0]) if valid else -1
-    add_block_transpose[3](jac, n, J_POINT, u0, u1, dst, pto)
+            add_block_transpose[K](o.calib, u0 - uc[0], u1 - uc[1], dst, co)
+    var pto = Int(point_off[point][0]) if valid else -1
+    add_block_transpose[3](o.point, u0, u1, dst, pto)
 
 
-def cross_points_kernel[K: Int, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
-    jac: JacIn,
+def cross_points_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
+    poses: F32In,
+    rigs: F32In,
+    intrinsics: F32In,
+    points: F32In,
     pose_off: I32In,
     rig_off: I32In,
     calib_off: I32In,
@@ -410,24 +404,28 @@ def cross_points_kernel[K: Int, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
     x: VecIn,
     dst: F32Ptr,
 ):
-    """Second Schur pass: dst_cam += H_cp x_point."""
+    """Second Schur pass at the linearisation state: dst_cam += H_cp x_point."""
     comptime assert obs_frame.flat_rank == 1 and obs_camera.flat_rank == 1 and obs_point.flat_rank == 1
     comptime assert pose_off.flat_rank == 1 and rig_off.flat_rank == 1 and calib_off.flat_rank == 1
     comptime assert point_off.flat_rank == 1
+    comptime K = Model.NUM_CALIB
     var n_obs = Int(obs_frame.dim[0]())
     var valid = global_idx.x < n_obs
     var n = min(global_idx.x, n_obs - 1)
-    var pto = Int(point_off[Int(obs_point[n][0])][0]) if valid else -1
+    var frame = Int(obs_frame[n][0])
+    var camera = Int(obs_camera[n][0])
+    var point = Int(obs_point[n][0])
+    var o = project_observation[Model](poses, rigs, intrinsics, points, frame, camera, point)
+    var pto = Int(point_off[point][0]) if valid else -1
     var u = (Float32(0.0), Float32(0.0))
     if pto >= 0:
-        u = block_times[3](jac, n, J_POINT, x, pto)
+        u = block_times[3](o.point, x, pto)
     # A fixed point adds nothing: its lanes join the warp sums with key -1.
-    var po = Int(pose_off[Int(obs_frame[n][0])][0]) if pto >= 0 else -1
-    add_block_transpose[6](jac, n, J_POSE, u[0], u[1], dst, po)
-    var camera = Int(obs_camera[n][0])
+    var po = Int(pose_off[frame][0]) if pto >= 0 else -1
+    add_block_transpose[6](o.pose, u[0], u[1], dst, po)
     comptime if REFINE_RIG:
         var ro = Int(rig_off[camera][0]) if pto >= 0 else -1
-        add_block_transpose[6](jac, n, J_RIG, u[0], u[1], dst, ro)
+        add_block_transpose[6](o.rig, u[0], u[1], dst, ro)
     comptime if REFINE_INTRINSICS:
         var co = Int(calib_off[camera][0]) if pto >= 0 else -1
-        add_block_transpose[K](jac, n, calib_column[REFINE_RIG](), u[0], u[1], dst, co)
+        add_block_transpose[K](o.calib, u[0], u[1], dst, co)

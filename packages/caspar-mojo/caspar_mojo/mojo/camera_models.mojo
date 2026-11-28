@@ -61,6 +61,7 @@ struct Pinhole(CameraModel):
         return i
 
     @staticmethod
+    @always_inline
     def project(x: Float32, y: Float32, z: Float32, params: Params) -> Projection[Self.NUM_CALIB]:
         var fx = params[0]
         var fy = params[1]
@@ -83,6 +84,7 @@ struct SimpleRadial(CameraModel):
         return 0 if i == 0 else 3
 
     @staticmethod
+    @always_inline
     def project(x: Float32, y: Float32, z: Float32, params: Params) -> Projection[Self.NUM_CALIB]:
         var f = params[0]
         var k = params[3]
@@ -115,6 +117,7 @@ struct OpenCVFisheye(CameraModel):
         return i if i < 2 else i + 2
 
     @staticmethod
+    @always_inline
     def project(x: Float32, y: Float32, z: Float32, params: Params) -> Projection[Self.NUM_CALIB]:
         var fx = params[0]
         var fy = params[1]
@@ -181,6 +184,7 @@ struct FullOpenCV(CameraModel):
         return i if i < 2 else i + 2
 
     @staticmethod
+    @always_inline
     def project(x: Float32, y: Float32, z: Float32, params: Params) -> Projection[Self.NUM_CALIB]:
         var fx = params[0]
         var fy = params[1]
