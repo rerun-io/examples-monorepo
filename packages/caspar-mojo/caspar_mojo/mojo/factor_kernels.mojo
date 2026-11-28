@@ -188,7 +188,7 @@ def linearize_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bo
                 a.x * o.r_rig[0, 1] + a.y * o.r_rig[1, 1] + a.z * o.r_rig[2, 1],
                 a.x * o.r_rig[0, 2] + a.y * o.r_rig[1, 2] + a.z * o.r_rig[2, 2],
             )
-            # Right perturbation R exp(w): d/dw = -J R [X]x, whose row is X x (J R).
+            # Right perturbation R exp(w): d/dw = -J R [X]x, whose row is X x (J R); likewise P_rig x a for the rig.
             var rot = cross(o.world, b)
             j_pose[6 * r + 0] = rot.x
             j_pose[6 * r + 1] = rot.y
@@ -199,7 +199,7 @@ def linearize_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bo
             j_point[3 * r + 0] = b.x
             j_point[3 * r + 1] = b.y
             j_point[3 * r + 2] = b.z
-            var rig_rot = cross(o.rig_point, dp)
+            var rig_rot = cross(o.rig_point, a)
             j_rig[6 * r + 0] = rig_rot.x
             j_rig[6 * r + 1] = rig_rot.y
             j_rig[6 * r + 2] = rig_rot.z
