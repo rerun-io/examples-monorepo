@@ -47,6 +47,9 @@ MODEL_SIZE: int = 1024
 """BiRefNet's input side (fdanyone ``FOREGROUND.image_size``)."""
 IMAGENET_MEAN: tuple[float, float, float] = (0.485, 0.456, 0.406)
 IMAGENET_STD: tuple[float, float, float] = (0.229, 0.224, 0.225)
+MatteNet = Callable[[Tensor], Sequence[Tensor]]
+"""What ``predict_mattes`` calls: ImageNet-normalised fp16 crops (``b 3 MODEL_SIZE MODEL_SIZE``) -> a sequence whose last
+item is the matte logits (``b 1 MODEL_SIZE MODEL_SIZE``): the torch BiRefNet or ``birefnet_trt.BiRefNetTrt``."""
 DECODE_THREADS: int = min(16, os.cpu_count() or 1)
 """PNG decode threads of ``read_clip_masks`` (``cv2.imdecode`` releases the GIL)."""
 
@@ -131,7 +134,7 @@ def fill_missing_boxes(boxes: Float32[ndarray, "frames 4"]) -> Float32[ndarray, 
 
 
 def predict_mattes(
-    model: torch.nn.Module,
+    model: MatteNet,
     frames: UInt8[Tensor, "n h w 3"],
     boxes: Float32[ndarray, "n 4"],
     device: torch.device,
@@ -171,7 +174,7 @@ def predict_mattes(
 
 
 def camera_matte(
-    model: torch.nn.Module,
+    model: MatteNet,
     frames: UInt8[Tensor, "n h w 3"],
     box_points: Float32[ndarray, "n k 3"],
     world_T_cam: Float32[ndarray, "4 4"],
@@ -193,7 +196,7 @@ def camera_matte(
 def clip_mattes(
     clip: MultiViewClip,
     box_points: Callable[[int], Float32[ndarray, "n k 3"]],
-    model: torch.nn.Module,
+    model: MatteNet,
     pad_fraction: float,
     pad_px: float,
     device: torch.device,

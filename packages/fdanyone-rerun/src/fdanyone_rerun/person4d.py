@@ -29,10 +29,11 @@ from gsplat_rust_renderer.asog_decode import parse_asog
 from gsplat_rust_renderer.sog3d import PREVIEW_ROWS, log_asog
 from jaxtyping import Float32, UInt8
 from open4dgs.asog import AsogSettings, encode_asog
+from open4dgs.birefnet_trt import load_matte_model
 from open4dgs.body_init import body_surface_init
 from open4dgs.catalog_clip import RESAMPLE_CHUNK, ClipPeople, MultiViewClip, fit_max_side, resample_frames, scale_intrinsics
 from open4dgs.init_cloud import InitCloud
-from open4dgs.masks import MESH_PAD_FRACTION, MESH_PAD_PX, camera_matte, load_birefnet, resample_masks
+from open4dgs.masks import MESH_PAD_FRACTION, MESH_PAD_PX, MatteNet, camera_matte, resample_masks
 from open4dgs.prior import ClipPriors, MonoPriorLoss, PriorConfig
 from open4dgs.splat_export import ASOG_CUT_FORMAT
 from open4dgs.trigs_adapter import TrainConfig, TrainedClip, train_clip
@@ -131,13 +132,13 @@ def read_run_clip(
     masks: list[Float32[Tensor, "frames h w"]] = []
     K: list[np.ndarray] = []
     sizes: list[tuple[int, int]] = []
-    matte_model: torch.nn.Module | None = None
+    matte_model: MatteNet | None = None
     try:
         body = load_body(output_dir, models)
         if len(body.vertices) != num_frames:
             raise ValueError(f"{output_dir}: the body has {len(body.vertices)} frames, the clip {num_frames}")
         vertices: Float32[np.ndarray, "frames verts 3"] = body.vertices.astype(np.float32)
-        matte_model = load_birefnet(models / "birefnet", device)
+        matte_model = load_matte_model(models / "birefnet", device)
         for camera, pending in zip(rig.cameras, decoded, strict=True):
             raise_if_stopped(cancel)
             stored_wh: tuple[int, int] = (camera.image_width, camera.image_height)
