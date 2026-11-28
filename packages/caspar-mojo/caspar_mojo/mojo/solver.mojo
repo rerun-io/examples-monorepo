@@ -9,7 +9,7 @@ from std.math import ceildiv, isfinite
 from std.os import getenv
 from std.time import perf_counter_ns
 
-from max.gpu.host import DeviceBuffer, DeviceContext
+from max.gpu.host import DeviceAttribute, DeviceBuffer, DeviceContext
 from layout import TileTensor, row_major
 
 from camera_models import CameraModel, FullOpenCV, MAX_PARAMS, OpenCVFisheye, Pinhole, SimpleRadial
@@ -43,6 +43,9 @@ comptime SLOT_COST_LINEARIZE = 0
 comptime SLOT_COST_TRIAL = 1
 comptime SLOT_PRED = 2
 comptime SLOT_PCG = 4
+
+comptime BLOCKS_PER_SM = 4
+"""Resident blocks per SM the tiled observation kernels aim for; each block then walks consecutive tiles."""
 
 comptime EXIT_MAX_ITERATIONS = 0
 comptime EXIT_CONVERGED_DIAG_EXIT = 1
@@ -363,6 +366,9 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
     var launches = 0
     var clock = KernelClock()
     var obs_grid = _grid(no)
+    var n_tiles = ceildiv(no, BLOCK)
+    var tiles = max(ceildiv(n_tiles, BLOCKS_PER_SM * ctx.device().get_attribute(DeviceAttribute.MULTIPROCESSOR_COUNT)), 1)
+    var tile_grid = max(ceildiv(n_tiles, tiles), 1)
     var cam_blocks = lay.n6 + lay.n_calib
 
     ctx.synchronize()
@@ -377,8 +383,8 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
         TileTensor(d_poses, row_major((nf, 7))).as_imm(), TileTensor(d_rigs, row_major((nc, 7))).as_imm(),
         TileTensor(d_intr, row_major((nc, MAX_PARAMS))).as_imm(), TileTensor(d_points, row_major((np, 3))).as_imm(),
         t_pose_off, t_rig_off, t_calib_off, t_point_off, obs_frame, obs_camera, obs_point, pixels,
-        d_g.unsafe_ptr(), d_h.unsafe_ptr(), scalars, Int32(SLOT_COST_LINEARIZE), n6, ncal,
-        grid_dim=obs_grid, block_dim=BLOCK,
+        d_g.unsafe_ptr(), d_h.unsafe_ptr(), scalars, Int32(SLOT_COST_LINEARIZE), n6, ncal, Int32(tiles),
+        grid_dim=tile_grid, block_dim=BLOCK,
     )
     clock.tick(ctx, "linearize")
     ctx.enqueue_function[point_linearize](
@@ -418,8 +424,8 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
                 TileTensor(d_poses, row_major((nf, 7))).as_imm(), TileTensor(d_rigs, row_major((nc, 7))).as_imm(),
                 TileTensor(d_intr, row_major((nc, MAX_PARAMS))).as_imm(), TileTensor(d_points, row_major((np, 3))).as_imm(),
                 t_pose_off, t_rig_off, t_calib_off, t_point_off, obs_frame, obs_camera, obs_point, pixels,
-                d_g.unsafe_ptr(), d_h.unsafe_ptr(), scalars, Int32(SLOT_COST_LINEARIZE), n6, ncal,
-                grid_dim=obs_grid, block_dim=BLOCK,
+                d_g.unsafe_ptr(), d_h.unsafe_ptr(), scalars, Int32(SLOT_COST_LINEARIZE), n6, ncal, Int32(tiles),
+                grid_dim=tile_grid, block_dim=BLOCK,
             )
             clock.tick(ctx, "linearize")
             ctx.enqueue_function[point_linearize](
@@ -443,7 +449,7 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
         clock.tick(ctx, "point_solve")
         ctx.enqueue_function[cross_points](
             lin_poses, lin_rigs, lin_intr, lin_points, t_pose_off, t_rig_off, t_calib_off, t_point_off, obs_frame, obs_camera, obs_point,
-            z.as_imm(), z.as_imm(), d_r.unsafe_ptr(), grid_dim=obs_grid, block_dim=BLOCK,
+            z.as_imm(), z.as_imm(), d_r.unsafe_ptr(), Int32(tiles), grid_dim=tile_grid, block_dim=BLOCK,
         )
         clock.tick(ctx, "cross_points")
         launches += 2
@@ -473,7 +479,7 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
             clock.tick(ctx, "point_gather")
             ctx.enqueue_function[cross_all](
                 lin_poses, lin_rigs, lin_intr, lin_points, t_pose_off, t_rig_off, t_calib_off, t_point_off, obs_frame, obs_camera, obs_point,
-                p.as_imm(), z.as_imm(), d_w.unsafe_ptr(), grid_dim=obs_grid, block_dim=BLOCK,
+                p.as_imm(), z.as_imm(), d_w.unsafe_ptr(), Int32(tiles), grid_dim=tile_grid, block_dim=BLOCK,
             )
             clock.tick(ctx, "cross_points")
             ctx.enqueue_function[dot_kernel](
