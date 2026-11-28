@@ -4492,8 +4492,8 @@ description = "What Animated SOG costs a trained run (--run <run dir>, --setting
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════
 [environments]
-colsfm = { features = ["common", "cuda", "colsfm", "torchcodec", "ffmpeg"], solve-group = "colsfm", no-default-feature = true }
-colsfm-dev = { features = ["common", "cuda", "colsfm", "dev", "torchcodec", "ffmpeg"], solve-group = "colsfm", no-default-feature = true }
+colsfm = { features = ["common", "cuda", "colsfm", "caspar-mojo", "torchcodec", "ffmpeg"], solve-group = "colsfm", no-default-feature = true }
+colsfm-dev = { features = ["common", "cuda", "colsfm", "caspar-mojo", "dev", "torchcodec", "ffmpeg"], solve-group = "colsfm", no-default-feature = true }
 pipelines = { features = ["common", "pipelines", "ffmpeg"], solve-group = "pipelines", no-default-feature = true }
 pipelines-dev = { features = ["common", "pipelines", "dev", "ffmpeg"], solve-group = "pipelines", no-default-feature = true }
 agent-traces = { features = ["agent-traces", "ffmpeg"], solve-group = "agent-traces", no-default-feature = true }
