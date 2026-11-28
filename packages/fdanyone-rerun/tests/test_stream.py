@@ -1,5 +1,6 @@
 """The streamer's phase logic and its layouts (motion, body, diffusion, result, training, person), without a GPU."""
 
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -72,3 +73,80 @@ def test_stop_cancels_at_the_next_callback(tmp_path: Path) -> None:
 def test_previews_show_the_middle_latent_frame() -> None:
     # 121 frames -> 31 latent frames; frame 15 decodes to pixel frame 60, the middle of the clip.
     assert preview_latent_index(31) == 15
+
+
+def _fake_run(monkeypatch: pytest.MonkeyPatch, log_cameras: Callable[..., None], train_person: Callable[..., None]) -> None:
+    """``RunStreamer.run`` with the views, the camera logging and the training replaced."""
+    from fdanyone_rerun import stream
+    from fdanyone_rerun.outputs import GenerationRecord, InputRecord, RunMetadata
+
+    metadata = RunMetadata(
+        input=InputRecord(filename="clip.mp4", fps="25/1", start_time_seconds=0.0, num_frames=121, width=704, height=1280),
+        generation=GenerationRecord(
+            seed=0,
+            attention_backend="sdpa",
+            inference_steps=4,
+            elapsed_seconds={},
+            total_elapsed_seconds=1.0,
+            peak_vram_allocated_bytes=0,
+            peak_vram_reserved_bytes=0,
+        ),
+    )
+    monkeypatch.setattr(stream, "run_views", lambda config, **_: metadata)
+    monkeypatch.setattr(stream, "read_camera_rig", lambda output_dir: None)
+    monkeypatch.setattr(stream, "log_cameras", log_cameras)
+    monkeypatch.setattr(stream, "train_person", train_person)
+
+
+def test_cameras_log_while_the_person_trains(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+
+    from fdanyone_rerun.person4d import PersonConfig
+
+    training = threading.Event()
+    logged = threading.Event()
+
+    def log_cameras(rig: object, output_dir: Path, recording: rr.RecordingStream) -> None:
+        assert training.wait(timeout=10), "the cameras were logged before training started, not beside it"
+        logged.set()
+
+    def train_person(output_dir: Path, config: PersonConfig, recording: rr.RecordingStream, **_: object) -> None:
+        training.set()
+
+    _fake_run(monkeypatch, log_cameras, train_person)
+    streamer, _ = _streamer(tmp_path)
+    streamer.person = PersonConfig()
+    streamer.run()
+    assert logged.is_set()  # run() returns only once the cameras are in the recording
+
+
+def test_a_camera_logging_error_fails_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def log_cameras(rig: object, output_dir: Path, recording: rr.RecordingStream) -> None:
+        raise RuntimeError("Mp4Reader failed")
+
+    _fake_run(monkeypatch, log_cameras, lambda *args, **kwargs: None)
+    streamer, _ = _streamer(tmp_path)
+    with pytest.raises(RuntimeError, match="Mp4Reader failed"):
+        streamer.run()
+
+
+def test_the_source_clip_logs_beside_gvhmr_and_is_in_before_denoising(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+
+    from fdanyone_rerun import stream
+
+    release = threading.Event()
+    logged: list[Path] = []
+
+    def log_canonical_clip(clip: Path, recording: rr.RecordingStream) -> None:
+        assert release.wait(timeout=10)
+        logged.append(clip)
+
+    monkeypatch.setattr(stream, "log_canonical_clip", log_canonical_clip)
+    streamer, _ = _streamer(tmp_path)
+    clip: Path = tmp_path / "canonical_clip.mp4"
+    streamer.on_stage("Recovering human motion with GVHMR", 0.15, clip)  # returns while the clip is still being logged
+    assert logged == []
+    release.set()
+    streamer.on_stage(GENERATION_STAGE, 0.45, None)  # waits for it: upstream deletes the clip when the run ends
+    assert logged == [clip]

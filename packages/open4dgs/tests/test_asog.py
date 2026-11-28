@@ -209,3 +209,37 @@ def test_translation_needs_a_rotation_axis_and_the_axis_anchor_keeps_it(tmp_path
             assert float((m1 - m0).norm(dim=-1).max()) < 1e-2  # direction within about 1 / AXIS_ANCHOR_TARGET rad
         else:
             assert float(moved.max()) < 1e-6  # not at all
+
+
+def test_threaded_encode_writes_the_serial_file(tmp_path: Path) -> None:
+    from asog.encode import encode_runtime
+
+    from open4dgs.asog import AsogSettings, axis_anchors, encode_asog, trigs_runtime
+
+    src = synthetic_params(4096, seed=3)
+    del src["shN"]  # the SH palette k-means on CUDA is not bit-reproducible between runs
+    options = AsogSettings().options()
+    runtime = trigs_runtime(src, FPS, NUM_FRAMES)
+    runtime.anchors = axis_anchors(runtime, options.qp)
+    serial = tmp_path / "serial.asog"
+    encode_runtime(
+        runtime, serial, qp=options.qp, qa=options.qa, prune=options.prune, mbits=options.mbits, tbits=options.tbits, lsbits=options.lsbits
+    )
+    data, stats = encode_asog(src, FPS, NUM_FRAMES, AsogSettings())
+    assert data == serial.read_bytes()
+    assert stats.bytes == len(data)
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_sorted_codebook_matches_upstream(seed: int) -> None:
+    from asog.quantize import codebook1d
+
+    from open4dgs.asog import sorted_codebook1d
+
+    rng = np.random.default_rng(seed)
+    # repeated values and a few far outliers: ties at the cell edges and empty cells
+    x = np.concatenate([rng.normal(-4, 0.5, (3000, 3)).round(2).ravel(), rng.normal(0, 3, 50), np.full(200, 0.25)])
+    want_cb, want_idx = codebook1d(x)
+    got_cb, got_idx = sorted_codebook1d(x)
+    np.testing.assert_array_equal(got_cb, want_cb)
+    np.testing.assert_array_equal(got_idx, want_idx)
