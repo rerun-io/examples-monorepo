@@ -39,7 +39,11 @@ int main(void) {
   const CasparMojoState st = {out_intr, out_sfr, out_poses, out_pts};
   CasparMojoStats s;
   char err[256] = "";
-  int32_t rc = caspar_mojo_solve(&pr, &opt, &st, &s, err, sizeof(err));
+  int32_t rc = 0;
+  for (int run = 0; run < 3; ++run) { /* later calls show the per-call cost without the first-call start-up */
+    rc = caspar_mojo_solve(&pr, &opt, &st, &s, err, sizeof(err));
+    printf("run %d total %.4f s\n", run, s.total_seconds);
+  }
   printf("abi %d rc %d cost %.6g -> %.6g iters %ld pcg %ld exit %ld solve %.4f s total %.4f s err '%s'\n",
          caspar_mojo_abi_version(), rc, s.initial_cost, s.final_cost, (long)s.iterations, (long)s.pcg_iterations,
          (long)s.exit_reason, s.solve_seconds, s.total_seconds, err);
