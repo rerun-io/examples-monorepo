@@ -109,6 +109,20 @@ struct Options(ImplicitlyCopyable):
 
 
 @fieldwise_init
+struct LinearizeOut(ImplicitlyCopyable):
+    """Caller-owned outputs of `linearize_model`, capacities in floats."""
+
+    var gradient: F32HostOut
+    var gradient_capacity: Int
+    var hblk: F32HostOut
+    var hblk_capacity: Int
+
+    def check(self, lay: TangentLayout) raises:
+        if self.gradient_capacity < lay.n_tan or self.hblk_capacity < lay.n_h:
+            raise Error(t"linearize outputs hold {self.gradient_capacity} and {self.hblk_capacity} floats, need {lay.n_tan} and {lay.n_h}")
+
+
+@fieldwise_init
 struct Trial(ImplicitlyCopyable):
     """One LM trial, the fields of CASPAR's print_progress line."""
 
@@ -362,20 +376,20 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
     var problem: HostProblem,
     options: Options,
     result: HostState,
-    linearize_gradient: F32HostOut,
-    linearize_hblk: F32HostOut,
-    linearize_only: Bool,
+    collect_trace: Bool,
+    linearize_hook: Optional[LinearizeOut],
 ) raises -> Stats:
-    """Run the LM solve and write the accepted state into `result`, or with `linearize_only` linearise once at the
+    """Run the LM solve and write the accepted state into `result`, or with `linearize_hook` linearise once at the
     given state and write the gradient -J^T e and the packed block diagonal instead."""
     comptime K = Model.NUM_CALIB
     _check(problem, options)
     if problem.n_obs == 0:
         # No residual: cost 0, nothing moves (CASPAR ends such a solve on its score exit).
-        if linearize_only:
+        if case .Some(hook) = linearize_hook:
             var lay = tangent_layout[K](problem)
-            _zero(linearize_gradient, lay.n_tan)
-            _zero(linearize_hblk, lay.n_h)
+            hook.check(lay)
+            _zero(hook.gradient, lay.n_tan)
+            _zero(hook.hblk, lay.n_h)
         else:
             _copy(result.intrinsics, problem.intrinsics, problem.n_cameras * MAX_PARAMS)
             _copy(result.sensor_from_rig, problem.sensor_from_rig, problem.n_cameras * 7)
@@ -395,6 +409,8 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
     var np = problem.n_points
     var no = problem.n_obs
     var lay = tangent_layout[K](problem)
+    if case .Some(hook) = linearize_hook:
+        hook.check(lay)
     var next = 0
     var pose_off = _offsets(problem.pose_free, nf, 0, 6, next)
     var rig_off = _offsets(problem.sensor_free, nc, 0, 6, next)
@@ -505,7 +521,7 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
     var t0 = perf_counter_ns()
     clock.last = perf_counter_ns()
 
-    var trace = List[Trial](capacity=options.solver_iter_max)
+    var trace = List[Trial](capacity=options.solver_iter_max if collect_trace else 0)
     var diag = options.diag_init
     var up_scale = options.diag_scaling_up
     var exit_reason = EXIT_MAX_ITERATIONS
@@ -529,7 +545,7 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
                 TileTensor(d_poses, row_major((nf, 7))).as_imm(), TileTensor(d_rigs, row_major((nc, 7))).as_imm(),
                 TileTensor(d_intr, row_major((nc, MAX_PARAMS))).as_imm(), TileTensor(d_points, row_major((np, 3))).as_imm(),
                 t_pose_off, t_rig_off, t_calib_off, t_point_off, obs_frame, obs_camera, obs_point, pixels,
-                warp_tiles, d_g.unsafe_ptr(), d_h.unsafe_ptr(), scalars, Int32(SLOT_COST_LINEARIZE), n6, ncal, Int32(tiles),
+                warp_tiles, d_g.unsafe_ptr(), d_h.unsafe_ptr(), scalars, Int32(SLOT_COST_LINEARIZE if it == 0 else -1), n6, ncal, Int32(tiles),
                 grid_dim=tile_grid, block_dim=BLOCK,
             )
             clock.tick(ctx, "linearize")
@@ -546,9 +562,9 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
                 ctx.synchronize()
                 score_best = Float32(host2[0])
                 initial_cost = score_best
-                if linearize_only:
-                    _download(ctx, linearize_gradient, d_g, lay.n_tan)
-                    _download(ctx, linearize_hblk, d_h, lay.n_h)
+                if case .Some(hook) = linearize_hook:
+                    _download(ctx, hook.gradient, d_g, lay.n_tan)
+                    _download(ctx, hook.hblk, d_h, lay.n_h)
                     ctx.synchronize()
                     return Stats(initial_cost, initial_cost, 0, 0, EXIT_MAX_ITERATIONS, 0.0, launches, List[Trial]())
         var lin_poses = TileTensor(t_poses if lin_in_trial else d_poses, row_major((nf, 7))).as_imm()
@@ -665,7 +681,8 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
         else:
             diag = diag * up_scale
             up_scale *= 2.0
-        trace.append(Trial(score_trial, score_best, damping, k, accepted))
+        if collect_trace:
+            trace.append(Trial(score_trial, score_best, damping, k, accepted))
         if not accepted and diag > options.diag_exit_value:
             exit_reason = EXIT_CONVERGED_DIAG_EXIT
             trials = it
@@ -697,19 +714,18 @@ def _solve_flags[Model: CameraModel](
     problem: HostProblem,
     options: Options,
     result: HostState,
-    linearize_gradient: F32HostOut,
-    linearize_hblk: F32HostOut,
-    linearize_only: Bool,
+    collect_trace: Bool,
+    linearize_hook: Optional[LinearizeOut],
 ) raises -> Stats:
     match (_any(problem.intrinsics_free, problem.n_cameras), _any(problem.sensor_free, problem.n_cameras)):
         case (True, True):
-            return solve[Model, True, True](ctx, problem, options, result, linearize_gradient, linearize_hblk, linearize_only)
+            return solve[Model, True, True](ctx, problem, options, result, collect_trace, linearize_hook)
         case (True, False):
-            return solve[Model, True, False](ctx, problem, options, result, linearize_gradient, linearize_hblk, linearize_only)
+            return solve[Model, True, False](ctx, problem, options, result, collect_trace, linearize_hook)
         case (False, True):
-            return solve[Model, False, True](ctx, problem, options, result, linearize_gradient, linearize_hblk, linearize_only)
+            return solve[Model, False, True](ctx, problem, options, result, collect_trace, linearize_hook)
         case (False, False):
-            return solve[Model, False, False](ctx, problem, options, result, linearize_gradient, linearize_hblk, linearize_only)
+            return solve[Model, False, False](ctx, problem, options, result, collect_trace, linearize_hook)
 
 
 def supports_model(model: Int) -> Bool:
@@ -721,26 +737,36 @@ def supports_model(model: Int) -> Bool:
             return False
 
 
-def solve_model(
+def _dispatch(
     ctx: DeviceContext,
     model: Int,
     problem: HostProblem,
     options: Options,
     result: HostState,
-    linearize_gradient: F32HostOut,
-    linearize_hblk: F32HostOut,
-    linearize_only: Bool,
+    collect_trace: Bool,
+    linearize_hook: Optional[LinearizeOut],
 ) raises -> Stats:
-    """`solve` for a runtime camera model (the `CameraModel` value of `caspar_mojo.problem`) and the refined groups the
-    masks free."""
     match model:
         case 0:
-            return _solve_flags[Pinhole](ctx, problem, options, result, linearize_gradient, linearize_hblk, linearize_only)
+            return _solve_flags[Pinhole](ctx, problem, options, result, collect_trace, linearize_hook)
         case 1:
-            return _solve_flags[SimpleRadial](ctx, problem, options, result, linearize_gradient, linearize_hblk, linearize_only)
+            return _solve_flags[SimpleRadial](ctx, problem, options, result, collect_trace, linearize_hook)
         case 2:
-            return _solve_flags[OpenCVFisheye](ctx, problem, options, result, linearize_gradient, linearize_hblk, linearize_only)
+            return _solve_flags[OpenCVFisheye](ctx, problem, options, result, collect_trace, linearize_hook)
         case 3:
-            return _solve_flags[FullOpenCV](ctx, problem, options, result, linearize_gradient, linearize_hblk, linearize_only)
+            return _solve_flags[FullOpenCV](ctx, problem, options, result, collect_trace, linearize_hook)
         case _:
             raise Error(t"unknown camera model {model}")
+
+
+def solve_model(ctx: DeviceContext, model: Int, problem: HostProblem, options: Options, result: HostState, collect_trace: Bool) raises -> Stats:
+    """`solve` for a runtime camera model (the `CameraModel` value of `caspar_mojo.problem`) and the refined groups the
+    masks free; `collect_trace` fills `Stats.trace` (the C door does not read it)."""
+    return _dispatch(ctx, model, problem, options, result, collect_trace, Optional[LinearizeOut](None))
+
+
+def linearize_model(ctx: DeviceContext, model: Int, problem: HostProblem, hook: LinearizeOut) raises -> Float32:
+    """Test hook: one linearisation at the problem's state (CASPAR's `res_jac_first`) into `hook`; returns the cost."""
+    var options = Options(1, 1.0, 0.0, 2.0, 0.333333, 1e3, 0.0, 1.0, 1, 0.1)
+    var unused = HostState(hook.gradient, hook.gradient, hook.gradient, hook.gradient)
+    return _dispatch(ctx, model, problem, options, unused, False, hook).initial_cost

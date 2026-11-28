@@ -12,7 +12,7 @@ from std.python.bindings import PythonModuleBuilder
 
 from max.gpu.host import DeviceContext
 
-from solver import F32HostIn, F32HostOut, HostProblem, HostState, I32HostIn, Options, Stats, U8HostIn, solve_model
+from solver import F32HostIn, F32HostOut, HostProblem, HostState, I32HostIn, LinearizeOut, Options, Stats, U8HostIn, linearize_model, solve_model
 
 
 def _address(array: PythonObject) raises -> Int:
@@ -48,12 +48,6 @@ def _problem(packet: PythonObject) raises -> HostProblem:
     )
 
 
-def _run(
-    packet: PythonObject, options: Options, result: HostState, gradient: F32HostOut, hblk: F32HostOut, linearize_only: Bool
-) raises -> Stats:
-    return solve_model(DeviceContext(), Int(py=packet.camera_model), _problem(packet), options, result, gradient, hblk, linearize_only)
-
-
 def _stats(stats: Stats) raises -> PythonObject:
     var trace = Python.list()
     for t in stats.trace:
@@ -85,16 +79,13 @@ def py_solve(packet: PythonObject, options: PythonObject, result: PythonObject) 
         reduced_pcg_eta=Float64(py=options.reduced_pcg_eta),
     )
     var state = HostState(_f32_out(result.intrinsics), _f32_out(result.sensor_from_rig), _f32_out(result.rig_from_world), _f32_out(result.points))
-    var unused = state.points
-    return _stats(_run(packet, opts, state, unused, unused, False))
+    return _stats(solve_model(DeviceContext(), Int(py=packet.camera_model), _problem(packet), opts, state, True))
 
 
 def py_linearize(packet: PythonObject, gradient: PythonObject, hblk: PythonObject) raises -> PythonObject:
     """`linearize(packet, gradient, hblk) -> cost`: one linearisation at the packet's state, outputs written in place."""
-    var opts = Options(1, 1.0, 0.0, 2.0, 0.333333, 1e3, 0.0, 1.0, 1, 0.1)
-    var none = _f32_out(gradient)
-    var state = HostState(none, none, none, none)
-    return PythonObject(Float64(_run(packet, opts, state, _f32_out(gradient), _f32_out(hblk), True).initial_cost))
+    var hook = LinearizeOut(_f32_out(gradient), Int(py=gradient.size), _f32_out(hblk), Int(py=hblk.size))
+    return PythonObject(Float64(linearize_model(DeviceContext(), Int(py=packet.camera_model), _problem(packet), hook)))
 
 
 def py_device_count() raises -> PythonObject:

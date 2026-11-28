@@ -120,8 +120,7 @@ def _solve(p: CProblem, o: COptions, s: CState) raises -> Stats:
         reduced_pcg_eta=o.reduced_pcg_eta,
     )
     var result = HostState(s.intrinsics, s.sensor_from_rig, s.rig_from_world, s.points)
-    var unused = s.points
-    return solve_model(DeviceContext(device_id=Int(o.device_id)), Int(p.camera_model), problem, options, result, unused, unused, False)
+    return solve_model(DeviceContext(device_id=Int(o.device_id)), Int(p.camera_model), problem, options, result, False)
 
 
 @export

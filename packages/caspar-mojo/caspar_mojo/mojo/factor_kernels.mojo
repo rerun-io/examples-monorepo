@@ -316,8 +316,9 @@ def linearize_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bo
     n_calib: Int32,
     tiles: Int32,
 ):
-    """Residual, the camera blocks of -J^T e and of the block diagonal of J^T J, and the cost 1/2 sum |e|^2, over
-    `tiles` consecutive block tiles (WARPS warp tiles) per block. The point blocks come from `point_linearize_kernel`."""
+    """Residual, the camera blocks of -J^T e and of the block diagonal of J^T J, and with cost_slot >= 0 (only the
+    first linearisation's cost is read) the cost 1/2 sum |e|^2, over `tiles` consecutive block tiles (WARPS warp
+    tiles) per block. The point blocks come from `point_linearize_kernel`."""
     comptime assert obs_frame.flat_rank == 1 and obs_camera.flat_rank == 1 and obs_point.flat_rank == 1
     comptime assert pose_off.flat_rank == 1 and rig_off.flat_rank == 1 and calib_off.flat_rank == 1
     comptime assert point_off.flat_rank == 1 and pixels.flat_rank == 2
@@ -357,7 +358,8 @@ def linearize_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bo
     rig_h.flush[tri(6)](hblk)
     calib_g.flush[K](g)
     calib_h.flush[tri(K)](hblk)
-    reduce_add(scalars, Int(cost_slot), cost)
+    if cost_slot >= 0:
+        reduce_add(scalars, Int(cost_slot), cost)
 
 
 comptime POINT_LANES = 4
