@@ -11,8 +11,8 @@ Scatter-adds into the gradient, the block diagonal and the products use relaxed 
 """
 
 from std.atomic import Atomic, Ordering
-from std.math import sqrt
-from max.gpu import WARP_SIZE, global_idx, lane_id, thread_idx
+from std.math import ceildiv, sqrt
+from max.gpu import WARP_SIZE, block_idx, global_idx, lane_id, thread_idx
 from max.gpu.memory import AddressSpace
 from max.gpu.sync import barrier
 from std.memory import stack_allocation
@@ -20,8 +20,8 @@ from max.gpu.primitives import warp
 
 from layout import ImmTileTensor, MutTileTensor, row_major
 
-from camera_models import CameraModel, Params, Projection
-from geometry import Mat3, Pose, Vec3, apply, cross, rotation, translation
+from camera_models import CameraModel, Params
+from geometry import Pose, Vec3, apply, cross, rotation, translation
 
 comptime L1 = type_of(row_major((0,)))
 comptime L2 = type_of(row_major((0, 0)))
@@ -115,11 +115,32 @@ def block_uniform(key: Int) -> Bool:
     return uniform
 
 
+@fieldwise_init
+struct Running(TrivialRegisterPassable):
+    """A block's running sum for one scatter site, carried over its tiles: thread t < D holds component t of the
+    node block at `key`. Observations come sorted by camera then frame, so consecutive tiles of a block mostly share
+    the node: the sum reaches memory once per key change, and the same-address atomics (which serialise across
+    blocks; one camera's intrinsics are shared by every observation) fall by the tiles per block."""
+
+    var key: Int
+    var value: Float32
+
+    @staticmethod
+    def empty() -> Self:
+        return Self(-1, 0.0)
+
+    @always_inline
+    def flush[D: Int](mut self, dst: F32Ptr):
+        if thread_idx.x < D and self.key >= 0:
+            atomic_add(dst, self.key + thread_idx.x, self.value)
+        self.key = -1
+        self.value = 0.0
+
+
 @always_inline
-def scatter_values[D: Int](dst: F32Ptr, key: Int, values: Array[Float32, D]):
-    """dst[key:key+D] += values summed over the block when the block shares `key`, else over each warp that
-    shares it, else per thread. One device atomic per block replaces 256 on one address: observations come
-    sorted by camera then image, so a block nearly always shares its pose. Every thread must call it."""
+def scatter_values[D: Int](dst: F32Ptr, key: Int, values: Array[Float32, D], mut running: Running):
+    """dst[key:key+D] += values summed over the block when the block shares `key` (into `running`), else over each
+    warp that shares it, else per thread. Every thread must call it."""
     if block_uniform(key):
         var sums = stack_allocation[WARPS * D, Float32, address_space=AddressSpace.SHARED]()
         var warp_index = thread_idx.x // WARP_SIZE
@@ -129,11 +150,14 @@ def scatter_values[D: Int](dst: F32Ptr, key: Int, values: Array[Float32, D]):
                 sums[unsafe_offset=warp_index * D + i] = total
         barrier()
         var t = thread_idx.x
-        if t < D and key >= 0:
+        if key != running.key:
+            running.flush[D](dst)
+            running.key = key
+        if t < D:
             var total: Float32 = 0.0
             comptime for w in range(WARPS):
                 total += sums[unsafe_offset=w * D + t]
-            atomic_add(dst, key + t, total)
+            running.value += total
         barrier()
         return
     var uniform = warp_uniform(key)
@@ -242,7 +266,18 @@ def project_observation[Model: CameraModel](
 
 
 @always_inline
-def accumulate_block[D: Int](j: Array[Float32, 2 * D], valid: Bool, e0: Float32, e1: Float32, v: Int, h: Int, g: F32Ptr, hblk: F32Ptr):
+def accumulate_block[D: Int](
+    j: Array[Float32, 2 * D],
+    valid: Bool,
+    e0: Float32,
+    e1: Float32,
+    v: Int,
+    h: Int,
+    g: F32Ptr,
+    hblk: F32Ptr,
+    mut run_g: Running,
+    mut run_h: Running,
+):
     """For a free node (v >= 0), g[v:v+D] -= J^T e and J^T J into hblk[h:].
     Every lane must call it; `valid` is False past the last observation."""
     var key = v if valid else -1
@@ -252,8 +287,8 @@ def accumulate_block[D: Int](j: Array[Float32, 2 * D], valid: Bool, e0: Float32,
         grad[i] = -(j[i] * e0 + j[D + i] * e1)
         comptime for k in range(i, D):
             hess[tri_index[D](i, k)] = j[i] * j[k] + j[D + i] * j[D + k]
-    scatter_values[D](g, key, grad)
-    scatter_values[tri(D)](hblk, h if key >= 0 else -1, hess)
+    scatter_values[D](g, key, grad, run_g)
+    scatter_values[tri(D)](hblk, h if key >= 0 else -1, hess, run_h)
 
 
 @always_inline
@@ -287,34 +322,50 @@ def linearize_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bo
     cost_slot: Int32,
     n6: Int32,
     n_calib: Int32,
+    tiles: Int32,
 ):
-    """Residual, the camera blocks of -J^T e and of the block diagonal of J^T J, and the cost 1/2 sum |e|^2.
-    The point blocks come from `point_linearize_kernel`."""
+    """Residual, the camera blocks of -J^T e and of the block diagonal of J^T J, and the cost 1/2 sum |e|^2, over
+    `tiles` consecutive tiles of BLOCK observations per block. The point blocks come from `point_linearize_kernel`."""
     comptime assert obs_frame.flat_rank == 1 and obs_camera.flat_rank == 1 and obs_point.flat_rank == 1
     comptime assert pose_off.flat_rank == 1 and rig_off.flat_rank == 1 and calib_off.flat_rank == 1
     comptime assert point_off.flat_rank == 1 and pixels.flat_rank == 2
     comptime K = Model.NUM_CALIB
-    # Lanes past the end recompute the last observation and add nothing, so every lane reaches the warp sums.
     var n_obs = Int(obs_frame.dim[0]())
-    var valid = global_idx.x < n_obs
-    var n = min(global_idx.x, n_obs - 1)
-    var frame = Int(obs_frame[n][0])
-    var camera = Int(obs_camera[n][0])
-    var point = Int(obs_point[n][0])
-    var o = project_observation[Model](poses, rigs, intrinsics, points, frame, camera, point)
-    var e0 = o.u - pixels[n, 0][0]
-    var e1 = o.v - pixels[n, 1][0]
-    var cost: Float32 = 0.5 * (e0 * e0 + e1 * e1) if valid else 0.0
     var nn6 = Int(n6)
     var nc = Int(n_calib)
-    var po = Int(pose_off[frame][0])
-    accumulate_block[6](o.pose, valid, e0, e1, po, h_offset[K](po, nn6, nc), g, hblk)
-    comptime if REFINE_RIG:
-        var ro = Int(rig_off[camera][0])
-        accumulate_block[6](o.rig, valid, e0, e1, ro, h_offset[K](ro, nn6, nc), g, hblk)
-    comptime if REFINE_INTRINSICS:
-        var co = Int(calib_off[camera][0])
-        accumulate_block[K](o.calib, valid, e0, e1, co, h_offset[K](co, nn6, nc), g, hblk)
+    var first = block_idx.x * Int(tiles)
+    var cost: Float32 = 0.0
+    var pose_g = Running.empty()
+    var pose_h = Running.empty()
+    var rig_g = Running.empty()
+    var rig_h = Running.empty()
+    var calib_g = Running.empty()
+    var calib_h = Running.empty()
+    for tile in range(first, min(first + Int(tiles), ceildiv(n_obs, BLOCK))):
+        # Lanes past the end recompute the last observation and add nothing, so every lane reaches the block sums.
+        var valid = tile * BLOCK + thread_idx.x < n_obs
+        var n = min(tile * BLOCK + thread_idx.x, n_obs - 1)
+        var frame = Int(obs_frame[n][0])
+        var camera = Int(obs_camera[n][0])
+        var o = project_observation[Model](poses, rigs, intrinsics, points, frame, camera, Int(obs_point[n][0]))
+        var e0 = o.u - pixels[n, 0][0]
+        var e1 = o.v - pixels[n, 1][0]
+        if valid:
+            cost += 0.5 * (e0 * e0 + e1 * e1)
+        var po = Int(pose_off[frame][0])
+        accumulate_block[6](o.pose, valid, e0, e1, po, h_offset[K](po, nn6, nc), g, hblk, pose_g, pose_h)
+        comptime if REFINE_RIG:
+            var ro = Int(rig_off[camera][0])
+            accumulate_block[6](o.rig, valid, e0, e1, ro, h_offset[K](ro, nn6, nc), g, hblk, rig_g, rig_h)
+        comptime if REFINE_INTRINSICS:
+            var co = Int(calib_off[camera][0])
+            accumulate_block[K](o.calib, valid, e0, e1, co, h_offset[K](co, nn6, nc), g, hblk, calib_g, calib_h)
+    pose_g.flush[6](g)
+    pose_h.flush[tri(6)](hblk)
+    rig_g.flush[6](g)
+    rig_h.flush[tri(6)](hblk)
+    calib_g.flush[K](g)
+    calib_h.flush[tri(K)](hblk)
     reduce_add(scalars, Int(cost_slot), cost)
 
 
@@ -333,11 +384,11 @@ def point_linearize_kernel[Model: CameraModel](
     point_v: Int32,
     point_h: Int32,
 ):
-    """The point blocks of -J^T e and of the block diagonal, one thread per point over its observations (no atomics)."""
+    """The point blocks of -J^T e and of the block diagonal, one warp per point over its observations (no atomics)."""
     comptime assert point_off.flat_rank == 1 and point_start.flat_rank == 1 and by_point_pixels.flat_rank == 2
     comptime assert by_point_frame.flat_rank == 1 and by_point_camera.flat_rank == 1
     comptime assert g.flat_rank == 1 and hblk.flat_rank == 1
-    var j = global_idx.x
+    var j = global_idx.x // WARP_SIZE
     if j >= Int(point_off.dim[0]()):
         return
     var v = Int(point_off[j][0])
@@ -345,7 +396,7 @@ def point_linearize_kernel[Model: CameraModel](
         return
     var grad = Array[Float32, 3](fill=0.0)
     var hess = Array[Float32, tri(3)](fill=0.0)
-    for i in range(Int(point_start[j][0]), Int(point_start[j + 1][0])):
+    for i in range(Int(point_start[j][0]) + lane_id(), Int(point_start[j + 1][0]), WARP_SIZE):
         var o = project_observation[Model](poses, rigs, intrinsics, points, Int(by_point_frame[i][0]), Int(by_point_camera[i][0]), j)
         var e0 = o.u - by_point_pixels[i, 0][0]
         var e1 = o.v - by_point_pixels[i, 1][0]
@@ -353,6 +404,12 @@ def point_linearize_kernel[Model: CameraModel](
             grad[a] -= o.point[a] * e0 + o.point[3 + a] * e1
             comptime for b in range(a, 3):
                 hess[tri_index[3](a, b)] += o.point[a] * o.point[b] + o.point[3 + a] * o.point[3 + b]
+    comptime for a in range(3):
+        grad[a] = warp.sum(grad[a])
+    comptime for t in range(tri(3)):
+        hess[t] = warp.sum(hess[t])
+    if lane_id() != 0:
+        return
     var h = Int(point_h) + tri(3) * ((v - Int(point_v)) // 3)
     comptime for a in range(3):
         g[v + a] = grad[a]
@@ -405,12 +462,12 @@ def block_times[D: Int](j: Array[Float32, 2 * D], x: VecIn, v: Int) -> Tuple[Flo
 
 
 @always_inline
-def add_block_transpose[D: Int](j: Array[Float32, 2 * D], u0: Float32, u1: Float32, dst: F32Ptr, key: Int):
+def add_block_transpose[D: Int](j: Array[Float32, 2 * D], u0: Float32, u1: Float32, dst: F32Ptr, key: Int, mut running: Running):
     """dst[key:key+D] += J^T u for one 2xD block; key -1 adds nothing. Every lane must call it."""
     var values = Array[Float32, D](fill=0.0)
     comptime for i in range(D):
         values[i] = j[i] * u0 + j[D + i] * u1
-    scatter_values[D](dst, key, values)
+    scatter_values[D](dst, key, values, running)
 
 
 comptime GATHER_NEGATE = 0
@@ -439,21 +496,21 @@ def point_gather_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG:
     point_h: Int32,
     lam: Float32,
 ):
-    """One thread per point gathers its observations (point-sorted copies of frame and camera): H_pc x_cam summed
-    in registers, then the damped 3x3 point solve. No atomics: the camera-sorted order scatters a point's terms."""
+    """One warp per point gathers its observations (point-sorted copies of frame and camera): H_pc x_cam summed
+    over the lanes, then the damped 3x3 point solve. No atomics: the camera-sorted order scatters a point's terms."""
     comptime assert point_off.flat_rank == 1 and point_start.flat_rank == 1 and pose_off.flat_rank == 1
     comptime assert by_point_frame.flat_rank == 1 and by_point_camera.flat_rank == 1
     comptime assert rig_off.flat_rank == 1 and calib_off.flat_rank == 1
     comptime assert g.flat_rank == 1 and dst.flat_rank == 1
     comptime K = Model.NUM_CALIB
-    var j = global_idx.x
+    var j = global_idx.x // WARP_SIZE
     if j >= Int(point_off.dim[0]()):
         return
     var v = Int(point_off[j][0])
     if v < 0:
         return
     var w = Array[Float32, 3](fill=0.0)
-    for i in range(Int(point_start[j][0]), Int(point_start[j + 1][0])):
+    for i in range(Int(point_start[j][0]) + lane_id(), Int(point_start[j + 1][0]), WARP_SIZE):
         var frame = Int(by_point_frame[i][0])
         var camera = Int(by_point_camera[i][0])
         var o = project_observation[Model](poses, rigs, intrinsics, points, frame, camera, j)
@@ -478,6 +535,10 @@ def point_gather_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG:
                 u1 += uc[1]
         comptime for k in range(3):
             w[k] += o.point[k] * u0 + o.point[3 + k] * u1
+    comptime for k in range(3):
+        w[k] = warp.sum(w[k])
+    if lane_id() != 0:
+        return
     var rhs = Array[Float32, 3](fill=0.0)
     comptime for k in range(3):
         comptime if MODE == GATHER_NEGATE:
@@ -504,6 +565,7 @@ def cross_points_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG:
     x_cam: VecIn,
     x_point: VecIn,
     dst: F32Ptr,
+    tiles: Int32,
 ):
     """Camera side of the Schur products at the linearisation state: dst_cam += H_cp x_point and, with
     `CAMERA_TERMS`, the cross camera-camera terms of H_cc x_cam (pose-rig-calib of one observation; the in-block
@@ -514,43 +576,46 @@ def cross_points_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG:
     comptime K = Model.NUM_CALIB
     comptime CROSS = CAMERA_TERMS and (REFINE_RIG or REFINE_INTRINSICS)
     var n_obs = Int(obs_frame.dim[0]())
-    var valid = global_idx.x < n_obs
-    var n = min(global_idx.x, n_obs - 1)
-    var frame = Int(obs_frame[n][0])
-    var camera = Int(obs_camera[n][0])
-    var point = Int(obs_point[n][0])
-    var o = project_observation[Model](poses, rigs, intrinsics, points, frame, camera, point)
-    var pto = Int(point_off[point][0]) if valid else -1
-    var u = (Float32(0.0), Float32(0.0))
-    if pto >= 0:
-        u = block_times[3](o.point, x_point, pto)
-    var po = Int(pose_off[frame][0]) if valid else -1
-    var ro = -1
-    var co = -1
-    comptime if REFINE_RIG:
-        ro = Int(rig_off[camera][0]) if valid else -1
-    comptime if REFINE_INTRINSICS:
-        co = Int(calib_off[camera][0]) if valid else -1
-    var up = (Float32(0.0), Float32(0.0))
-    var ur = (Float32(0.0), Float32(0.0))
-    var uc = (Float32(0.0), Float32(0.0))
-    comptime if CROSS:
-        if po >= 0:
-            up = block_times[6](o.pose, x_cam, po)
-        if ro >= 0:
-            ur = block_times[6](o.rig, x_cam, ro)
-        if co >= 0:
-            uc = block_times[K](o.calib, x_cam, co)
-    var u0 = u[0] + up[0] + ur[0] + uc[0]
-    var u1 = u[1] + up[1] + ur[1] + uc[1]
-    # Without camera terms a fixed point adds nothing: its lanes join the warp sums with key -1.
-    comptime if not CROSS:
-        if pto < 0:
-            po = -1
-            ro = -1
-            co = -1
-    add_block_transpose[6](o.pose, u0 - up[0], u1 - up[1], dst, po)
-    comptime if REFINE_RIG:
-        add_block_transpose[6](o.rig, u0 - ur[0], u1 - ur[1], dst, ro)
-    comptime if REFINE_INTRINSICS:
-        add_block_transpose[K](o.calib, u0 - uc[0], u1 - uc[1], dst, co)
+    var first = block_idx.x * Int(tiles)
+    var pose_sum = Running.empty()
+    var rig_sum = Running.empty()
+    var calib_sum = Running.empty()
+    for tile in range(first, min(first + Int(tiles), ceildiv(n_obs, BLOCK))):
+        var valid = tile * BLOCK + thread_idx.x < n_obs
+        var n = min(tile * BLOCK + thread_idx.x, n_obs - 1)
+        var frame = Int(obs_frame[n][0])
+        var camera = Int(obs_camera[n][0])
+        var point = Int(obs_point[n][0])
+        var o = project_observation[Model](poses, rigs, intrinsics, points, frame, camera, point)
+        var pto = Int(point_off[point][0]) if valid else -1
+        var u = (Float32(0.0), Float32(0.0))
+        if pto >= 0:
+            u = block_times[3](o.point, x_point, pto)
+        var po = Int(pose_off[frame][0]) if valid else -1
+        var ro = -1
+        var co = -1
+        comptime if REFINE_RIG:
+            ro = Int(rig_off[camera][0]) if valid else -1
+        comptime if REFINE_INTRINSICS:
+            co = Int(calib_off[camera][0]) if valid else -1
+        var up = (Float32(0.0), Float32(0.0))
+        var ur = (Float32(0.0), Float32(0.0))
+        var uc = (Float32(0.0), Float32(0.0))
+        comptime if CROSS:
+            if po >= 0:
+                up = block_times[6](o.pose, x_cam, po)
+            if ro >= 0:
+                ur = block_times[6](o.rig, x_cam, ro)
+            if co >= 0:
+                uc = block_times[K](o.calib, x_cam, co)
+        var u0 = u[0] + up[0] + ur[0] + uc[0]
+        var u1 = u[1] + up[1] + ur[1] + uc[1]
+        # The block sums need no fixed-point masking: such a point's u is zero.
+        add_block_transpose[6](o.pose, u0 - up[0], u1 - up[1], dst, po, pose_sum)
+        comptime if REFINE_RIG:
+            add_block_transpose[6](o.rig, u0 - ur[0], u1 - ur[1], dst, ro, rig_sum)
+        comptime if REFINE_INTRINSICS:
+            add_block_transpose[K](o.calib, u0 - uc[0], u1 - uc[1], dst, co, calib_sum)
+    pose_sum.flush[6](dst)
+    rig_sum.flush[6](dst)
+    calib_sum.flush[K](dst)

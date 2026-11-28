@@ -9,7 +9,8 @@ from std.math import ceildiv, isfinite
 from std.os import getenv
 from std.time import perf_counter_ns
 
-from max.gpu.host import DeviceBuffer, DeviceContext
+from max.gpu import WARP_SIZE
+from max.gpu.host import DeviceAttribute, DeviceBuffer, DeviceContext
 from layout import TileTensor, row_major
 
 from camera_models import CameraModel, FullOpenCV, MAX_PARAMS, OpenCVFisheye, Pinhole, SimpleRadial
@@ -43,6 +44,9 @@ comptime SLOT_COST_LINEARIZE = 0
 comptime SLOT_COST_TRIAL = 1
 comptime SLOT_PRED = 2
 comptime SLOT_PCG = 4
+
+comptime BLOCKS_PER_SM = 4
+"""Resident blocks per SM the tiled observation kernels aim for; each block then walks consecutive tiles."""
 
 comptime EXIT_MAX_ITERATIONS = 0
 comptime EXIT_CONVERGED_DIAG_EXIT = 1
@@ -215,13 +219,42 @@ def _download(ctx: DeviceContext, dst: F32HostOut, src: DeviceBuffer[DType.float
         ctx.enqueue_copy(dst, src.create_sub_buffer[DType.float32](0, n))
 
 
-def _tick(ctx: DeviceContext, prof: Bool, mut times: List[Int], idx: Int, mut last: List[Int]) raises:
-    if not prof:
-        return
-    ctx.synchronize()
-    var now = perf_counter_ns()
-    times[idx] += now - last[0]
-    last[0] = now
+struct KernelClock(Movable):
+    """With CASPAR_MOJO_PROF=1, a sync after every kernel and its time charged to its name, printed at the end.
+    The syncs serialise the stream, so a profiled solve is never a timed one."""
+
+    var on: Bool
+    var names: List[StaticString]
+    var nanos: List[Int]
+    var last: Int
+
+    def __init__(out self):
+        self.on = getenv("CASPAR_MOJO_PROF") == "1"
+        self.names = List[StaticString]()
+        self.nanos = List[Int]()
+        self.last = perf_counter_ns()
+
+    def tick(mut self, ctx: DeviceContext, name: StaticString) raises:
+        if not self.on:
+            return
+        ctx.synchronize()
+        var now = perf_counter_ns()
+        for i in range(len(self.names)):
+            if self.names[i] == name:
+                self.nanos[i] += now - self.last
+                self.last = now
+                return
+        self.names.append(name)
+        self.nanos.append(now - self.last)
+        self.last = now
+
+    def report(self):
+        if not self.on:
+            return
+        var line = String("CASPAR_MOJO_PROF")
+        for i in range(len(self.names)):
+            line.write(" ", self.names[i], "=", self.nanos[i] // 1000, "us")
+        print(line)
 
 
 def _usable(x: Float64) -> Bool:
@@ -332,15 +365,16 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
 
     # Kernel launches only; memsets and device copies are not counted.
     var launches = 0
-    var prof = getenv("CASPAR_MOJO_PROF") == "1"
-    var prof_times = List[Int](length=16, fill=0)
-    var prof_last = List[Int](length=1, fill=0)
+    var clock = KernelClock()
     var obs_grid = _grid(no)
+    var n_tiles = ceildiv(no, BLOCK)
+    var tiles = max(ceildiv(n_tiles, BLOCKS_PER_SM * ctx.device().get_attribute(DeviceAttribute.MULTIPROCESSOR_COUNT)), 1)
+    var tile_grid = max(ceildiv(n_tiles, tiles), 1)
     var cam_blocks = lay.n6 + lay.n_calib
 
     ctx.synchronize()
     var t0 = perf_counter_ns()
-    prof_last[0] = perf_counter_ns()
+    clock.last = perf_counter_ns()
 
     # Linearise at the current state: g = -J^T e, the block diagonal, the J cache, the cost into its slot.
     ctx.enqueue_memset(d_g, 0.0)
@@ -350,16 +384,17 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
         TileTensor(d_poses, row_major((nf, 7))).as_imm(), TileTensor(d_rigs, row_major((nc, 7))).as_imm(),
         TileTensor(d_intr, row_major((nc, MAX_PARAMS))).as_imm(), TileTensor(d_points, row_major((np, 3))).as_imm(),
         t_pose_off, t_rig_off, t_calib_off, t_point_off, obs_frame, obs_camera, obs_point, pixels,
-        d_g.unsafe_ptr(), d_h.unsafe_ptr(), scalars, Int32(SLOT_COST_LINEARIZE), n6, ncal,
-        grid_dim=obs_grid, block_dim=BLOCK,
+        d_g.unsafe_ptr(), d_h.unsafe_ptr(), scalars, Int32(SLOT_COST_LINEARIZE), n6, ncal, Int32(tiles),
+        grid_dim=tile_grid, block_dim=BLOCK,
     )
+    clock.tick(ctx, "linearize")
     ctx.enqueue_function[point_linearize](
         TileTensor(d_poses, row_major((nf, 7))).as_imm(), TileTensor(d_rigs, row_major((nc, 7))).as_imm(),
         TileTensor(d_intr, row_major((nc, MAX_PARAMS))).as_imm(), TileTensor(d_points, row_major((np, 3))).as_imm(),
         t_point_off, point_start, by_point_frame, by_point_camera, by_point_pixels, g, TileTensor(d_h, row_major((max(lay.n_h, 1),))),
-        point_v, point_h, grid_dim=_grid(np), block_dim=BLOCK,
+        point_v, point_h, grid_dim=_grid(np * WARP_SIZE), block_dim=BLOCK,
     )
-    _tick(ctx, prof, prof_times, 0, prof_last)
+    clock.tick(ctx, "point_linearize")
     launches += 2
     ctx.enqueue_copy(host2, d_scalars.create_sub_buffer[DType.float64](SLOT_COST_LINEARIZE, 2))
     ctx.synchronize()
@@ -390,16 +425,17 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
                 TileTensor(d_poses, row_major((nf, 7))).as_imm(), TileTensor(d_rigs, row_major((nc, 7))).as_imm(),
                 TileTensor(d_intr, row_major((nc, MAX_PARAMS))).as_imm(), TileTensor(d_points, row_major((np, 3))).as_imm(),
                 t_pose_off, t_rig_off, t_calib_off, t_point_off, obs_frame, obs_camera, obs_point, pixels,
-                d_g.unsafe_ptr(), d_h.unsafe_ptr(), scalars, Int32(SLOT_COST_LINEARIZE), n6, ncal,
-                grid_dim=obs_grid, block_dim=BLOCK,
+                d_g.unsafe_ptr(), d_h.unsafe_ptr(), scalars, Int32(SLOT_COST_LINEARIZE), n6, ncal, Int32(tiles),
+                grid_dim=tile_grid, block_dim=BLOCK,
             )
+            clock.tick(ctx, "linearize")
             ctx.enqueue_function[point_linearize](
                 TileTensor(d_poses, row_major((nf, 7))).as_imm(), TileTensor(d_rigs, row_major((nc, 7))).as_imm(),
                 TileTensor(d_intr, row_major((nc, MAX_PARAMS))).as_imm(), TileTensor(d_points, row_major((np, 3))).as_imm(),
                 t_point_off, point_start, by_point_frame, by_point_camera, by_point_pixels, g, TileTensor(d_h, row_major((max(lay.n_h, 1),))),
-                point_v, point_h, grid_dim=_grid(np), block_dim=BLOCK,
+                point_v, point_h, grid_dim=_grid(np * WARP_SIZE), block_dim=BLOCK,
             )
-            _tick(ctx, prof, prof_times, 0, prof_last)
+            clock.tick(ctx, "point_linearize")
             launches += 2
         var lin_poses = TileTensor(t_poses if lin_in_trial else d_poses, row_major((nf, 7))).as_imm()
         var lin_rigs = TileTensor(t_rigs if lin_in_trial else d_rigs, row_major((nc, 7))).as_imm()
@@ -411,12 +447,12 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
         ctx.enqueue_function[point_solve_kernel](
             g.as_imm(), z, hblk, point_v, point_h, n_free_points, diag, grid_dim=_grid(lay.n_free_points), block_dim=BLOCK
         )
-        _tick(ctx, prof, prof_times, 1, prof_last)
+        clock.tick(ctx, "point_solve")
         ctx.enqueue_function[cross_points](
             lin_poses, lin_rigs, lin_intr, lin_points, t_pose_off, t_rig_off, t_calib_off, t_point_off, obs_frame, obs_camera, obs_point,
-            z.as_imm(), z.as_imm(), d_r.unsafe_ptr(), grid_dim=obs_grid, block_dim=BLOCK,
+            z.as_imm(), z.as_imm(), d_r.unsafe_ptr(), Int32(tiles), grid_dim=tile_grid, block_dim=BLOCK,
         )
-        _tick(ctx, prof, prof_times, 2, prof_last)
+        clock.tick(ctx, "cross_points")
         launches += 2
 
         var pcg_q: Float64 = 0.0
@@ -430,27 +466,27 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
                 r, z, s, p.as_imm(), w.as_imm(), hblk, n6, ncal, diag, alpha, first, scalars, rho_slot,
                 grid_dim=_grid(cam_blocks), block_dim=BLOCK,
             )
-            _tick(ctx, prof, prof_times, 3, prof_last)
+            clock.tick(ctx, "precond")
             pending = False
             ctx.enqueue_function[pcg_direction_kernel](
                 r.as_imm(), z.as_imm(), p, mp, w, Int32(lay.n_cam), first, scalars, rho_slot, grid_dim=_grid(lay.n_tan), block_dim=BLOCK
             )
-            _tick(ctx, prof, prof_times, 4, prof_last)
+            clock.tick(ctx, "pcg_direction")
             # RcsMatvec: w_cam = M_cc p + H_cc' p - H_cp H_pp^-1 H_pc p (w enters holding M p).
             ctx.enqueue_function[gather_negate](
                 lin_poses, lin_rigs, lin_intr, lin_points, t_pose_off, t_rig_off, t_calib_off, t_point_off, point_start, by_point_frame,
-                by_point_camera, p.as_imm(), g.as_imm(), z, hblk, point_v, point_h, diag, grid_dim=_grid(np), block_dim=BLOCK,
+                by_point_camera, p.as_imm(), g.as_imm(), z, hblk, point_v, point_h, diag, grid_dim=_grid(np * WARP_SIZE), block_dim=BLOCK,
             )
-            _tick(ctx, prof, prof_times, 5, prof_last)
+            clock.tick(ctx, "point_gather")
             ctx.enqueue_function[cross_all](
                 lin_poses, lin_rigs, lin_intr, lin_points, t_pose_off, t_rig_off, t_calib_off, t_point_off, obs_frame, obs_camera, obs_point,
-                p.as_imm(), z.as_imm(), d_w.unsafe_ptr(), grid_dim=obs_grid, block_dim=BLOCK,
+                p.as_imm(), z.as_imm(), d_w.unsafe_ptr(), Int32(tiles), grid_dim=tile_grid, block_dim=BLOCK,
             )
-            _tick(ctx, prof, prof_times, 2, prof_last)
+            clock.tick(ctx, "cross_points")
             ctx.enqueue_function[dot_kernel](
                 p.as_imm(), w.as_imm(), Int32(lay.n_cam), scalars, rho_slot + 1, grid_dim=_grid(lay.n_cam), block_dim=BLOCK
             )
-            _tick(ctx, prof, prof_times, 6, prof_last)
+            clock.tick(ctx, "dot")
             launches += 5
             ctx.enqueue_copy(host2, d_scalars.create_sub_buffer[DType.float64](Int(rho_slot), 2))
             ctx.synchronize()
@@ -468,15 +504,15 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
         pcg_total += k
         if pending:
             ctx.enqueue_function[axpy_kernel](s, p.as_imm(), alpha, Int32(lay.n_cam), grid_dim=_grid(lay.n_cam), block_dim=BLOCK)
-            _tick(ctx, prof, prof_times, 7, prof_last)
+            clock.tick(ctx, "axpy")
             launches += 1
         # RcsBackSubstitute: s_p = H_pp^-1 (g_p - H_pc s_cam), reading s_cam from a copy (w is free now).
         ctx.enqueue_copy(dst_buf=d_w, src_buf=d_s)
         ctx.enqueue_function[gather_backsubstitute](
             lin_poses, lin_rigs, lin_intr, lin_points, t_pose_off, t_rig_off, t_calib_off, t_point_off, point_start, by_point_frame,
-            by_point_camera, w.as_imm(), g.as_imm(), s, hblk, point_v, point_h, diag, grid_dim=_grid(np), block_dim=BLOCK,
+            by_point_camera, w.as_imm(), g.as_imm(), s, hblk, point_v, point_h, diag, grid_dim=_grid(np * WARP_SIZE), block_dim=BLOCK,
         )
-        _tick(ctx, prof, prof_times, 8, prof_last)
+        clock.tick(ctx, "point_backsubstitute")
         # Retract into the trial state (with s.(g + lambda D s) fused), then score it.
         ctx.enqueue_function[retract](
             TileTensor(d_poses, row_major((nf, 7))).as_imm(), TileTensor(d_rigs, row_major((nc, 7))).as_imm(),
@@ -486,14 +522,14 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
             t_pose_off, t_rig_off, t_calib_off, t_point_off, s.as_imm(), g.as_imm(), hblk, n6, ncal, diag, scalars, Int32(SLOT_PRED),
             grid_dim=_grid(nf + nc + np), block_dim=BLOCK,
         )
-        _tick(ctx, prof, prof_times, 9, prof_last)
+        clock.tick(ctx, "retract")
         ctx.enqueue_function[score](
             TileTensor(t_poses, row_major((nf, 7))).as_imm(), TileTensor(t_rigs, row_major((nc, 7))).as_imm(),
             TileTensor(t_intr, row_major((nc, MAX_PARAMS))).as_imm(), TileTensor(t_points, row_major((np, 3))).as_imm(),
             obs_frame, obs_camera, obs_point, pixels, scalars, Int32(SLOT_COST_TRIAL),
             grid_dim=obs_grid, block_dim=BLOCK,
         )
-        _tick(ctx, prof, prof_times, 10, prof_last)
+        clock.tick(ctx, "score")
         launches += 3
         ctx.enqueue_copy(host2, d_scalars.create_sub_buffer[DType.float64](SLOT_COST_TRIAL, 2))
         ctx.synchronize()
@@ -526,8 +562,7 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
             break
     ctx.synchronize()
     var solve_seconds = Float64(perf_counter_ns() - t0) * 1e-9
-    if prof:
-        print(t"linearize={prof_times[0] // 1000}us point_solve={prof_times[1] // 1000}us cross_points={prof_times[2] // 1000}us precond={prof_times[3] // 1000}us pcg_direction_kernel={prof_times[4] // 1000}us point_gather={prof_times[5] // 1000}us dot_kernel={prof_times[6] // 1000}us axpy_kernel={prof_times[7] // 1000}us point_backsubstitute={prof_times[8] // 1000}us retract={prof_times[9] // 1000}us score={prof_times[10] // 1000}us")
+    clock.report()
     _download(ctx, result.intrinsics, d_intr, nc * MAX_PARAMS)
     _download(ctx, result.sensor_from_rig, d_rigs, nc * 7)
     _download(ctx, result.rig_from_world, d_poses, nf * 7)
