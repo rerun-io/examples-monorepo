@@ -14,6 +14,7 @@ from layout import TileTensor, row_major
 
 from camera_models import CameraModel, MAX_PARAMS
 from factor_kernels import (
+    BLOCK,
     cross_cameras_kernel,
     cross_points_kernel,
     jac_width,
@@ -32,7 +33,6 @@ from node_kernels import (
     retract_kernel,
 )
 
-comptime BLOCK = 256
 comptime F32HostIn = ImmPointer[Float32, ImmUntrackedOrigin]
 comptime I32HostIn = ImmPointer[Int32, ImmUntrackedOrigin]
 comptime U8HostIn = ImmPointer[UInt8, ImmUntrackedOrigin]

@@ -10,7 +10,10 @@ Scatter-adds into the gradient, the block diagonal and the products use relaxed 
 """
 
 from std.atomic import Atomic, Ordering
-from max.gpu import global_idx, lane_id
+from max.gpu import WARP_SIZE, global_idx, lane_id, thread_idx
+from max.gpu.memory import AddressSpace
+from max.gpu.sync import barrier
+from std.memory import stack_allocation
 from max.gpu.primitives import warp
 
 from layout import ImmTileTensor, MutTileTensor, row_major
@@ -63,6 +66,55 @@ def warp_uniform(key: Int) -> Bool:
     warp usually shares its pose (and its camera); one atomic per warp then replaces 32 on one address."""
     var k = Int32(key)
     return warp.min(k) == warp.max(k)
+
+
+comptime BLOCK = 256
+"""Threads per block of every per-observation kernel (the block reductions below assume it)."""
+comptime WARPS = BLOCK // WARP_SIZE
+comptime NOT_UNIFORM: Int32 = -2
+
+
+@always_inline
+def block_uniform(key: Int) -> Bool:
+    """Whether every thread of the block holds the same key. Block-uniform; every thread must call it."""
+    var keys = stack_allocation[WARPS, Int32, address_space=AddressSpace.SHARED]()
+    var k = Int32(key)
+    var same = warp.min(k) == warp.max(k)
+    if lane_id() == 0:
+        keys[unsafe_offset=thread_idx.x // WARP_SIZE] = k if same else NOT_UNIFORM
+    barrier()
+    var first = keys[unsafe_offset=0]
+    var uniform = first != NOT_UNIFORM
+    comptime for w in range(1, WARPS):
+        uniform = uniform and keys[unsafe_offset=w] == first
+    barrier()
+    return uniform
+
+
+@always_inline
+def scatter_values[D: Int](dst: F32Ptr, key: Int, values: Array[Float32, D]):
+    """dst[key:key+D] += values summed over the block when the block shares `key`, else over each warp that
+    shares it, else per thread. One device atomic per block replaces 256 on one address: observations come
+    sorted by camera then image, so a block nearly always shares its pose. Every thread must call it."""
+    if block_uniform(key):
+        var sums = stack_allocation[WARPS * D, Float32, address_space=AddressSpace.SHARED]()
+        var warp_index = thread_idx.x // WARP_SIZE
+        comptime for i in range(D):
+            var total = warp.sum(values[i])
+            if lane_id() == 0:
+                sums[unsafe_offset=warp_index * D + i] = total
+        barrier()
+        var t = thread_idx.x
+        if t < D and key >= 0:
+            var total: Float32 = 0.0
+            comptime for w in range(WARPS):
+                total += sums[unsafe_offset=w * D + t]
+            atomic_add(dst, key + t, total)
+        barrier()
+        return
+    var uniform = warp_uniform(key)
+    comptime for i in range(D):
+        scatter_add(dst, key + i, values[i], uniform, key >= 0)
 
 
 @always_inline
@@ -145,12 +197,14 @@ def accumulate_block[D: Int](
         comptime for i in range(2 * D):
             jac[col + i, n] = j[i]
     var key = v if valid else -1
-    var uniform = warp_uniform(key)
-    var active = key >= 0
+    var grad = Array[Float32, D](fill=0.0)
+    var hess = Array[Float32, tri(D)](fill=0.0)
     comptime for i in range(D):
-        scatter_add(g, v + i, -(j[i] * e0 + j[D + i] * e1), uniform, active)
+        grad[i] = -(j[i] * e0 + j[D + i] * e1)
         comptime for k in range(i, D):
-            scatter_add(hblk, h + tri_index[D](i, k), j[i] * j[k] + j[D + i] * j[D + k], uniform, active)
+            hess[tri_index[D](i, k)] = j[i] * j[k] + j[D + i] * j[D + k]
+    scatter_values[D](g, key, grad)
+    scatter_values[tri(D)](hblk, h if key >= 0 else -1, hess)
 
 
 @always_inline
@@ -290,9 +344,10 @@ def block_times[D: Int](jac: JacIn, n: Int, col: Int, x: VecIn, v: Int) -> Tuple
 def add_block_transpose[D: Int](jac: JacIn, n: Int, col: Int, u0: Float32, u1: Float32, dst: F32Ptr, key: Int):
     """dst[key:key+D] += J^T u for one 2xD block; key -1 adds nothing. Every lane must call it."""
     comptime assert jac.flat_rank == 2
-    var uniform = warp_uniform(key)
+    var values = Array[Float32, D](fill=0.0)
     comptime for i in range(D):
-        scatter_add(dst, key + i, jac[col + i, n][0] * u0 + jac[col + D + i, n][0] * u1, uniform, key >= 0)
+        values[i] = jac[col + i, n][0] * u0 + jac[col + D + i, n][0] * u1
+    scatter_values[D](dst, key, values)
 
 
 def cross_cameras_kernel[K: Int, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
