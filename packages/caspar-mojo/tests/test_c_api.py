@@ -9,9 +9,9 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from caspar_mojo.reference.synthetic import make_problem
 
 from caspar_mojo.problem import BaOptions, CameraModel
+from caspar_mojo.reference.synthetic import make_problem
 
 pytestmark = pytest.mark.integration
 
