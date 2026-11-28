@@ -290,6 +290,20 @@ def _verify_gvhmr_decode(clip: CanonicalClip, working_video: Path, reader_factor
             close()
 
 
+def preload_gvhmr(gvhmr_root: str | Path) -> None:
+    """Import what ``run_gvhmr`` imports (torch, Hydra, Lightning, GVHMR, ultralytics) ahead of the request."""
+
+    root, _ = validate_gvhmr(gvhmr_root)
+    with gvhmr_imports(root), _legacy_checkpoint_loading():
+        install_pytorch3d_compat()
+        import hydra  # noqa: F401
+        import torch  # noqa: F401
+        from hmr4d.model.gvhmr.gvhmr_pl_demo import DemoPL  # noqa: F401
+
+        _register_inference_store()
+        from hmr4d.utils.preproc import tracker, vitfeat_extractor, vitpose  # noqa: F401
+
+
 def run_gvhmr(
     *,
     clip: CanonicalClip,
