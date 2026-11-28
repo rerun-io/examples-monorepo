@@ -31,6 +31,7 @@ from jaxtyping import Float16, Float32, Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
 from simplecv.catalog_layers import atomic_recording, ensure_dataset, register_layer
+from simplecv.run_record import RunStart, write_run_record
 from torch import Tensor
 
 from open4dgs.catalog_clip import FRAME_TIMELINE, RESAMPLE_CHUNK, MultiViewClip, resample_images, roi_grid, undistortion_grid
@@ -213,8 +214,10 @@ def write_mask_layer(
     frame_indices: Int64[ndarray, " t"],
     mattes: Sequence[UInt8[Tensor, "t h w"]],
     properties: MatteLayerProperties,
+    run: RunStart | None = None,
 ) -> None:
-    """Write the ``people_matte`` layer recording (recording id = ``segment_id``) with one grayscale PNG per camera and frame."""
+    """Write the ``people_matte`` layer recording (recording id = ``segment_id``) with one grayscale PNG per camera and frame,
+    and with ``run``, the record of that run as the layer's (``simplecv.run_record``)."""
     with atomic_recording(path, application_id="open4dgs-masks", recording_id=segment_id, send_properties=False) as rec:
         rec.send_property(MATTE_LAYER, any_values(properties.to_properties()))
         for camera, matte in zip(camera_names, mattes, strict=True):
@@ -230,6 +233,8 @@ def write_mask_layer(
                 indexes=[rr.TimeColumn(FRAME_TIMELINE, sequence=frame_indices)],
                 columns=rr.EncodedImage.columns(blob=blobs, media_type=["image/png"] * len(blobs)),
             )
+        if run is not None:
+            write_run_record(rec, run.finish(MATTE_LAYER, segment_id))
 
 
 def register_mask_layer(catalog_url: str, dataset: str, path: Path) -> None:

@@ -16,6 +16,7 @@ from jaxtyping import Float32, UInt8
 from numpy import ndarray
 from rerun.catalog import CatalogClient
 from simplecv.catalog_rig_layout import catalog_components, parse_rig_layout
+from simplecv.run_record import RunStart, start_run
 from torch import Tensor
 
 from open4dgs.catalog_clip import LOCAL_CATALOG, MultiViewClip, companion_location, read_catalog_clip
@@ -60,6 +61,7 @@ class Config:
 
 
 def main(config: Config) -> None:
+    run: RunStart = start_run(config, source=Path(__file__))
     target: str = config.register_dataset or companion_location(config.catalog_url, config.dataset, config.register_url)[1]
     entry = CatalogClient(config.catalog_url).get_dataset(config.dataset)
     cameras: list[str] = config.cameras or [
@@ -100,6 +102,7 @@ def main(config: Config) -> None:
             source_segment=config.segment_id,
             crop=f"smplx box pad {config.pad_fraction} + {config.pad_px} px",
         ),
+        run=run,
     )
     path.parent.chmod(0o775)
     print(f"wrote {path} ({path.stat().st_size / 1e6:.1f} MB)")
