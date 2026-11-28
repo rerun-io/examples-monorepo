@@ -70,9 +70,12 @@ pytorch-cpu = "*"
 torchvision = "*"
 
 [feature.common.pypi-dependencies]
-# pin-bump: hold — gradio-rerun pins rerun-sdk exactly, so it moves only together with the rerun-sdk pins; the conda
-# rerun-sdk and gradio in [feature.common.dependencies] satisfy it through pixi's conda->PyPI mapping.
-gradio-rerun = "==0.44.0"  # pin-bump: hold
+# pin-bump: hold — gradio-rerun with the canonical web viewer embedded (every viewer extension; packages/canonical-viewer):
+# a wheel of recipes/gradio-rerun-src, published with the rerun-canonical release. It pins rerun-sdk exactly, so it moves
+# only together with the rerun-sdk pins; the conda rerun-sdk and gradio in [feature.common.dependencies] satisfy it
+# through pixi's conda->PyPI mapping. A wheel, not ai-demos' conda gradio-rerun-canonical: replacing the PyPI wheel
+# with a conda package of the same files makes pixi delete those files in existing envs.
+gradio-rerun = { url = "https://github.com/pablovela5620/ai-demos/releases/download/rerun-canonical-0.44.0-a61ddc2/gradio_rerun-0.44.0-py3-none-any.whl" }  # pin-bump: hold
 datafusion = "==54.0.0"  # rerun-sdk[catalog]; on PyPI, as its conda build pins libprotobuf against the opencv/ffmpeg stack
 simplecv = { path = "packages/simplecv", editable = true }
 
