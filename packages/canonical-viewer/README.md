@@ -77,6 +77,7 @@ Applied in order by `tools/prepare_rerun.py` (`RERUN_PATCHES`) to the Rerun tag'
 | Patch | What | Drop when |
 |---|---|---|
 | `re_viewer-0.44.0-extension-hooks.patch` | the device and `App::new` hooks (native, headless, web), the declared-fallback hook, and a public `wgpu_options()` for `viewer-probe` | upstream has extension hooks (Pablo wants no upstream PRs, issues or proposal drafts) |
+| `re_renderer-0.44.0-remapped-shader-path.patch` | embedded shaders resolve when the compiler remaps a dependency's root to `/proc/self/cwd` in `file!()` (kache does this for crates outside the workspace; the web build crashed on its first shader) | Rerun's `include_file!` strips a remapped root |
 | `rerun-0.44.0-av1-arm64.patch` | native AV1 decoding on Linux arm64 (rerun-io/rerun#7755): `re_rav1d` 0.1.4 from a pinned git revision, whose arm64 assembly tables are hidden (the workspace's `[patch.crates-io]` gives depth-video-viewer the same `re_rav1d`) | a Rerun release fixes #7755 and `re_rav1d` 0.1.4 is on crates.io |
 | `rerun-0.44.0-proxy-slow-reader.patch` | the live proxy (`--serve-grpc`, and every viewer's own proxy) no longer lets one stalled reader block the logger and every other viewer: after one second of backpressure the sender overflows instead of waiting; 199 lines, over the 100-line rule, kept by Pablo's decision (design question 8). Limits below | upstream stops blocking on a stalled broadcast receiver |
 
@@ -127,5 +128,7 @@ applies; raise `build.number` for every extension or patch change at the same ta
   patch names the release or crate version it applies to.
 - `tests/test_build_web.py`: the npm module factory and its `deinit`.
 - `tests/test_rerun_canonical.py` (integration): `--version` is the SDK's release; `mcp`, `rrd` and `--help` exist.
+- `tests/test_shader_paths.py` (integration): the patched `include_file!` finds an embedded shader with and without a
+  crate root remapped to `/proc/self/cwd`.
 - `tests/test_stock_parity.py` (golden): a 2D + 3D recording with no extension data renders pixel-identical in
   `rerun-canonical` and this environment's stock `rerun`.

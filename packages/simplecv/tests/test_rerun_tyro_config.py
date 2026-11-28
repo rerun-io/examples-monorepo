@@ -150,3 +150,13 @@ def test_spawn_prefers_rerun_canonical_on_path(rr_spy: dict[str, list[Any]], tmp
     RerunTyroConfig()
 
     assert rr_spy["spawn"][0]["executable_name"] == ("rerun-canonical" if installed else "rerun")
+
+
+@pytest.mark.parametrize("live", [False, True])
+def test_a_save_under_a_missing_directory_gets_its_directory(rr_spy: dict[str, list[Any]], tmp_path: Path, live: bool) -> None:
+    """Tools build this config while tyro parses their CLI, before they make any output directory (person_to_4d's
+    fdanyone-run failed with "Failed to create file" on a fresh output root)."""
+    save = tmp_path / "fresh" / "runs" / "out.rrd"
+    RerunTyroConfig(save=save, live=live, port=9999)
+
+    assert save.parent.is_dir()
