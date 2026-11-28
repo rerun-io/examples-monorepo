@@ -21,7 +21,7 @@ def _reference_frames(path: Path) -> list[UInt8[ndarray, "h w 3"]]:
 def _noise_video(path: Path, count: int) -> Path:
     generator: np.random.Generator = np.random.default_rng(0)
     frames: list[UInt8[ndarray, "64 96 3"]] = [generator.integers(0, 256, (64, 96, 3), dtype=np.uint8) for _ in range(count)]
-    return write_video(frames, path, Fraction(30), crf=18, preset="medium")
+    return write_video(tuple(frames), path, Fraction(30), crf=18, preset="medium")
 
 
 def test_iter_rgb_video_matches_a_single_threaded_decode(tmp_path: Path) -> None:
