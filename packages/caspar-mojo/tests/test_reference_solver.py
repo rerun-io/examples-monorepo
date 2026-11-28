@@ -108,6 +108,7 @@ def test_reaches_noise_floor(model: CameraModel, flags: dict) -> None:
     assert result.final_cost < 0.05 * result.initial_cost
     costs = [record.cost_best for record in trace]
     assert all(b <= a for a, b in zip(costs, costs[1:], strict=False))
+    assert all(record.cost_tried == record.cost_best for record in trace if record.accepted)
     rms = np.sqrt(2 * result.final_cost / (2 * len(problem.pixels)))
     assert rms == pytest.approx(_rms_floor(problem, 0.5), rel=0.05)
 
