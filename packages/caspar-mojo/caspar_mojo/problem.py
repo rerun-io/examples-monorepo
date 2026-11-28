@@ -48,6 +48,14 @@ INTRINSICS_COUNT: Final[dict[CameraModel, int]] = {
 }
 """How many leading columns of an `intrinsics` row each model uses."""
 
+FOCAL_AND_EXTRA_COLUMNS: Final[dict[CameraModel, tuple[int, ...]]] = {
+    CameraModel.PINHOLE: (0, 1),
+    CameraModel.SIMPLE_RADIAL: (0, 3),
+    CameraModel.OPENCV_FISHEYE: (0, 1, 4, 5, 6, 7),
+    CameraModel.FULL_OPENCV: (0, 1, 4, 5, 6, 7, 8, 9, 10, 11),
+}
+"""Columns of an `intrinsics` row that `intrinsics_free` refines (CASPAR's FocalAndExtra node), in tangent order."""
+
 
 @dataclass(frozen=True, slots=True)
 class BaProblem:

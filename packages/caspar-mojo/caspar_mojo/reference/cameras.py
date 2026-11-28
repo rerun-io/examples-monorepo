@@ -12,18 +12,10 @@ import numpy as np
 from jaxtyping import Float, Int64
 from numpy import ndarray
 
-from caspar_mojo.problem import CameraModel
+from caspar_mojo.problem import FOCAL_AND_EXTRA_COLUMNS, CameraModel
 
 EPSILON: float = 1e-6
 """symforce's `sf.epsilon()` in CASPAR's f32 tree; the Mojo solver uses the same value in every precision."""
-
-FOCAL_AND_EXTRA_COLUMNS: dict[CameraModel, tuple[int, ...]] = {
-    CameraModel.PINHOLE: (0, 1),
-    CameraModel.SIMPLE_RADIAL: (0, 3),
-    CameraModel.OPENCV_FISHEYE: (0, 1, 4, 5, 6, 7),
-    CameraModel.FULL_OPENCV: (0, 1, 4, 5, 6, 7, 8, 9, 10, 11),
-}
-"""Columns of a `camera.params` row that form the refinable focal-and-extra block, in CASPAR's tangent order."""
 
 
 class Projection(NamedTuple):

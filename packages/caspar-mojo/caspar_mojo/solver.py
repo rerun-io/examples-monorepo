@@ -1,32 +1,48 @@
 """The Python door to the Mojo solver: one extension call per solve.
 
-The host arrays go in as contiguous float32 / int32 / uint8 copies, passed to `_caspar_mojo` as
-`(address, *shape)` tuples; the extension copies them to the GPU, runs CASPAR's LM + reduced-camera-system PCG
-there and writes the accepted state back. Quaternions are normalised here, at write-back, as COLMAP's adapter does.
+The door checks what the native side trusts and per-array annotations cannot express (lengths that must agree,
+indices in range), then hands `_caspar_mojo` a `_Packet`: the problem by name, as C-contiguous float32 / int32 /
+0-or-1 uint8 arrays. The extension takes each array's address by name, copies it to the GPU, runs CASPAR's LM +
+reduced-camera-system PCG there and writes the accepted state, row-major, into a `_State`. Only refined values come
+back through float32: fixed rows, and the principal point of a refined camera, stay the caller's float64. Quaternions
+of refined poses are normalised here, as COLMAP's adapter does at write-back.
 """
 
 import time
-from typing import Final, NamedTuple
+from dataclasses import dataclass
+from typing import Final, NamedTuple, TypedDict
 
 import numpy as np
-from jaxtyping import Float32, Float64
+from jaxtyping import Bool, Float32, Float64, Int32, UInt8
 from numpy import ndarray
 
-from caspar_mojo.problem import INTRINSICS_COUNT, BaIteration, BaOptions, BaProblem, BaResult, CameraModel
+from caspar_mojo.problem import FOCAL_AND_EXTRA_COLUMNS, MAX_INTRINSICS, BaIteration, BaOptions, BaProblem, BaResult, CameraModel
 
 EXIT_REASONS: Final[tuple[str, ...]] = ("MAX_ITERATIONS", "CONVERGED_DIAG_EXIT", "CONVERGED_SCORE_THRESHOLD")
 """CASPAR's `ExitReason` names, indexed by the extension's exit code."""
 
-CALIB_SIZE: Final[dict[CameraModel, int]] = {
-    CameraModel.PINHOLE: 2,
-    CameraModel.SIMPLE_RADIAL: 2,
-    CameraModel.OPENCV_FISHEYE: 6,
-    CameraModel.FULL_OPENCV: 10,
-}
-"""Focal-and-extra parameters per model: the width of a refined intrinsics block."""
-
 DEFAULT_OPTIONS: Final[BaOptions] = BaOptions()
 """colsfm's CASPAR settings (frozen, shared)."""
+
+SHAPES: Final[dict[str, tuple[str, ...]]] = {
+    "intrinsics": ("n_cameras", "12"),
+    "intrinsics_free": ("n_cameras",),
+    "sensor_from_rig": ("n_cameras", "7"),
+    "sensor_free": ("n_cameras",),
+    "rig_from_world": ("n_frames", "7"),
+    "pose_free": ("n_frames",),
+    "points": ("n_points", "3"),
+    "point_free": ("n_points",),
+    "pixels": ("n_observations", "2"),
+    "observation_frame": ("n_observations",),
+    "observation_camera": ("n_observations",),
+    "observation_point": ("n_observations",),
+}
+"""Shape of each `BaProblem` array in named sizes; the sizes come from `camera_model`, `rig_from_world`, `points` and
+`pixels`."""
+
+INDEXED: Final[dict[str, str]] = {"observation_frame": "n_frames", "observation_camera": "n_cameras", "observation_point": "n_points"}
+"""Each observation index array and the size it indexes."""
 
 
 class Linearization(NamedTuple):
@@ -40,9 +56,46 @@ class Linearization(NamedTuple):
     """Dense J^T J blocks per non-empty group, same group order as the gradient."""
 
 
-def _spec(array: ndarray) -> tuple[int, ...]:
-    """`(address, *shape)` of a contiguous numpy array, the extension's array argument."""
-    return (array.ctypes.data, *array.shape)
+class NativeStats(TypedDict):
+    """What `_caspar_mojo.solve` returns."""
+
+    initial_cost: float
+    final_cost: float
+    iterations: int
+    pcg_iterations: int
+    exit_reason: int
+    solve_seconds: float
+    launches: int
+    trace: list[tuple[float, float, float, int, bool]]
+
+
+@dataclass(frozen=True, slots=True)
+class _Packet:
+    """The problem as `_caspar_mojo` reads it, each array by name."""
+
+    camera_model: int
+    intrinsics: Float32[ndarray, "n_cameras 12"]
+    intrinsics_free: UInt8[ndarray, " n_cameras"]
+    sensor_from_rig: Float32[ndarray, "n_cameras 7"]
+    sensor_free: UInt8[ndarray, " n_cameras"]
+    rig_from_world: Float32[ndarray, "n_frames 7"]
+    pose_free: UInt8[ndarray, " n_frames"]
+    points: Float32[ndarray, "n_points 3"]
+    point_free: UInt8[ndarray, " n_points"]
+    pixels: Float32[ndarray, "n_observations 2"]
+    observation_frame: Int32[ndarray, " n_observations"]
+    observation_camera: Int32[ndarray, " n_observations"]
+    observation_point: Int32[ndarray, " n_observations"]
+
+
+@dataclass(frozen=True, slots=True)
+class _State:
+    """The state `_caspar_mojo.solve` writes, by name."""
+
+    intrinsics: Float32[ndarray, "n_cameras 12"]
+    sensor_from_rig: Float32[ndarray, "n_cameras 7"]
+    rig_from_world: Float32[ndarray, "n_frames 7"]
+    points: Float32[ndarray, "n_points 3"]
 
 
 def _model(problem: BaProblem) -> CameraModel:
@@ -52,23 +105,43 @@ def _model(problem: BaProblem) -> CameraModel:
     return CameraModel(models[0])
 
 
-def _inputs(problem: BaProblem) -> tuple[tuple[object, ...], list[ndarray]]:
-    """The extension's input tuple and the arrays it points into (kept alive by the caller)."""
-    arrays: list[ndarray] = [
-        np.ascontiguousarray(problem.intrinsics, dtype=np.float32),
-        np.ascontiguousarray(problem.intrinsics_free, dtype=np.uint8),
-        np.ascontiguousarray(problem.sensor_from_rig, dtype=np.float32),
-        np.ascontiguousarray(problem.sensor_free, dtype=np.uint8),
-        np.ascontiguousarray(problem.rig_from_world, dtype=np.float32),
-        np.ascontiguousarray(problem.pose_free, dtype=np.uint8),
-        np.ascontiguousarray(problem.points, dtype=np.float32),
-        np.ascontiguousarray(problem.point_free, dtype=np.uint8),
-        np.ascontiguousarray(problem.pixels, dtype=np.float32),
-        np.ascontiguousarray(problem.observation_frame, dtype=np.int32),
-        np.ascontiguousarray(problem.observation_camera, dtype=np.int32),
-        np.ascontiguousarray(problem.observation_point, dtype=np.int32),
-    ]
-    return (int(_model(problem)), *(_spec(a) for a in arrays)), arrays
+def _packet(problem: BaProblem) -> _Packet:
+    """The checked problem in the native layout; raises `ValueError` on lengths or indices the kernels would trust."""
+    model: CameraModel = _model(problem)
+    sizes: dict[str, int] = {
+        "n_cameras": len(problem.camera_model),
+        "n_frames": len(problem.rig_from_world),
+        "n_points": len(problem.points),
+        "n_observations": len(problem.pixels),
+        "12": MAX_INTRINSICS,
+        "7": 7,
+        "3": 3,
+        "2": 2,
+    }
+    for name, dims in SHAPES.items():
+        shape: tuple[int, ...] = np.shape(getattr(problem, name))
+        expected: tuple[int, ...] = tuple(sizes[d] for d in dims)
+        if shape != expected:
+            raise ValueError(f"{name} has shape {shape}, expected {expected} ({', '.join(f'{d}={sizes[d]}' for d in dims)})")
+    for name, size in INDEXED.items():
+        index: Int32[ndarray, " n_observations"] = getattr(problem, name)
+        if len(index) and (int(index.min()) < 0 or int(index.max()) >= sizes[size]):
+            raise ValueError(f"{name} holds rows outside [0, {size}={sizes[size]})")
+    return _Packet(
+        camera_model=int(model),
+        intrinsics=np.ascontiguousarray(problem.intrinsics, dtype=np.float32),
+        intrinsics_free=np.ascontiguousarray(problem.intrinsics_free != 0, dtype=np.uint8),
+        sensor_from_rig=np.ascontiguousarray(problem.sensor_from_rig, dtype=np.float32),
+        sensor_free=np.ascontiguousarray(problem.sensor_free != 0, dtype=np.uint8),
+        rig_from_world=np.ascontiguousarray(problem.rig_from_world, dtype=np.float32),
+        pose_free=np.ascontiguousarray(problem.pose_free != 0, dtype=np.uint8),
+        points=np.ascontiguousarray(problem.points, dtype=np.float32),
+        point_free=np.ascontiguousarray(problem.point_free != 0, dtype=np.uint8),
+        pixels=np.ascontiguousarray(problem.pixels, dtype=np.float32),
+        observation_frame=np.ascontiguousarray(problem.observation_frame, dtype=np.int32),
+        observation_camera=np.ascontiguousarray(problem.observation_camera, dtype=np.int32),
+        observation_point=np.ascontiguousarray(problem.observation_point, dtype=np.int32),
+    )
 
 
 def _extension():
@@ -77,9 +150,19 @@ def _extension():
     return _caspar_mojo
 
 
-def _normalized(poses: Float32[ndarray, "n 7"]) -> Float64[ndarray, "n 7"]:
-    out: Float64[ndarray, "n 7"] = poses.astype(np.float64)
-    out[:, :4] /= np.linalg.norm(out[:, :4], axis=1, keepdims=True)
+def _merged(
+    original: Float64[ndarray, "n w"], solved: Float32[ndarray, "n w"], free: Bool[ndarray, " n"], columns: list[int]
+) -> Float64[ndarray, "n w"]:
+    """`original` with the solved values in its free rows' `columns`: fixed values never pass through float32."""
+    out: Float64[ndarray, "n w"] = np.array(original, dtype=np.float64, order="C")
+    selection = np.ix_(np.flatnonzero(free), columns)
+    out[selection] = solved[selection]
+    return out
+
+
+def _merged_poses(original: Float64[ndarray, "n 7"], solved: Float32[ndarray, "n 7"], free: Bool[ndarray, " n"]) -> Float64[ndarray, "n 7"]:
+    out: Float64[ndarray, "n 7"] = _merged(original, solved, free, list(range(7)))
+    out[free, :4] /= np.linalg.norm(out[free, :4], axis=1, keepdims=True)
     return out
 
 
@@ -88,65 +171,46 @@ def solve(problem: BaProblem, options: BaOptions = DEFAULT_OPTIONS) -> BaResult:
     start: float = time.perf_counter()
     if not options.reduced_camera_system:
         raise NotImplementedError("only the reduced camera system is ported (colsfm's mode)")
-    inputs, keep_alive = _inputs(problem)
-    outputs: list[Float32[ndarray, "n w"]] = [
-        np.array(problem.intrinsics, dtype=np.float32),
-        np.array(problem.sensor_from_rig, dtype=np.float32),
-        np.array(problem.rig_from_world, dtype=np.float32),
-        np.array(problem.points, dtype=np.float32),
-    ]
-    scalars: tuple[object, ...] = (
-        options.solver_iter_max,
-        options.diag_init,
-        options.diag_min,
-        options.diag_scaling_up,
-        options.diag_scaling_down,
-        options.diag_exit_value,
-        options.score_exit_value,
-        options.solver_rel_decrease_min,
-        options.reduced_pcg_iter_max,
-        options.reduced_pcg_eta,
+    packet: _Packet = _packet(problem)
+    state = _State(
+        intrinsics=np.empty(packet.intrinsics.shape, dtype=np.float32),
+        sensor_from_rig=np.empty(packet.sensor_from_rig.shape, dtype=np.float32),
+        rig_from_world=np.empty(packet.rig_from_world.shape, dtype=np.float32),
+        points=np.empty(packet.points.shape, dtype=np.float32),
     )
-    stats: tuple[float, float, int, int, int, float, int, list[tuple[float, float, float, int, bool]]] = _extension().solve(
-        inputs, scalars, tuple(_spec(a) for a in outputs)
-    )
-    del keep_alive
-    model: CameraModel = _model(problem)
-    intrinsics: Float64[ndarray, "n_cameras 12"] = outputs[0].astype(np.float64)
-    intrinsics[:, INTRINSICS_COUNT[model] :] = 0.0
+    stats: NativeStats = _extension().solve(packet, options, state)
+    calib_columns: list[int] = list(FOCAL_AND_EXTRA_COLUMNS[CameraModel(packet.camera_model)])
     return BaResult(
-        intrinsics=intrinsics,
-        sensor_from_rig=_normalized(outputs[1]),
-        rig_from_world=_normalized(outputs[2]),
-        points=outputs[3].astype(np.float64),
-        initial_cost=float(stats[0]),
-        final_cost=float(stats[1]),
-        iterations=int(stats[2]),
-        pcg_iterations=int(stats[3]),
-        exit_reason=EXIT_REASONS[int(stats[4])],
-        solve_seconds=float(stats[5]),
+        intrinsics=_merged(problem.intrinsics, state.intrinsics, packet.intrinsics_free != 0, calib_columns),
+        sensor_from_rig=_merged_poses(problem.sensor_from_rig, state.sensor_from_rig, packet.sensor_free != 0),
+        rig_from_world=_merged_poses(problem.rig_from_world, state.rig_from_world, packet.pose_free != 0),
+        points=_merged(problem.points, state.points, packet.point_free != 0, list(range(3))),
+        initial_cost=float(stats["initial_cost"]),
+        final_cost=float(stats["final_cost"]),
+        iterations=int(stats["iterations"]),
+        pcg_iterations=int(stats["pcg_iterations"]),
+        exit_reason=EXIT_REASONS[int(stats["exit_reason"])],
+        solve_seconds=float(stats["solve_seconds"]),
         total_seconds=time.perf_counter() - start,
-        trace=tuple(BaIteration(*trial) for trial in stats[7]),
+        trace=tuple(BaIteration(*trial) for trial in stats["trace"]),
     )
 
 
 def linearize(problem: BaProblem) -> Linearization:
     """Test hook: CASPAR's `res_jac_first` at the problem's state, computed on the GPU."""
-    model: CameraModel = _model(problem)
-    k: int = CALIB_SIZE[model]
+    packet: _Packet = _packet(problem)
+    k: int = len(FOCAL_AND_EXTRA_COLUMNS[CameraModel(packet.camera_model)])
     groups: list[tuple[int, int]] = [
-        (int(problem.pose_free.sum()), 6),
-        (int(problem.sensor_free.sum()), 6),
-        (int(problem.intrinsics_free.sum()), k),
-        (int(problem.point_free.sum()), 3),
+        (int(packet.pose_free.sum()), 6),
+        (int(packet.sensor_free.sum()), 6),
+        (int(packet.intrinsics_free.sum()), k),
+        (int(packet.point_free.sum()), 3),
     ]
     n_tangent: int = sum(n * d for n, d in groups)
     n_packed: int = sum(n * d * (d + 1) // 2 for n, d in groups)
-    inputs, keep_alive = _inputs(problem)
     gradient: Float32[ndarray, " n_tangent"] = np.zeros(max(n_tangent, 1), dtype=np.float32)
     packed: Float32[ndarray, " n_packed"] = np.zeros(max(n_packed, 1), dtype=np.float32)
-    cost: float = _extension().linearize(inputs, _spec(gradient), _spec(packed))
-    del keep_alive
+    cost: float = _extension().linearize(packet, gradient, packed)
     blocks: list[Float64[ndarray, "n_free d d"]] = []
     offset: int = 0
     for n, d in groups:

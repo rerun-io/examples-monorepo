@@ -1,8 +1,9 @@
 """CPython entry point (`caspar_mojo._caspar_mojo`): one call per solve.
 
-Arrays cross as `(address, *shape)` tuples of contiguous numpy arrays (f32 state, i32 indices, u8 masks), built
-and checked by `caspar_mojo.solver`. The solver copies them to device buffers it owns and writes the result
-into the output arrays.
+Every value is read by name: arrays from the `_Packet` / `_State` dataclasses of `caspar_mojo.solver` (C-contiguous
+numpy arrays, f32 state, i32 indices, 0/1 u8 masks, checked there), options from `BaOptions`. A renamed or missing
+field raises instead of shifting meaning. The solver copies the arrays to device buffers it owns and writes the
+result into the `_State` arrays.
 """
 
 from std.os import abort
@@ -14,91 +15,91 @@ from max.gpu.host import DeviceContext
 from solver import F32HostIn, F32HostOut, HostProblem, HostState, I32HostIn, Options, Stats, U8HostIn, solve_model
 
 
-def _f32_in(spec: PythonObject) raises -> F32HostIn:
-    return F32HostIn(unsafe_from_address=Int(py=spec[0]))
+def _address(array: PythonObject) raises -> Int:
+    return Int(py=array.ctypes.data)
 
 
-def _i32_in(spec: PythonObject) raises -> I32HostIn:
-    return I32HostIn(unsafe_from_address=Int(py=spec[0]))
+def _rows(array: PythonObject) raises -> Int:
+    return Int(py=array.shape[0])
 
 
-def _u8_in(spec: PythonObject) raises -> U8HostIn:
-    return U8HostIn(unsafe_from_address=Int(py=spec[0]))
+def _f32_out(array: PythonObject) raises -> F32HostOut:
+    return F32HostOut(unsafe_from_address=_address(array))
 
 
-def _f32_out(spec: PythonObject) raises -> F32HostOut:
-    return F32HostOut(unsafe_from_address=Int(py=spec[0]))
-
-
-def _problem(inputs: PythonObject) raises -> HostProblem:
+def _problem(packet: PythonObject) raises -> HostProblem:
     return HostProblem(
-        n_frames=Int(py=inputs[5][1]),
-        n_cameras=Int(py=inputs[1][1]),
-        n_points=Int(py=inputs[7][1]),
-        n_obs=Int(py=inputs[9][1]),
-        intrinsics=_f32_in(inputs[1]),
-        intrinsics_free=_u8_in(inputs[2]),
-        sensor_from_rig=_f32_in(inputs[3]),
-        sensor_free=_u8_in(inputs[4]),
-        rig_from_world=_f32_in(inputs[5]),
-        pose_free=_u8_in(inputs[6]),
-        points=_f32_in(inputs[7]),
-        point_free=_u8_in(inputs[8]),
-        pixels=_f32_in(inputs[9]),
-        obs_frame=_i32_in(inputs[10]),
-        obs_camera=_i32_in(inputs[11]),
-        obs_point=_i32_in(inputs[12]),
+        n_frames=_rows(packet.rig_from_world),
+        n_cameras=_rows(packet.intrinsics),
+        n_points=_rows(packet.points),
+        n_obs=_rows(packet.pixels),
+        intrinsics=F32HostIn(unsafe_from_address=_address(packet.intrinsics)),
+        intrinsics_free=U8HostIn(unsafe_from_address=_address(packet.intrinsics_free)),
+        sensor_from_rig=F32HostIn(unsafe_from_address=_address(packet.sensor_from_rig)),
+        sensor_free=U8HostIn(unsafe_from_address=_address(packet.sensor_free)),
+        rig_from_world=F32HostIn(unsafe_from_address=_address(packet.rig_from_world)),
+        pose_free=U8HostIn(unsafe_from_address=_address(packet.pose_free)),
+        points=F32HostIn(unsafe_from_address=_address(packet.points)),
+        point_free=U8HostIn(unsafe_from_address=_address(packet.point_free)),
+        pixels=F32HostIn(unsafe_from_address=_address(packet.pixels)),
+        obs_frame=I32HostIn(unsafe_from_address=_address(packet.observation_frame)),
+        obs_camera=I32HostIn(unsafe_from_address=_address(packet.observation_camera)),
+        obs_point=I32HostIn(unsafe_from_address=_address(packet.observation_point)),
     )
 
 
 def _run(
-    inputs: PythonObject, options: Options, result: HostState, gradient: F32HostOut, hblk: F32HostOut, linearize_only: Bool
+    packet: PythonObject, options: Options, result: HostState, gradient: F32HostOut, hblk: F32HostOut, linearize_only: Bool
 ) raises -> Stats:
-    return solve_model(DeviceContext(), Int(py=inputs[0]), _problem(inputs), options, result, gradient, hblk, linearize_only)
+    return solve_model(DeviceContext(), Int(py=packet.camera_model), _problem(packet), options, result, gradient, hblk, linearize_only)
 
 
 def _stats(stats: Stats) raises -> PythonObject:
     var trace = Python.list()
     for t in stats.trace:
         trace.append(Python.tuple(Float64(t.cost_tried), Float64(t.cost_best), Float64(t.damping), t.pcg_iterations, t.accepted))
-    return Python.tuple(
-        Float64(stats.initial_cost),
-        Float64(stats.final_cost),
-        stats.iterations,
-        stats.pcg_iterations,
-        stats.exit_reason,
-        stats.solve_seconds,
-        stats.launches,
-        trace,
+    return Python.dict(
+        initial_cost=PythonObject(Float64(stats.initial_cost)),
+        final_cost=PythonObject(Float64(stats.final_cost)),
+        iterations=PythonObject(stats.iterations),
+        pcg_iterations=PythonObject(stats.pcg_iterations),
+        exit_reason=PythonObject(stats.exit_reason),
+        solve_seconds=PythonObject(stats.solve_seconds),
+        launches=PythonObject(stats.launches),
+        trace=trace,
     )
 
 
-def py_solve(inputs: PythonObject, options: PythonObject, outputs: PythonObject) raises -> PythonObject:
-    """`solve(inputs, options, outputs) -> (initial_cost, final_cost, iterations, pcg_iterations, exit, seconds, launches,
-    trace)`, trace = [(cost_tried, cost_best, damping, pcg_iterations, accepted), ...]."""
+def py_solve(packet: PythonObject, options: PythonObject, result: PythonObject) raises -> PythonObject:
+    """`solve(packet, options: BaOptions, result) -> NativeStats` (a dict, `caspar_mojo.solver.NativeStats`)."""
     var opts = Options(
-        solver_iter_max=Int(py=options[0]),
-        diag_init=Float32(py=options[1]),
-        diag_min=Float32(py=options[2]),
-        diag_scaling_up=Float32(py=options[3]),
-        diag_scaling_down=Float32(py=options[4]),
-        diag_exit_value=Float32(py=options[5]),
-        score_exit_value=Float32(py=options[6]),
-        solver_rel_decrease_min=Float32(py=options[7]),
-        reduced_pcg_iter_max=Int(py=options[8]),
-        reduced_pcg_eta=Float64(py=options[9]),
+        solver_iter_max=Int(py=options.solver_iter_max),
+        diag_init=Float32(py=options.diag_init),
+        diag_min=Float32(py=options.diag_min),
+        diag_scaling_up=Float32(py=options.diag_scaling_up),
+        diag_scaling_down=Float32(py=options.diag_scaling_down),
+        diag_exit_value=Float32(py=options.diag_exit_value),
+        score_exit_value=Float32(py=options.score_exit_value),
+        solver_rel_decrease_min=Float32(py=options.solver_rel_decrease_min),
+        reduced_pcg_iter_max=Int(py=options.reduced_pcg_iter_max),
+        reduced_pcg_eta=Float64(py=options.reduced_pcg_eta),
     )
-    var result = HostState(_f32_out(outputs[0]), _f32_out(outputs[1]), _f32_out(outputs[2]), _f32_out(outputs[3]))
-    var unused = result.points
-    return _stats(_run(inputs, opts, result, unused, unused, False))
+    var state = HostState(_f32_out(result.intrinsics), _f32_out(result.sensor_from_rig), _f32_out(result.rig_from_world), _f32_out(result.points))
+    var unused = state.points
+    return _stats(_run(packet, opts, state, unused, unused, False))
 
 
-def py_linearize(inputs: PythonObject, gradient: PythonObject, hblk: PythonObject) raises -> PythonObject:
-    """`linearize(inputs, gradient, hblk) -> cost`: one linearisation at the given state, outputs written in place."""
+def py_linearize(packet: PythonObject, gradient: PythonObject, hblk: PythonObject) raises -> PythonObject:
+    """`linearize(packet, gradient, hblk) -> cost`: one linearisation at the packet's state, outputs written in place."""
     var opts = Options(1, 1.0, 0.0, 2.0, 0.333333, 1e3, 0.0, 1.0, 1, 0.1)
     var none = _f32_out(gradient)
-    var result = HostState(none, none, none, none)
-    return PythonObject(Float64(_run(inputs, opts, result, _f32_out(gradient), _f32_out(hblk), True).initial_cost))
+    var state = HostState(none, none, none, none)
+    return PythonObject(Float64(_run(packet, opts, state, _f32_out(gradient), _f32_out(hblk), True).initial_cost))
+
+
+def py_device_count() raises -> PythonObject:
+    """`device_count() -> int`: GPUs the runtime sees; the integration tests skip on 0 instead of guessing from errors."""
+    return PythonObject(DeviceContext.number_of_devices())
 
 
 @export
@@ -107,6 +108,7 @@ def PyInit__caspar_mojo() abi("C") -> PythonObject:
         var m = PythonModuleBuilder("_caspar_mojo")
         m.def_function[py_solve]("solve")
         m.def_function[py_linearize]("linearize")
+        m.def_function[py_device_count]("device_count")
         return m.finalize()
     except e:
         abort(String("failed to create module: ", e))
