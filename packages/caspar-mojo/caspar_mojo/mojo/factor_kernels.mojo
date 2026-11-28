@@ -288,7 +288,8 @@ def linearize_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bo
     n6: Int32,
     n_calib: Int32,
 ):
-    """Residual, -J^T e and the block diagonal of J^T J, and the cost 1/2 sum |e|^2."""
+    """Residual, the camera blocks of -J^T e and of the block diagonal of J^T J, and the cost 1/2 sum |e|^2.
+    The point blocks come from `point_linearize_kernel`."""
     comptime assert obs_frame.flat_rank == 1 and obs_camera.flat_rank == 1 and obs_point.flat_rank == 1
     comptime assert pose_off.flat_rank == 1 and rig_off.flat_rank == 1 and calib_off.flat_rank == 1
     comptime assert point_off.flat_rank == 1 and pixels.flat_rank == 2
@@ -308,8 +309,6 @@ def linearize_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bo
     var nc = Int(n_calib)
     var po = Int(pose_off[frame][0])
     accumulate_block[6](o.pose, valid, e0, e1, po, h_offset[K](po, nn6, nc), g, hblk)
-    var pto = Int(point_off[point][0])
-    accumulate_block[3](o.point, valid, e0, e1, pto, h_offset[K](pto, nn6, nc), g, hblk)
     comptime if REFINE_RIG:
         var ro = Int(rig_off[camera][0])
         accumulate_block[6](o.rig, valid, e0, e1, ro, h_offset[K](ro, nn6, nc), g, hblk)
@@ -317,6 +316,48 @@ def linearize_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bo
         var co = Int(calib_off[camera][0])
         accumulate_block[K](o.calib, valid, e0, e1, co, h_offset[K](co, nn6, nc), g, hblk)
     reduce_add(scalars, Int(cost_slot), cost)
+
+
+def point_linearize_kernel[Model: CameraModel](
+    poses: F32In,
+    rigs: F32In,
+    intrinsics: F32In,
+    points: F32In,
+    point_off: I32In,
+    point_start: I32In,
+    by_point_frame: I32In,
+    by_point_camera: I32In,
+    by_point_pixels: F32In,
+    g: Vec,
+    hblk: Vec,
+    point_v: Int32,
+    point_h: Int32,
+):
+    """The point blocks of -J^T e and of the block diagonal, one thread per point over its observations (no atomics)."""
+    comptime assert point_off.flat_rank == 1 and point_start.flat_rank == 1 and by_point_pixels.flat_rank == 2
+    comptime assert by_point_frame.flat_rank == 1 and by_point_camera.flat_rank == 1
+    comptime assert g.flat_rank == 1 and hblk.flat_rank == 1
+    var j = global_idx.x
+    if j >= Int(point_off.dim[0]()):
+        return
+    var v = Int(point_off[j][0])
+    if v < 0:
+        return
+    var grad = Array[Float32, 3](fill=0.0)
+    var hess = Array[Float32, tri(3)](fill=0.0)
+    for i in range(Int(point_start[j][0]), Int(point_start[j + 1][0])):
+        var o = project_observation[Model](poses, rigs, intrinsics, points, Int(by_point_frame[i][0]), Int(by_point_camera[i][0]), j)
+        var e0 = o.u - by_point_pixels[i, 0][0]
+        var e1 = o.v - by_point_pixels[i, 1][0]
+        comptime for a in range(3):
+            grad[a] -= o.point[a] * e0 + o.point[3 + a] * e1
+            comptime for b in range(a, 3):
+                hess[tri_index[3](a, b)] += o.point[a] * o.point[b] + o.point[3 + a] * o.point[3 + b]
+    var h = Int(point_h) + tri(3) * ((v - Int(point_v)) // 3)
+    comptime for a in range(3):
+        g[v + a] = grad[a]
+    comptime for t in range(tri(3)):
+        hblk[h + t] = hess[t]
 
 
 def score_kernel[Model: CameraModel](

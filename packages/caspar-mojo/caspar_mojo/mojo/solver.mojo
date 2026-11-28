@@ -20,6 +20,7 @@ from factor_kernels import (
     cross_points_kernel,
     linearize_kernel,
     point_gather_kernel,
+    point_linearize_kernel,
     score_kernel,
     tri,
 )
@@ -167,6 +168,7 @@ struct ByPoint(Movable):
     var start: List[Int32]
     var frame: List[Int32]
     var camera: List[Int32]
+    var pixels: List[Float32]
 
 
 def _by_point(problem: HostProblem) -> ByPoint:
@@ -178,13 +180,16 @@ def _by_point(problem: HostProblem) -> ByPoint:
     var next = start.copy()
     var frame = List[Int32](length=problem.n_obs, fill=0)
     var camera = List[Int32](length=problem.n_obs, fill=0)
+    var pixels = List[Float32](length=2 * problem.n_obs, fill=0.0)
     for n in range(problem.n_obs):
         var j = Int(problem.obs_point[unsafe_offset=n])
         var slot = Int(next[j])
         next[j] += 1
         frame[slot] = problem.obs_frame[unsafe_offset=n]
         camera[slot] = problem.obs_camera[unsafe_offset=n]
-    return ByPoint(start^, frame^, camera^)
+        pixels[2 * slot] = problem.pixels[unsafe_offset=2 * n]
+        pixels[2 * slot + 1] = problem.pixels[unsafe_offset=2 * n + 1]
+    return ByPoint(start^, frame^, camera^, pixels^)
 
 
 def _grid(n: Int) -> Int:
@@ -198,10 +203,10 @@ def _upload[dtype: DType](ctx: DeviceContext, src: ImmPointer[Scalar[dtype], Imm
     return buf^
 
 
-def _upload_list(ctx: DeviceContext, values: List[Int32]) raises -> DeviceBuffer[DType.int32]:
-    var buf = ctx.enqueue_create_buffer[DType.int32](max(len(values), 1))
+def _upload_list[dtype: DType](ctx: DeviceContext, values: List[Scalar[dtype]]) raises -> DeviceBuffer[dtype]:
+    var buf = ctx.enqueue_create_buffer[dtype](max(len(values), 1))
     if len(values) > 0:
-        ctx.enqueue_copy(buf.create_sub_buffer[DType.int32](0, len(values)), values.unsafe_ptr())
+        ctx.enqueue_copy(buf.create_sub_buffer[dtype](0, len(values)), values.unsafe_ptr())
     return buf^
 
 
@@ -268,6 +273,7 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
     var d_point_start = _upload_list(ctx, by_point.start)
     var d_by_point_frame = _upload_list(ctx, by_point.frame)
     var d_by_point_camera = _upload_list(ctx, by_point.camera)
+    var d_by_point_pixels = _upload_list(ctx, by_point.pixels)
     var nt = max(lay.n_tan, 1)
     var d_g = ctx.enqueue_create_buffer[DType.float32](nt)
     var d_r = ctx.enqueue_create_buffer[DType.float32](nt)
@@ -298,6 +304,7 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
     var point_start = TileTensor(d_point_start, row_major((np + 1,))).as_imm()
     var by_point_frame = TileTensor(d_by_point_frame, row_major((no,))).as_imm()
     var by_point_camera = TileTensor(d_by_point_camera, row_major((no,))).as_imm()
+    var by_point_pixels = TileTensor(d_by_point_pixels, row_major((no, 2))).as_imm()
     var g = TileTensor(d_g, row_major((nt,)))
     var r = TileTensor(d_r, row_major((nt,)))
     var z = TileTensor(d_z, row_major((nt,)))
@@ -315,6 +322,7 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
 
     comptime linearize = linearize_kernel[Model, REFINE_INTRINSICS, REFINE_RIG]
     comptime score = score_kernel[Model]
+    comptime point_linearize = point_linearize_kernel[Model]
     comptime cross_points = cross_points_kernel[Model, REFINE_INTRINSICS, REFINE_RIG, False]
     comptime cross_all = cross_points_kernel[Model, REFINE_INTRINSICS, REFINE_RIG, True]
     comptime gather_negate = point_gather_kernel[Model, REFINE_INTRINSICS, REFINE_RIG, GATHER_NEGATE]
@@ -345,8 +353,14 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
         d_g.unsafe_ptr(), d_h.unsafe_ptr(), scalars, Int32(SLOT_COST_LINEARIZE), n6, ncal,
         grid_dim=obs_grid, block_dim=BLOCK,
     )
+    ctx.enqueue_function[point_linearize](
+        TileTensor(d_poses, row_major((nf, 7))).as_imm(), TileTensor(d_rigs, row_major((nc, 7))).as_imm(),
+        TileTensor(d_intr, row_major((nc, MAX_PARAMS))).as_imm(), TileTensor(d_points, row_major((np, 3))).as_imm(),
+        t_point_off, point_start, by_point_frame, by_point_camera, by_point_pixels, g, TileTensor(d_h, row_major((max(lay.n_h, 1),))),
+        point_v, point_h, grid_dim=_grid(np), block_dim=BLOCK,
+    )
     _tick(ctx, prof, prof_times, 0, prof_last)
-    launches += 1
+    launches += 2
     ctx.enqueue_copy(host2, d_scalars.create_sub_buffer[DType.float64](SLOT_COST_LINEARIZE, 2))
     ctx.synchronize()
     var score_best = Float32(host2[0])
@@ -379,8 +393,14 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
                 d_g.unsafe_ptr(), d_h.unsafe_ptr(), scalars, Int32(SLOT_COST_LINEARIZE), n6, ncal,
                 grid_dim=obs_grid, block_dim=BLOCK,
             )
+            ctx.enqueue_function[point_linearize](
+                TileTensor(d_poses, row_major((nf, 7))).as_imm(), TileTensor(d_rigs, row_major((nc, 7))).as_imm(),
+                TileTensor(d_intr, row_major((nc, MAX_PARAMS))).as_imm(), TileTensor(d_points, row_major((np, 3))).as_imm(),
+                t_point_off, point_start, by_point_frame, by_point_camera, by_point_pixels, g, TileTensor(d_h, row_major((max(lay.n_h, 1),))),
+                point_v, point_h, grid_dim=_grid(np), block_dim=BLOCK,
+            )
             _tick(ctx, prof, prof_times, 0, prof_last)
-            launches += 1
+            launches += 2
         var lin_poses = TileTensor(t_poses if lin_in_trial else d_poses, row_major((nf, 7))).as_imm()
         var lin_rigs = TileTensor(t_rigs if lin_in_trial else d_rigs, row_major((nc, 7))).as_imm()
         var lin_intr = TileTensor(t_intr if lin_in_trial else d_intr, row_major((nc, MAX_PARAMS))).as_imm()
