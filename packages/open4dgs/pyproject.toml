@@ -55,6 +55,8 @@ ignore_names = [
     # open4dgs.birefnet_trt: the torchvision::deform_conv2d argument list (positional, kept whole) and the engine
     # builder that fdanyone-rerun's fdanyone-birefnet-engine task calls
     "use_mask", "build_engine",
+    # open4dgs.birefnet_trt: imported for a dotted annotation string, which beartype resolves by importing the module
+    "trtkit",
     # open4dgs.trigs_trainer: an assignment to torch._inductor.config (a framework setting, not dead)
     "quiesce_async_compile_pool",
 ]
