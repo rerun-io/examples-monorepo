@@ -639,7 +639,21 @@ fn decode_parts_with(
     })
 }
 
-/// Pack the motion streams and check the clip index of every row.
+/// One motion stream value as its word in [`AsogParts::motion_codes`]: `g` as f32 bits, every other stream as i32.
+///
+/// `g` is quantised relative to `mref`, the smallest angular speed along the clip, so its codes outgrow i32 when that
+/// speed nearly reaches zero. `asog_motion.wgsl` and [`AsogParts::motion`] de-quantise `g` from these f32 bits.
+fn motion_word(name: &'static str, v: i64) -> Result<i32, Error> {
+    if name == "g" {
+        return Ok((v as f32).to_bits().cast_signed());
+    }
+    i32::try_from(v).map_err(|_range| Error::Stream {
+        name: name.into(),
+        problem: format!("value {v} does not fit 32 bits"),
+    })
+}
+
+/// The motion streams as [`MOTION_CODES`] words per row, with the clip index of every row checked.
 fn motion_codes(
     m: &Manifest,
     opacity: Vec<i64>,
@@ -661,18 +675,8 @@ fn motion_codes(
     let mut out = Vec::with_capacity(n * MOTION_CODES);
     for i in 0..n {
         for (name, values, width) in &columns {
-            let row = &values[i * width..(i + 1) * width];
-            if *name == "g" {
-                // The ASOG stream can exceed i32 when rotation nearly cancels.
-                // The shader already de-quantises these coefficients in f32.
-                out.extend(row.iter().map(|&v| (v as f32).to_bits().cast_signed()));
-                continue;
-            }
-            for &v in row {
-                out.push(i32::try_from(v).map_err(|_range| Error::Stream {
-                    name: (*name).into(),
-                    problem: format!("value {v} does not fit 32 bits"),
-                })?);
+            for &v in &values[i * width..(i + 1) * width] {
+                out.push(motion_word(name, v)?);
             }
         }
         let flag = out[out.len() - 1];
@@ -727,6 +731,19 @@ mod tests {
         let decoded = decode_stream(&desc, &data).unwrap();
         assert_eq!(decoded, vec![5, -1, 3, 0, 300, 2]);
         assert!(decode_stream(&StreamDesc { count: 4, ..desc }, &data).is_err());
+    }
+
+    #[test]
+    fn g_codes_beyond_i32_keep_their_value_and_other_streams_reject_them() {
+        let wide = i64::from(i32::MAX) * 3;
+        let word = motion_word("g", wide).expect("g beyond i32");
+        assert_eq!(f32::from_bits(word.cast_unsigned()), wide as f32);
+        assert_eq!(
+            f32::from_bits(motion_word("g", -7).unwrap().cast_unsigned()),
+            -7.0
+        );
+        assert!(motion_word("omega", wide).is_err());
+        assert_eq!(motion_word("omega", -7).unwrap(), -7);
     }
 
     #[test]
