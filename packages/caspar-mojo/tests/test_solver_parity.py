@@ -3,8 +3,9 @@
 Tolerances (the lead's parity ruling). The Mojo solver runs in float32 like CASPAR. Once the cost has converged,
 every trial changes it by ~1e-6 relative, so float32 summation order decides its accept or reject (in CASPAR too)
 and the length of that tail varies from run to run. So:
-- the trace is compared trial by trial only up to convergence: the float32 reference's first trial whose best cost
-  is within `CONVERGED` of its final cost (same accept flags, best cost within 1e-3, PCG iterations within 1);
+- the trace is compared trial by trial only up to convergence, the float32 reference's first trial whose best cost
+  is within `CONVERGED` of its final cost (same accept flags, best cost within 1e-3, PCG iterations within 1). That
+  trial itself is left out: its damping comes from the quality ratio of a decrease near the float32 noise;
 - costs against the float64 reference: initial within 1e-4, final within 1 %;
 - the exit reason equals the float32 reference's, and the trial count is within a factor 2 of it (a gross check);
 - the state is compared through what it predicts, the pixels, because each tail accept moves it along a nearly flat
@@ -79,9 +80,9 @@ def _solve(solver, problem: BaProblem) -> BaResult:
 
 
 def _converged(trace: list) -> int:
-    """Trials up to and including the first whose best cost is within `CONVERGED` of the final one."""
+    """Trials before the first whose best cost is within `CONVERGED` of the final one."""
     final = trace[-1].cost_best
-    return next(i for i, trial in enumerate(trace) if trial.cost_best <= final * (1 + CONVERGED)) + 1
+    return next(i for i, trial in enumerate(trace) if trial.cost_best <= final * (1 + CONVERGED))
 
 
 def _residuals(problem: BaProblem, result: BaResult) -> np.ndarray:
