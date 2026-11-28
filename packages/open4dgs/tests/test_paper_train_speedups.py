@@ -25,16 +25,16 @@ def _scene(dev: str) -> dict[str, torch.Tensor]:
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize(("offset", "stride"), [((0, 0), 2), ((1, 1), 2), ((0, 1), 2), ((1, 0), 2), ((0, 0), 4), ((3, 1), 4), ((2, 3), 4)])
+@pytest.mark.parametrize("offset", [(0, 0), (1, 1), (0, 1), (1, 0)])
 @pytest.mark.parametrize("size", [(96, 128), (95, 127)])
-def test_strided_camera_render_equals_full_render_subsampled(offset: tuple[int, int], stride: int, size: tuple[int, int]) -> None:
+def test_strided_camera_render_equals_full_render_subsampled(offset: tuple[int, int], size: tuple[int, int]) -> None:
     if not torch.cuda.is_available():
         pytest.skip("needs a CUDA GPU (gsplat rasterization)")
     import inspect
 
     from gsplat import rasterization
 
-    from open4dgs.strided import GSPLAT_EPS2D
+    from open4dgs.strided import GSPLAT_EPS2D, STRIDE
     from open4dgs.trigs_adapter import camera_config
     from open4dgs.trigs_trainer import strided_camera_config
 
@@ -45,7 +45,7 @@ def test_strided_camera_render_equals_full_render_subsampled(offset: tuple[int, 
     world_T_cam[1, 0, 3] = 0.1
     K = torch.tensor([[110.0, 0.0, 63.2], [0.0, 105.0, 47.7], [0.0, 0.0, 1.0]]).expand(2, 3, 3).contiguous()
     full = camera_config(world_T_cam, K, [(w, h), (w, h)], torch.device(dev))
-    strided = strided_camera_config(full, offset, stride)
+    strided = strided_camera_config(full, offset)
     s = _scene(dev)
     oy, ox = offset
     ref, ref_a, _ = rasterization(**s, viewmats=full.viewmats, Ks=full.Ks, width=w, height=h, packed=False)
@@ -56,13 +56,13 @@ def test_strided_camera_render_equals_full_render_subsampled(offset: tuple[int, 
         width=strided.width_for(0),
         height=strided.height_for(0),
         packed=False,
-        eps2d=GSPLAT_EPS2D / stride**2,
+        eps2d=GSPLAT_EPS2D / STRIDE**2,
     )
     assert inspect.signature(rasterization).parameters["eps2d"].default == GSPLAT_EPS2D
-    assert out.shape[1:3] == ref[:, oy::stride, ox::stride].shape[1:3]
-    assert (strided.width_for(0), strided.height_for(0)) == (len(range(ox, w, stride)), len(range(oy, h, stride)))
-    torch.testing.assert_close(out, ref[:, oy::stride, ox::stride], atol=2e-5, rtol=1e-4)
-    torch.testing.assert_close(out_a, ref_a[:, oy::stride, ox::stride], atol=2e-5, rtol=1e-4)
+    assert out.shape[1:3] == ref[:, oy::STRIDE, ox::STRIDE].shape[1:3]
+    assert (strided.width_for(0), strided.height_for(0)) == (len(range(ox, w, STRIDE)), len(range(oy, h, STRIDE)))
+    torch.testing.assert_close(out, ref[:, oy::STRIDE, ox::STRIDE], atol=2e-5, rtol=1e-4)
+    torch.testing.assert_close(out_a, ref_a[:, oy::STRIDE, ox::STRIDE], atol=2e-5, rtol=1e-4)
 
 
 def test_strided_frames_index_follows_the_active_offset() -> None:
@@ -80,27 +80,6 @@ def test_strided_frames_index_follows_the_active_offset() -> None:
     assert len(view[0]) == 2
     state.offset = None
     assert view[0][1].shape == (5, 6, 3)
-    state.offset, state.stride = (3, 1), 4
-    assert torch.equal(view[1][0], frames[1][0][3::4, 1::4])
-
-
-@pytest.mark.parametrize("stride", [2, 4])
-def test_stride_offsets_cover_every_pixel_of_the_block_once(stride: int) -> None:
-    from open4dgs.strided import stride_offsets
-
-    offsets = stride_offsets(stride)
-    assert sorted(offsets) == [(y, x) for y in range(stride) for x in range(stride)]
-
-
-def test_coarse_steps_switch_the_stride() -> None:
-    from open4dgs.strided import COARSE_STRIDE, STRIDE
-    from open4dgs.trigs_trainer import Open4dgsTrainer
-
-    trainer = Open4dgsTrainer(device="cpu", pixel_stride=2, coarse_stride_steps=3)
-    assert [trainer.stride_for_step(s) for s in range(5)] == [COARSE_STRIDE] * 3 + [STRIDE] * 2
-    assert Open4dgsTrainer(device="cpu", pixel_stride=2).stride_for_step(0) == STRIDE
-    with pytest.raises(ValueError, match="coarse_stride_steps"):
-        Open4dgsTrainer(device="cpu", pixel_stride=1, coarse_stride_steps=3)
 
 
 @pytest.mark.integration
