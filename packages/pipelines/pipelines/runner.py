@@ -13,11 +13,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from rerun.catalog import DatasetEntry
+from rerun.catalog import CatalogClient
 from simplecv.process_utils import run_command
 from simplecv.run_record import RunRecord, read_run_record
 
-from pipelines.capture_to_splat import Step
+from pipelines.step import Step
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,14 +54,13 @@ def last_line(log: Path) -> str:
     return last
 
 
-def run_flow(steps: Sequence[Step], launch: Launch, *, entry: DatasetEntry, segment: str, logs: Path) -> int:
+def run_flow(steps: Sequence[Step], launch: Launch, *, client: CatalogClient, logs: Path) -> int:
     """Run every step in order, stopping at the first that fails or publishes no layer.
 
     Args:
         steps: The flow's steps.
         launch: How each step's process is started.
-        entry: The catalog dataset of the segment.
-        segment: The segment.
+        client: The catalog the steps publish on; each step's run record is read from its own dataset and segment.
         logs: Directory of the step logs (``<nn>-<step>.log``).
 
     Returns:
@@ -79,7 +78,7 @@ def run_flow(steps: Sequence[Step], launch: Launch, *, entry: DatasetEntry, segm
             print(f"[{step.name}] FAILED (exit {code}): {last_line(log)}", flush=True)
             return code
         try:
-            record: RunRecord = read_run_record(entry, segment, step.layer)
+            record: RunRecord = read_run_record(client.get_dataset(name=step.dataset), step.segment, step.layer)
         except ValueError as error:
             print(f"[{step.name}] FAILED: exit 0 but {error}", flush=True)
             return 1

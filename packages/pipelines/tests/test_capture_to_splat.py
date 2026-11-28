@@ -4,9 +4,11 @@ from pathlib import Path
 
 
 def test_an_insta360_base_gets_lens_masks_masked_slam_face_masks_then_colsfm(tmp_path: Path) -> None:
-    from pipelines.capture_to_splat import Step, flow_steps
+    from pipelines.capture_to_splat import flow_steps
+    from pipelines.step import Step
 
     steps: tuple[Step, ...] = flow_steps("insta360", segment="insta360__clip", catalog_url="rerun+http://127.0.0.1:1", output_root=tmp_path)
+    assert {(s.dataset, s.segment) for s in steps} == {("insta360", "insta360__clip")}, "every layer goes on the base's segment"
     assert [(s.name, s.layer, s.environment, s.task) for s in steps] == [
         ("lens_masks", "lens_mask", "posekit", "posekit-lens-masks"),
         ("slam", "slam_rs", "slam-rs-cuda", "slam-rs-catalog-layer"),
@@ -50,10 +52,10 @@ def test_a_relative_output_root_reaches_the_stages_absolute(tmp_path: Path, monk
 
 
 def test_a_step_runs_its_pixi_task_in_a_memory_scope_inside_the_gpu_lock(tmp_path: Path) -> None:
-    from pipelines.capture_to_splat import Step
     from pipelines.runner import Launch, step_command
+    from pipelines.step import Step
 
-    step: Step = Step("slam", "slam_rs", "slam-rs-cuda", "slam-rs-catalog-layer", ("--segment", "s"))
+    step: Step = Step("slam", "slam_rs", "d", "d__s", "slam-rs-cuda", "slam-rs-catalog-layer", ("--segment", "s"))
     assert step_command(step, Launch(manifest=tmp_path / "pixi.toml", gpu_lock=Path("/tmp/gpu.lock"), memory_max="48G")) == [
         "flock", "-x", "/tmp/gpu.lock", "systemd-run", "--user", "--scope", "--quiet", "-p", "MemoryMax=48G",
         "pixi", "run", "--manifest-path", str(tmp_path / "pixi.toml"), "--frozen", "-e", "slam-rs-cuda", "slam-rs-catalog-layer", "--segment", "s",

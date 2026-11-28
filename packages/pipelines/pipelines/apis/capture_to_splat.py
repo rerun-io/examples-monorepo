@@ -11,11 +11,12 @@ from pathlib import Path
 from typing import Literal
 
 import tyro
-from rerun.catalog import CatalogClient, DatasetEntry
+from rerun.catalog import CatalogClient
 from simplecv.run_record import RunRecord, read_run_record
 
-from pipelines.capture_to_splat import InputProfile, Step, dataset_of, flow_steps
+from pipelines.capture_to_splat import InputProfile, flow_steps
 from pipelines.runner import Launch, run_flow, step_command
+from pipelines.step import Step
 
 WORKSPACE_MANIFEST: Path = Path(__file__).resolve().parents[4] / "pixi.toml"
 """The workspace ``pixi.toml`` holding every stage's task."""
@@ -58,11 +59,11 @@ def main(config: Config) -> None:
         for step in steps:
             print(f"{step.name} -> layer {step.layer}: {' '.join(step_command(step, launch))}")
         return
-    entry: DatasetEntry = CatalogClient(config.catalog_url).get_dataset(name=dataset_of(config.segment))
+    client: CatalogClient = CatalogClient(config.catalog_url)
     if config.action == "show":
         for step in steps:
             try:
-                record: RunRecord = read_run_record(entry, config.segment, step.layer)
+                record: RunRecord = read_run_record(client.get_dataset(name=step.dataset), step.segment, step.layer)
             except ValueError:
                 print(f"{step.name} -> layer {step.layer}: no run record")
                 continue
@@ -71,7 +72,7 @@ def main(config: Config) -> None:
                   f"env {record.pixi_environment}, {record.host}\n    {record.command}")
         return
     logs: Path = config.logs or config.output_root.resolve() / "logs" / config.segment / datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    code: int = run_flow(steps, launch, entry=entry, segment=config.segment, logs=logs)
+    code: int = run_flow(steps, launch, client=client, logs=logs)
     if code != 0:
         raise SystemExit(code)
     print(f"capture_to_splat ({config.profile}) on {config.segment}: {len(steps)} steps published")
