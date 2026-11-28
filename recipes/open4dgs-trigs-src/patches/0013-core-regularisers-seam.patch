@@ -1,0 +1,238 @@
+diff --git a/src/trigs/core/trainer.py b/src/trigs/core/trainer.py
+--- a/src/trigs/core/trainer.py
++++ b/src/trigs/core/trainer.py
+@@ -4574,6 +4574,12 @@
+             return max(int(total.reshape(()).item()), 1)
+         return max(int(params["means"].shape[0]), 1)
+ 
++    def _core_regularisers(self, params, config, gamma, nn_indices, rigid_loss_idx, sigma_floor_target):
++        """Seam: the step's (motion, rigid, opacity, sigma-floor, scale) terms, or None for the loop's own code. A subclass
++        may compute them in one pass; it must return None where it does not reproduce the loop (nn_indices is None while
++        delayed pruning runs)."""
++        return None
++
+     def _optimizer_step(self, optimizers: Dict[str, torch.optim.Optimizer]) -> None:
+         """Seam: every optimizer's step, then its gradients set to None (a subclass may fuse them)."""
+         for opt in optimizers.values():
+@@ -5504,116 +5510,126 @@
+             )
+             cam_idx = cam_idx_log
+ 
+-            c0_full = torch.cat([params["zeta_c0_t"], params["zeta_c0_r"]], dim=-1)
+-            c1_full = torch.cat([params["zeta_c1_t"], params["zeta_c1_r"]], dim=-1)
+-            c2_full = torch.cat([params["zeta_c2_t"], params["zeta_c2_r"]], dim=-1)
+-
+-            # One dynamic-row mask and one host read of any() per step for the three
+-            # regularisers below (is_static does not change between them).
+-            if "is_static" in params and (
+-                getattr(config, "static_exclude_from_motion_losses", True)
+-                or getattr(config, "static_exclude_from_temporal_reg", True)
++            # The rigidity graph refresh, then the regularisers (refresh first: it reads no term below).
++            if not delayed_pruning_active and (
++                rigid_knn_dirty
++                or (step > 0 and config.knn_recompute_every > 0
++                    and step % config.knn_recompute_every == 0)
+             ):
+-                # The dynamic rows' index (one host read) for the row gathers below: boolean indexing reads the
+-                # GPU in the forward and again in its backward, per tensor.
+-                dyn_rows_step = torch.nonzero(self._dynamic_rows(params)).reshape(-1)
+-                dyn_rows_step_any = int(dyn_rows_step.numel()) > 0
+-            if getattr(config, "static_exclude_from_motion_losses", True) and "is_static" in params:
+-                dyn_rows_for_motion = dyn_rows_step
+-                if dyn_rows_step_any:
+-                    motion_loss = bezier_motion_loss(
+-                        c0_full.index_select(0, dyn_rows_for_motion), c1_full.index_select(0, dyn_rows_for_motion),
+-                        c2_full.index_select(0, dyn_rows_for_motion),
+-                    )
+-                else:
+-                    motion_loss = params["means"].new_zeros(())
+-            else:
+-                motion_loss = bezier_motion_loss(c0_full, c1_full, c2_full)
+-
++                nn_indices, rigid_loss_rows = _refresh_rigid_knn_for_current_rows()
++                rigid_loss_idx = torch.nonzero(rigid_loss_rows).reshape(-1)
++                rigid_knn_dirty = False
+             lambda_res = float(getattr(config, "lambda_motion_residual", 0.0))
+-            if lambda_res > 0.0:
+-                if getattr(config, "static_exclude_from_motion_losses", True) and "is_static" in params:
+-                    rows_res = self._dynamic_rows(params)
+-                else:
+-                    rows_res = slice(None)
+-                motion_residual_loss = _motion_residual_magnitude_loss(
+-                    c0_full,
+-                    c1_full,
+-                    c2_full,
+-                    rows_res,
+-                )
+-            else:
++            lambda_scale = float(getattr(config, "lambda_scale_reg", 0.0))
++            # Seam: the motion, rigid, opacity, sigma-floor and scale terms in one call (None: the terms below).
++            core_reg = self._core_regularisers(
++                params, config, gamma, None if delayed_pruning_active else nn_indices, rigid_loss_idx, sigma_floor_target,
++            )
++            if core_reg is not None:
++                motion_loss, rigid_loss, reg_loss, sigma_floor_loss, scale_reg_loss = core_reg
+                 motion_residual_loss = params["means"].new_zeros(())
+-
+-            if delayed_pruning_active:
+-                rigid_loss = params["means"].new_zeros(())
+             else:
+-                if (
+-                    rigid_knn_dirty
+-                    or (step > 0 and config.knn_recompute_every > 0
+-                        and step % config.knn_recompute_every == 0)
++                c0_full = torch.cat([params["zeta_c0_t"], params["zeta_c0_r"]], dim=-1)
++                c1_full = torch.cat([params["zeta_c1_t"], params["zeta_c1_r"]], dim=-1)
++                c2_full = torch.cat([params["zeta_c2_t"], params["zeta_c2_r"]], dim=-1)
++
++                # One dynamic-row mask and one host read of any() per step for the three
++                # regularisers below (is_static does not change between them).
++                if "is_static" in params and (
++                    getattr(config, "static_exclude_from_motion_losses", True)
++                    or getattr(config, "static_exclude_from_temporal_reg", True)
+                 ):
+-                    nn_indices, rigid_loss_rows = _refresh_rigid_knn_for_current_rows()
+-                    rigid_loss_idx = torch.nonzero(rigid_loss_rows).reshape(-1)
+-                    rigid_knn_dirty = False
+-
+-                zeta_base_full = torch.cat([params["zeta_base_t"], params["zeta_base_r"]], dim=-1)
+-                rigid_color_detach = bool(
+-                    getattr(config, "rigid_color_weight_detach", False)
+-                )
++                    # The dynamic rows' index (one host read) for the row gathers below: boolean indexing reads the
++                    # GPU in the forward and again in its backward, per tensor.
++                    dyn_rows_step = torch.nonzero(self._dynamic_rows(params)).reshape(-1)
++                    dyn_rows_step_any = int(dyn_rows_step.numel()) > 0
++                if getattr(config, "static_exclude_from_motion_losses", True) and "is_static" in params:
++                    dyn_rows_for_motion = dyn_rows_step
++                    if dyn_rows_step_any:
++                        motion_loss = bezier_motion_loss(
++                            c0_full.index_select(0, dyn_rows_for_motion), c1_full.index_select(0, dyn_rows_for_motion),
++                            c2_full.index_select(0, dyn_rows_for_motion),
++                        )
++                    else:
++                        motion_loss = params["means"].new_zeros(())
++                else:
++                    motion_loss = bezier_motion_loss(c0_full, c1_full, c2_full)
+ 
+-                if nn_indices is None:
+-                    rigid_loss = params["means"].new_zeros(())
+-                elif getattr(config, "static_exclude_from_motion_losses", True) and "is_static" in params:
+-                    rigid_loss = rigid_coherence_loss(
+-                        zeta_base_full.index_select(0, rigid_loss_idx), params["sh0"].index_select(0, rigid_loss_idx),
+-                        nn_indices, lambda_c=config.rigid_color_lambda,
+-                        detach_color_weight=rigid_color_detach,
++                lambda_res = float(getattr(config, "lambda_motion_residual", 0.0))
++                if lambda_res > 0.0:
++                    if getattr(config, "static_exclude_from_motion_losses", True) and "is_static" in params:
++                        rows_res = self._dynamic_rows(params)
++                    else:
++                        rows_res = slice(None)
++                    motion_residual_loss = _motion_residual_magnitude_loss(
++                        c0_full,
++                        c1_full,
++                        c2_full,
++                        rows_res,
+                     )
+                 else:
+-                    rigid_loss = rigid_coherence_loss(
+-                        zeta_base_full, params["sh0"], nn_indices,
+-                        lambda_c=config.rigid_color_lambda,
+-                        detach_color_weight=rigid_color_detach,
++                    motion_residual_loss = params["means"].new_zeros(())
++
++                if delayed_pruning_active:
++                    rigid_loss = params["means"].new_zeros(())
++                else:
++                    zeta_base_full = torch.cat([params["zeta_base_t"], params["zeta_base_r"]], dim=-1)
++                    rigid_color_detach = bool(
++                        getattr(config, "rigid_color_weight_detach", False)
+                     )
+ 
+-            base_opa = torch.sigmoid(params["opacities"])
+-            if base_opa.dim() == 1:
+-                base_opa = base_opa.unsqueeze(-1)
+-            if getattr(config, "static_exclude_from_temporal_reg", True) and "is_static" in params:
+-                dyn_rows_for_reg = dyn_rows_step
+-                if dyn_rows_step_any:
+-                    reg_loss = (base_opa.index_select(0, dyn_rows_for_reg) * gamma.index_select(0, dyn_rows_for_reg).detach()).mean()
++                    if nn_indices is None:
++                        rigid_loss = params["means"].new_zeros(())
++                    elif getattr(config, "static_exclude_from_motion_losses", True) and "is_static" in params:
++                        rigid_loss = rigid_coherence_loss(
++                            zeta_base_full.index_select(0, rigid_loss_idx), params["sh0"].index_select(0, rigid_loss_idx),
++                            nn_indices, lambda_c=config.rigid_color_lambda,
++                            detach_color_weight=rigid_color_detach,
++                        )
++                    else:
++                        rigid_loss = rigid_coherence_loss(
++                            zeta_base_full, params["sh0"], nn_indices,
++                            lambda_c=config.rigid_color_lambda,
++                            detach_color_weight=rigid_color_detach,
++                        )
++
++                base_opa = torch.sigmoid(params["opacities"])
++                if base_opa.dim() == 1:
++                    base_opa = base_opa.unsqueeze(-1)
++                if getattr(config, "static_exclude_from_temporal_reg", True) and "is_static" in params:
++                    dyn_rows_for_reg = dyn_rows_step
++                    if dyn_rows_step_any:
++                        reg_loss = (base_opa.index_select(0, dyn_rows_for_reg) * gamma.index_select(0, dyn_rows_for_reg).detach()).mean()
++                    else:
++                        reg_loss = params["means"].new_zeros(())
+                 else:
+-                    reg_loss = params["means"].new_zeros(())
+-            else:
+-                reg_loss = (base_opa * gamma.detach()).mean()
++                    reg_loss = (base_opa * gamma.detach()).mean()
+ 
+-            sigma_t = torch.exp(params["log_durations"])
+-            if getattr(config, "static_exclude_from_temporal_reg", True) and "is_static" in params:
+-                dyn_rows_for_sigma = dyn_rows_step
+-                if dyn_rows_step_any:
+-                    sigma_floor_loss = torch.clamp(
+-                        sigma_floor_target - sigma_t.index_select(0, dyn_rows_for_sigma), min=0.0,
+-                    ).pow(2).mean()
++                sigma_t = torch.exp(params["log_durations"])
++                if getattr(config, "static_exclude_from_temporal_reg", True) and "is_static" in params:
++                    dyn_rows_for_sigma = dyn_rows_step
++                    if dyn_rows_step_any:
++                        sigma_floor_loss = torch.clamp(
++                            sigma_floor_target - sigma_t.index_select(0, dyn_rows_for_sigma), min=0.0,
++                        ).pow(2).mean()
++                    else:
++                        sigma_floor_loss = params["means"].new_zeros(())
+                 else:
+-                    sigma_floor_loss = params["means"].new_zeros(())
+-            else:
+-                sigma_floor_loss = torch.clamp(sigma_floor_target - sigma_t, min=0.0).pow(2).mean()
++                    sigma_floor_loss = torch.clamp(sigma_floor_target - sigma_t, min=0.0).pow(2).mean()
+ 
+-            lambda_scale = float(getattr(config, "lambda_scale_reg", 0.0))
+-            if lambda_scale > 0.0:
+-                if getattr(config, "scale_reg_include_static", True):
+-                    scale_rows = slice(None)
++                lambda_scale = float(getattr(config, "lambda_scale_reg", 0.0))
++                if lambda_scale > 0.0:
++                    if getattr(config, "scale_reg_include_static", True):
++                        scale_rows = slice(None)
++                    else:
++                        scale_rows = self._dynamic_rows(params)
++                    scale_reg_loss = scale_size_loss(
++                        params["scales"],
++                        self._total_model_rows(params),
++                        scale_rows,
++                    )
+                 else:
+-                    scale_rows = self._dynamic_rows(params)
+-                scale_reg_loss = scale_size_loss(
+-                    params["scales"],
+-                    self._total_model_rows(params),
+-                    scale_rows,
+-                )
+-            else:
+-                scale_reg_loss = params["means"].new_zeros(())
++                    scale_reg_loss = params["means"].new_zeros(())
+ 
+             if "camera_time_offsets" in params and offset_active:
+                 # Pull low-observability cameras (small scale) toward the
