@@ -16,6 +16,9 @@ another.
 
 Extraction reads the observations from `images.bin` and `points3D.bin` written to a RAM disk, because pycolmap has no
 bulk accessor for points2D and a per-observation Python loop costs about 1 µs each (2.5 s for P1's 2.4 M).
+That extraction (1.1 s for P1, 2.4 s for clip 007, against a 0.26 s solve) is the limit of this Python path, and it
+stays: the fast path is the C ABI that COLMAP's own CASPAR adapter calls (`caspar_mojo.h`), which packs the
+problem from COLMAP's C++ structures in place, with no file round trip and no Python per observation.
 """
 
 from __future__ import annotations
@@ -320,6 +323,14 @@ def apply_result(reconstruction: pycolmap.Reconstruction, bridged: BridgedProble
         camera.params = refined
 
 
+TERMINATION_BY_EXIT: Final[dict[str, pycolmap.BundleAdjustmentTerminationType]] = {
+    "CONVERGED_DIAG_EXIT": pycolmap.BundleAdjustmentTerminationType.NO_CONVERGENCE,
+    "CONVERGED_SCORE_THRESHOLD": pycolmap.BundleAdjustmentTerminationType.CONVERGENCE,
+    "MAX_ITERATIONS": pycolmap.BundleAdjustmentTerminationType.NO_CONVERGENCE,
+}
+"""CASPAR's exit reason to COLMAP's termination, as COLMAP's adapter maps it (`bundle_adjustment_caspar.cc`)."""
+
+
 @dataclass(frozen=True, slots=True)
 class MojoSolveSummary:
     """One `solve_with_mojo` call: the solver's result and where the wall time went."""
@@ -331,6 +342,18 @@ class MojoSolveSummary:
     solve_seconds: float
     """The `caspar_mojo.solver.solve` call: host arrays in, host arrays out."""
     apply_seconds: float
+
+    def bundle_adjustment_summary(self) -> pycolmap.BundleAdjustmentSummary:
+        """The pycolmap summary COLMAP's CASPAR adapter would have returned for this solve.
+
+        Returns:
+            Termination (`TERMINATION_BY_EXIT`; a non-finite or increased cost is a FAILURE) and residual count.
+        """
+        summary = pycolmap.BundleAdjustmentSummary()
+        summary.num_residuals = self.num_residuals
+        healthy: bool = bool(np.isfinite(self.result.final_cost)) and self.result.final_cost <= self.result.initial_cost
+        summary.termination_type = TERMINATION_BY_EXIT[self.result.exit_reason] if healthy else pycolmap.BundleAdjustmentTerminationType.FAILURE
+        return summary
 
 
 def mojo_options(ba_options: pycolmap.BundleAdjustmentOptions) -> BaOptions:

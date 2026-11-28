@@ -204,7 +204,8 @@ class PipelineOptions:
     run time (`colsfm.mapping.caspar_supported_camera_models`): PINHOLE and SIMPLE_RADIAL
     in a stock CASPAR build, plus OPENCV_FISHEYE in
     the `colsfm` environment (recipes/colmap-src) (`docs/caspar-fisheye-adapter.md`). It also drops the robust
-    loss; see `colsfm.mapping`'s module docstring."""
+    loss; see `colsfm.mapping`'s module docstring. `mojo` runs the same solver on the caspar-mojo Mojo kernels
+    (`colsfm.ba_mojo`), with the same `--caspar-option` knobs and the same fallbacks (`colsfm.ba_backend`)."""
     ba_num_threads: int | None = None
     """Ceres threads; None takes `bundle_adjustment_config.num_threads` (8) from the config,
     which is what the blob solves with. Set 1 for a bit-reproducible solve."""

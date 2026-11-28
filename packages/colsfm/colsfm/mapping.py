@@ -176,6 +176,7 @@ from colsfm.ba_backend import (
     BaExecutionPlan,
     CasparOptions,
     apply_caspar_options,
+    backend_name,
 )
 from colsfm.ceres_pose import COLMAP_LINEAR_SOLVER, LinearSolver
 from colsfm.config import BundleAdjustmentConfig, LossFunctionType, VisionMappingConfig
@@ -399,11 +400,12 @@ def bundle_adjustment_options(ba_config: BundleAdjustmentConfig, options: Mappin
 
     plan: BaExecutionPlan = options.ba_plan
     ba_options.backend = BUNDLE_ADJUSTMENT_BACKEND[plan.backend]
-    if plan.backend == "caspar":
-        # The plan keeps a solve that frees `sensor_from_rig` on CASPAR only when the build's probe refined a rig
+    # `mojo` reads the same CASPAR block (`colsfm.ba_mojo.mojo_options`), so both GPU backends take it.
+    if plan.backend != "ceres":
+        # The plan keeps a solve that frees `sensor_from_rig` on the GPU only when the probe refined a rig
         # (`resolve_backend`); a plan that breaks that would hold a requested rig refinement fixed without a word.
         if options.optimize_extrinsics and not plan.capability.refines_sensor_from_rig:
-            raise ValueError(f"a CASPAR plan cannot free sensor_from_rig on this build: {EXTRINSICS_FALLBACK_REASON}")
+            raise ValueError(f"a {plan.backend} plan cannot free sensor_from_rig on this build: {EXTRINSICS_FALLBACK_REASON}")
         # `-1` is COLMAP's own pick, which is what `use_gpu` off means everywhere else
         # in this dataclass. Both were measured to solve on the 5090.
         ba_options.caspar.gpu_index = "0" if options.use_gpu else "-1"
@@ -507,6 +509,7 @@ def solve_bundle_adjustment(
     fixed_camera_params_id: int | None,
     observation_manager: pycolmap.ObservationManager,
     depth_threshold: float,
+    backend: BaBackend | None = None,
 ) -> BundleAdjustmentSolve:
     """Run one global bundle adjustment over every registered image, accept it and guard its points.
 
@@ -539,6 +542,8 @@ def solve_bundle_adjustment(
             already fixes to identity.
         observation_manager: Bookkeeping bound to the reconstruction, for the guards.
         depth_threshold: `filter_degenerate_points`' bound.
+        backend: The plan's backend; None takes the one `ba_options` selects. Only `mojo` needs saying: its options
+            select CASPAR, whose block carries its parameters, and the solve goes through `colsfm.ba_mojo` instead.
 
     Returns:
         The summary, the solve's seconds and what the guards removed.
@@ -557,10 +562,21 @@ def solve_bundle_adjustment(
         fixed_sensor: pycolmap.sensor_t = camera_sensor_id(fixed_camera_params_id)
         if not reconstruction.rig(RIG_ID).is_ref_sensor(fixed_sensor):
             config.set_constant_sensor_from_rig_pose(fixed_sensor)
-    adjuster: pycolmap.BundleAdjuster = pycolmap.create_default_bundle_adjuster(ba_options, config, reconstruction)
-    started: float = time.perf_counter()
-    summary: pycolmap.BundleAdjustmentSummary = adjuster.solve()
-    seconds: float = time.perf_counter() - started
+    summary: pycolmap.BundleAdjustmentSummary
+    seconds: float
+    if (backend or backend_name(ba_options)) == "mojo":
+        from colsfm.ba_mojo import MojoSolveSummary, solve_with_mojo
+
+        # Bridge, solve and write-back together: that is what the run pays for this backend.
+        started: float = time.perf_counter()
+        mojo: MojoSolveSummary = solve_with_mojo(reconstruction, config, ba_options)
+        seconds = time.perf_counter() - started
+        summary = mojo.bundle_adjustment_summary()
+    else:
+        adjuster: pycolmap.BundleAdjuster = pycolmap.create_default_bundle_adjuster(ba_options, config, reconstruction)
+        started = time.perf_counter()
+        summary = adjuster.solve()
+        seconds = time.perf_counter() - started
     if not summary.is_solution_usable():
         raise SolverFailure(f"bundle adjustment ended {summary.termination_type.name} without a usable solution")
     num_diverged: int = filter_degenerate_points(observation_manager, reconstruction, depth_threshold) + filter_projection_failures(
@@ -824,6 +840,7 @@ def run_mapping(
             fixed_camera_params_id,
             correspondences.observation_manager,
             mapping_config.depth_threshold,
+            backend=resolved_options.ba_plan.backend,
         )
         # What the solve was handed: the model after every pre-solve removal, the pole guard's included.
         num_observations: int = reconstruction.compute_num_observations() + solve.num_diverged + solve.num_past_pole_after

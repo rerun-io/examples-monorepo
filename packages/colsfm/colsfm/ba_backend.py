@@ -35,10 +35,18 @@ solving, so `colsfm.mapping` never has to discover it mid-run. The camera models
 are the one fact that arrives late — the reconstruction does not exist at
 resolution — and `BaExecutionPlan.for_camera_models` narrows the plan with them
 exactly once, which is the plan the mapper then executes and reports.
+
+The third backend, `mojo`, is the same CASPAR algorithm (LM + reduced-camera-system PCG) on generic Mojo GPU kernels
+(`packages/caspar-mojo`), reached through `colsfm.ba_mojo`. It reads its solver parameters from the same CASPAR
+block, so `--caspar-option` applies to it unchanged, and it is probed the way CASPAR is: `detect_mojo_capability`
+solves the same sixteen-point model per camera model through the bridge. Where it differs it says so before the
+run starts: it refuses a camera model it has not ported (instead of dropping its observations), it takes one camera
+model per solve, and it has no full-system PCG, so `reduced_camera_system=false` is refused outright.
 """
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from functools import cache
@@ -51,15 +59,17 @@ from numpy import ndarray
 
 from colsfm.reconstruction import RIG_ID, camera_sensor_id
 
-BaBackend: TypeAlias = Literal["ceres", "caspar"]
+BaBackend: TypeAlias = Literal["ceres", "caspar", "mojo"]
 """Which implementation solves the global bundle adjustment; `BaExecutionPlan.backend`."""
 
 BUNDLE_ADJUSTMENT_BACKEND: Final[dict[BaBackend, pycolmap.BundleAdjustmentBackend]] = {
     "ceres": pycolmap.BundleAdjustmentBackend.CERES,
     "caspar": pycolmap.BundleAdjustmentBackend.CASPAR,
+    "mojo": pycolmap.BundleAdjustmentBackend.CASPAR,
 }
 """The name to pycolmap's enum. The enum is bound unconditionally, so its presence proves
-nothing about the build — only a solve does."""
+nothing about the build — only a solve does. `mojo` selects CASPAR because the Mojo solver reads its parameters
+from the CASPAR block; `colsfm.mapping.solve_bundle_adjustment` takes the backend name and branches on it."""
 
 CASPAR_STOCK_CAMERA_MODELS: Final[frozenset[str]] = frozenset({"PINHOLE", "SIMPLE_RADIAL"})
 """The two models stock CASPAR (COLMAP 4.2.0) projects, and the floor every build meets.
@@ -195,15 +205,15 @@ def _caspar_probe_reconstruction(model_name: str, num_sensors: int = 1) -> pycol
     return reconstruction
 
 
-def _caspar_probe_solve(
+def _probe_problem(
     model_name: str,
     *,
     num_sensors: int = 1,
     refine_intrinsics: bool = False,
     refine_sensor_from_rig: bool = False,
     constant_intrinsics: bool = False,
-) -> pycolmap.BundleAdjustmentSummary | None:
-    """One CASPAR bundle adjustment of the probe model: the solve every capability probe reads.
+) -> tuple[pycolmap.Reconstruction, pycolmap.BundleAdjustmentConfig, pycolmap.BundleAdjustmentOptions] | None:
+    """The probe model with the config and options every capability probe solves, on both GPU backends.
 
     Args:
         model_name: A `pycolmap.CameraModelId` member name.
@@ -213,11 +223,7 @@ def _caspar_probe_solve(
         constant_intrinsics: Hold camera 1's intrinsics constant in the config as well.
 
     Returns:
-        The solve's summary, or None when this pycolmap has no such camera model.
-
-    Raises:
-        ValueError: When pycolmap is built without CASPAR_ENABLED, or CASPAR refuses the problem.
-        RuntimeError: When CASPAR throws mid-solve.
+        Model, config and CASPAR options, or None when this pycolmap has no such camera model.
     """
     reconstruction: pycolmap.Reconstruction | None = _caspar_probe_reconstruction(model_name, num_sensors=num_sensors)
     if reconstruction is None:
@@ -241,6 +247,43 @@ def _caspar_probe_solve(
     # `-1` lets COLMAP pick the device, which is what this module's `use_gpu=False`
     # means everywhere else; the probe asks about adapters, not about a GPU.
     ba_options.caspar.gpu_index = "-1"
+    return reconstruction, config, ba_options
+
+
+def _caspar_probe_solve(
+    model_name: str,
+    *,
+    num_sensors: int = 1,
+    refine_intrinsics: bool = False,
+    refine_sensor_from_rig: bool = False,
+    constant_intrinsics: bool = False,
+) -> pycolmap.BundleAdjustmentSummary | None:
+    """One CASPAR bundle adjustment of the probe model: the solve every CASPAR capability probe reads.
+
+    Args:
+        model_name: A `pycolmap.CameraModelId` member name.
+        num_sensors: Cameras in the probe rig (`_caspar_probe_reconstruction`).
+        refine_intrinsics: Free the focal and the distortion block (CASPAR takes them together).
+        refine_sensor_from_rig: Free the rig's `sensor_from_rig`.
+        constant_intrinsics: Hold camera 1's intrinsics constant in the config as well.
+
+    Returns:
+        The solve's summary, or None when this pycolmap has no such camera model.
+
+    Raises:
+        ValueError: When pycolmap is built without CASPAR_ENABLED, or CASPAR refuses the problem.
+        RuntimeError: When CASPAR throws mid-solve.
+    """
+    problem = _probe_problem(
+        model_name,
+        num_sensors=num_sensors,
+        refine_intrinsics=refine_intrinsics,
+        refine_sensor_from_rig=refine_sensor_from_rig,
+        constant_intrinsics=constant_intrinsics,
+    )
+    if problem is None:
+        return None
+    reconstruction, config, ba_options = problem
     return pycolmap.create_default_bundle_adjuster(ba_options, config, reconstruction).solve()
 
 
@@ -465,6 +508,115 @@ def caspar_supported_camera_models() -> frozenset[str]:
     return detect_caspar_capability().supported_camera_models
 
 
+BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
+"""What the Mojo probe re-raises from its broad `except`: a test-time type violation is a bug, not a capability."""
+
+
+def _mojo_probe_solve(
+    model_name: str,
+    *,
+    num_sensors: int = 1,
+    refine_intrinsics: bool = False,
+    refine_sensor_from_rig: bool = False,
+    constant_intrinsics: bool = False,
+) -> pycolmap.BundleAdjustmentSummary | None:
+    """The probe model of `_caspar_probe_solve`, solved by the Mojo solver through `colsfm.ba_mojo`.
+
+    Args:
+        model_name: A `pycolmap.CameraModelId` member name.
+        num_sensors: Cameras in the probe rig.
+        refine_intrinsics: Free the focal and the distortion block.
+        refine_sensor_from_rig: Free the rig's `sensor_from_rig`.
+        constant_intrinsics: Hold camera 1's intrinsics constant in the config as well.
+
+    Returns:
+        The solve's summary, or None when this pycolmap has no such camera model.
+
+    Raises:
+        ValueError: When the bridge's array contract does not carry the model.
+        Exception: Whatever the extension raises: a model it has not ported, or no GPU.
+    """
+    from colsfm.ba_mojo import solve_with_mojo
+
+    problem = _probe_problem(
+        model_name,
+        num_sensors=num_sensors,
+        refine_intrinsics=refine_intrinsics,
+        refine_sensor_from_rig=refine_sensor_from_rig,
+        constant_intrinsics=constant_intrinsics,
+    )
+    if problem is None:
+        return None
+    reconstruction, config, ba_options = problem
+    return solve_with_mojo(reconstruction, config, ba_options).bundle_adjustment_summary()
+
+
+def _mojo_solves_usably(model_name: str, *, num_sensors: int = 1, refine_intrinsics: bool = False, refine_sensor_from_rig: bool = False) -> bool:
+    """Whether the Mojo probe solve with these freedoms ran and left a usable solution; any exception is a no.
+
+    Args:
+        model_name: A `pycolmap.CameraModelId` member name.
+        num_sensors: Cameras in the probe rig.
+        refine_intrinsics: Free the focal and the distortion block.
+        refine_sensor_from_rig: Free the rig's `sensor_from_rig`.
+
+    Returns:
+        True when the solve took the problem and left a usable solution.
+    """
+    try:
+        summary: pycolmap.BundleAdjustmentSummary | None = _mojo_probe_solve(
+            model_name, num_sensors=num_sensors, refine_intrinsics=refine_intrinsics, refine_sensor_from_rig=refine_sensor_from_rig
+        )
+    except BeartypeException:
+        raise
+    except Exception:
+        return False
+    return summary is not None and summary.num_residuals > 0 and summary.is_solution_usable()
+
+
+@cache
+def detect_mojo_capability() -> CasparCapability:
+    """Measure what the Mojo solver solves, once for the life of the process, with CASPAR's probes.
+
+    `unavailable` when the `caspar_mojo` extension does not import (not built for this checkout:
+    `pixi run caspar-mojo-build`); `probe_failed` when it imports but no probe model solved (no GPU answered);
+    `available` with the models it solved otherwise. A model it has not ported raises in the extension
+    rather than being dropped, so its message lands in `probe_errors`.
+
+    Returns:
+        The typed outcome, in the same record CASPAR's probe fills.
+    """
+    try:
+        from caspar_mojo import _caspar_mojo  # noqa: F401
+    except ImportError as error:
+        return CasparCapability(availability="unavailable", supported_camera_models=frozenset(), probe_errors=(f"caspar_mojo: {error}",))
+    supported: set[str] = set()
+    errors: list[str] = []
+    for model_name in CASPAR_PROBE_CAMERA_MODELS:
+        try:
+            summary: pycolmap.BundleAdjustmentSummary | None = _mojo_probe_solve(model_name, constant_intrinsics=True)
+        except BeartypeException:
+            raise
+        except Exception as error:
+            errors.append(f"{model_name}: {error}")
+            continue
+        if summary is not None and summary.num_residuals > 0 and summary.is_solution_usable():
+            supported.add(model_name)
+    if not supported:
+        return CasparCapability(
+            availability="probe_failed" if errors else "unavailable", supported_camera_models=frozenset(), probe_errors=tuple(errors)
+        )
+    return CasparCapability(
+        availability="available",
+        supported_camera_models=frozenset(supported),
+        probe_errors=tuple(errors),
+        refines_sensor_from_rig="PINHOLE" in supported and _mojo_solves_usably("PINHOLE", num_sensors=2, refine_sensor_from_rig=True),
+        intrinsics_refinable_camera_models=frozenset(
+            model_name for model_name in sorted(supported) if _mojo_solves_usably(model_name, refine_intrinsics=True)
+        ),
+    )
+
+
 # ══════════════════════════════════════════════════════════════════════════════════════
 # what the caller asked for
 # ══════════════════════════════════════════════════════════════════════════════════════
@@ -673,16 +825,40 @@ CASPAR_PROBE_FAILED_REASON: Final[str] = (
 """Why a `caspar` request ends up on Ceres when the probe could not run a single model."""
 
 
-def unsupported_models_reason(supported: Iterable[str], unsupported: Iterable[str]) -> str:
+MOJO_BUILD_FALLBACK_REASON: Final[str] = (
+    "the caspar_mojo extension does not import in this checkout (build it for the local GPU with "
+    "`pixi run -e colsfm caspar-mojo-build`), so the Mojo solver cannot solve"
+)
+"""Why a `mojo` request ends up on Ceres when `detect_mojo_capability` cannot import the extension."""
+
+MOJO_PROBE_FAILED_REASON: Final[str] = (
+    "the caspar_mojo extension imports but no probe model solved (no GPU answered?); "
+    "`CasparCapability.probe_errors` carries what it said"
+)
+"""Why a `mojo` request ends up on Ceres when the extension imports and every probe raised."""
+
+MOJO_EXTRINSICS_FALLBACK_REASON: Final[str] = (
+    "the Mojo solver did not refine `sensor_from_rig` on the two-camera probe rig, so a bundle adjustment that frees it solves on Ceres"
+)
+"""Why a `mojo` solve that refines `sensor_from_rig` ends up on Ceres."""
+
+MOJO_MIXED_MODELS_FALLBACK_REASON: Final[str] = "the Mojo solver takes one camera model per solve, and this model holds several"
+"""Why a `mojo` request ends up on Ceres when the reconstruction holds more than one camera model."""
+
+
+def unsupported_models_reason(supported: Iterable[str], unsupported: Iterable[str], backend: BaBackend = "caspar") -> str:
     """The sentence a camera-model fallback reports and records.
 
     Args:
         supported: Model names this build projects.
         unsupported: Model names in the reconstruction that it does not.
+        backend: The GPU backend that was asked for.
 
     Returns:
         One line naming both sets.
     """
+    if backend == "mojo":
+        return f"the Mojo solver solves {sorted(supported)}, and this model has {sorted(unsupported)}, which it refuses"
     return (
         f"this CASPAR build projects {sorted(supported)}, and this model has {sorted(unsupported)}, "
         f"whose observations it would silently drop"
@@ -715,20 +891,21 @@ def resolve_backend(
     Returns:
         The effective backend and the fallback reason, or None when the request stands.
     """
-    if requested != "caspar":
+    if requested == "ceres":
         return requested, None
-    measured: CasparCapability = detect_caspar_capability() if capability is None else capability
+    mojo: bool = requested == "mojo"
+    measured: CasparCapability = capability if capability is not None else detect_mojo_capability() if mojo else detect_caspar_capability()
     if measured.availability == "unavailable":
-        return "ceres", CASPAR_BUILD_FALLBACK_REASON
+        return "ceres", MOJO_BUILD_FALLBACK_REASON if mojo else CASPAR_BUILD_FALLBACK_REASON
     if measured.availability == "probe_failed":
-        return "ceres", CASPAR_PROBE_FAILED_REASON
+        return "ceres", MOJO_PROBE_FAILED_REASON if mojo else CASPAR_PROBE_FAILED_REASON
     if optimize_extrinsics and not measured.refines_sensor_from_rig:
-        return "ceres", EXTRINSICS_FALLBACK_REASON
+        return "ceres", MOJO_EXTRINSICS_FALLBACK_REASON if mojo else EXTRINSICS_FALLBACK_REASON
     if camera_model_names is not None:
         unsupported: frozenset[str] = measured.unsupported(camera_model_names)
         if unsupported:
-            return "ceres", unsupported_models_reason(measured.supported_camera_models, unsupported)
-    return "caspar", None
+            return "ceres", unsupported_models_reason(measured.supported_camera_models, unsupported, requested)
+    return requested, None
 
 
 @dataclass(frozen=True, slots=True)
@@ -794,7 +971,7 @@ class BaExecutionPlan:
             This plan when nothing changes, or the Ceres plan with the camera-model
             reason when CASPAR would drop a model's observations or cannot free its intrinsics.
         """
-        if self.backend != "caspar":
+        if self.backend == "ceres":
             return self
         names: frozenset[str] = frozenset(camera_model_names)
         unsupported: frozenset[str] = self.capability.unsupported(names)
@@ -803,8 +980,10 @@ class BaExecutionPlan:
                 self,
                 backend="ceres",
                 ceres_polish=False,
-                fallback_reason=unsupported_models_reason(self.capability.supported_camera_models, unsupported),
+                fallback_reason=unsupported_models_reason(self.capability.supported_camera_models, unsupported, self.backend),
             )
+        if self.backend == "mojo" and len(names) > 1:
+            return replace(self, backend="ceres", ceres_polish=False, fallback_reason=MOJO_MIXED_MODELS_FALLBACK_REASON)
         if any(len(models) > 1 for models in rig_camera_models):
             return replace(self, backend="ceres", ceres_polish=False, fallback_reason=MIXED_MODEL_RIG_FALLBACK_REASON)
         fixed: frozenset[str] = self.capability.fixed_intrinsics_only(names) if refine_intrinsics else frozenset()
@@ -814,7 +993,7 @@ class BaExecutionPlan:
             self,
             backend="ceres",
             ceres_polish=False,
-            fallback_reason=f"this CASPAR build refines the intrinsics of {sorted(self.capability.intrinsics_refinable_camera_models)} only, and this model frees them for {sorted(fixed)}",
+            fallback_reason=f"this {'Mojo solver' if self.backend == 'mojo' else 'CASPAR build'} refines the intrinsics of {sorted(self.capability.intrinsics_refinable_camera_models)} only, and this model frees them for {sorted(fixed)}",
         )
 
     def announce(self) -> None:
@@ -879,6 +1058,10 @@ def resolve_ba_plan(
             fractional value.
     """
     options: CasparOptions = parse_caspar_options(caspar_option_items)
+    if requested == "mojo" and options.get("reduced_camera_system") is False:
+        raise ValueError(
+            "[colsfm] --ba-backend mojo solves the reduced camera system only; drop reduced_camera_system=false and the full-system knobs"
+        )
     # Measured here rather than inside `resolve_backend`, so the plan carries the same
     # answer into `for_camera_models` instead of asking the build a second time. A
     # `ceres` request never probes: nothing in the plan will consult the answer.
@@ -887,6 +1070,8 @@ def resolve_ba_plan(
         measured = capability
     elif requested == "caspar":
         measured = detect_caspar_capability()
+    elif requested == "mojo":
+        measured = detect_mojo_capability()
     backend, reason = resolve_backend(
         requested,
         optimize_extrinsics=optimize_extrinsics,
@@ -897,7 +1082,7 @@ def resolve_ba_plan(
         requested_backend=requested,
         backend=backend,
         caspar_options=options,
-        ceres_polish=ceres_polish and backend == "caspar",
+        ceres_polish=ceres_polish and backend != "ceres",
         fallback_reason=reason,
         capability=measured,
     )

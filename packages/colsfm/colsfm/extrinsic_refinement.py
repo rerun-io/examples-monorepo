@@ -385,7 +385,13 @@ def refine_extrinsics(
         # `solve_extrinsics` raises on an unusable solve, so only accepted extrinsics are applied.
         apply_extrinsics(reconstruction, rig_reference, refined)
         solve: BundleAdjustmentSolve = solve_bundle_adjustment(
-            reconstruction, ba_options, gauge_frame_id, None, observation_manager, mapping_config.depth_threshold
+            reconstruction,
+            ba_options,
+            gauge_frame_id,
+            None,
+            observation_manager,
+            mapping_config.depth_threshold,
+            backend=base_options.ba_plan.backend,
         )
         # The new extrinsics can move an observation past a pole, so the boundary's pre-solve guard can remove some too.
         if solve.num_removed:
