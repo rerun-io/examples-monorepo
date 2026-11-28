@@ -80,8 +80,11 @@ def _load_checkpoint(
             if (include_prefix is None or key.startswith(include_prefix))
             and not any(key.startswith(prefix) for prefix in exclude_prefixes)
         )
+        # get_tensor only maps the file: the bytes are read when a tensor is first touched, which for the DiT was its
+        # move to the GPU in prepare_on_device (~12 GB from the model store on the critical path). Copying here reads
+        # them where the load runs (the prefetch thread, beside skeleton conditioning).
         return (
-            {key: checkpoint.get_tensor(key) for key in keys},
+            {key: checkpoint.get_tensor(key).clone() for key in keys},
             dict(checkpoint.metadata() or {}),
         )
 
