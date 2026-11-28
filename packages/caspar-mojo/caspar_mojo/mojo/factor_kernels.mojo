@@ -375,9 +375,9 @@ def linearize_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bo
     reduce_add(scalars, Int(cost_slot), cost)
 
 
-comptime POINT_LANES = 16
-"""Lanes that share one point in the per-point kernels: a point has 15 (100 frames) to 60 (400 frames) observations,
-so a full warp would idle half its lanes on the small problems."""
+comptime POINT_LANES = 4
+"""Lanes that share one point in the per-point kernels. Measured on the 3060 (1, 4, 16 lanes): one lane per point
+is 1.5x slower on 60 observations per point, 4 and 16 tie there and 4 is ahead on 15 per point."""
 
 
 @always_inline
@@ -409,7 +409,7 @@ def point_linearize_kernel[Model: CameraModel](
     comptime assert point_off.flat_rank == 1 and point_start.flat_rank == 1 and by_point_pixels.flat_rank == 2
     comptime assert by_point_frame.flat_rank == 1 and by_point_camera.flat_rank == 1
     comptime assert g.flat_rank == 1 and hblk.flat_rank == 1
-    # No early return: a warp holds two points and the shuffles need every lane. Idle lanes loop over nothing.
+    # No early return: a warp holds several points and the shuffles need every lane. Idle lanes loop over nothing.
     var j = global_idx.x // POINT_LANES
     var lane = global_idx.x % POINT_LANES
     var v = Int(point_off[j][0]) if j < Int(point_off.dim[0]()) else -1
@@ -524,7 +524,7 @@ def point_gather_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG:
     comptime assert rig_off.flat_rank == 1 and calib_off.flat_rank == 1
     comptime assert g.flat_rank == 1 and dst.flat_rank == 1
     comptime K = Model.NUM_CALIB
-    # No early return: a warp holds two points and the shuffles need every lane. Idle lanes loop over nothing.
+    # No early return: a warp holds several points and the shuffles need every lane. Idle lanes loop over nothing.
     var j = global_idx.x // POINT_LANES
     var lane = global_idx.x % POINT_LANES
     var v = Int(point_off[j][0]) if j < Int(point_off.dim[0]()) else -1
