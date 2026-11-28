@@ -20,8 +20,8 @@ from max.gpu.primitives import warp
 
 from layout import ImmTileTensor, MutTileTensor, row_major
 
-from camera_models import CameraModel, Params, Projection
-from geometry import Mat3, Pose, Vec3, apply, cross, rotation, translation
+from camera_models import CameraModel, Params
+from geometry import Pose, Vec3, apply, cross, rotation, translation
 
 comptime L1 = type_of(row_major((0,)))
 comptime L2 = type_of(row_major((0, 0)))

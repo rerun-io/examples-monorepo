@@ -5,12 +5,11 @@ block index picks the comptime block size. The damped block is CASPAR's `normali
 M = B + lambda diag(B) + lambda 1e-6 I, solved exactly (dense Cholesky, unrolled at compile time).
 """
 
-from std.math import sqrt
 from max.gpu import global_idx
 
-from layout import ImmTileTensor, MutTileTensor
+from layout import MutTileTensor
 
-from factor_kernels import F32In, F64Ptr, I32In, L1, L2, Vec, VecIn, damped_solve, reduce_add, tri, tri_index
+from factor_kernels import F32In, F64Ptr, I32In, L2, Vec, VecIn, damped_solve, reduce_add, tri, tri_index
 from camera_models import CameraModel
 from geometry import Pose, retract
 
