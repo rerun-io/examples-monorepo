@@ -168,6 +168,37 @@ def parse_trace(text: str) -> CasparTrace:
     )
 
 
+def traced_solve(
+    reconstruction: pycolmap.Reconstruction, config: pycolmap.BundleAdjustmentConfig, options: pycolmap.BundleAdjustmentOptions
+) -> tuple[CasparTrace, float]:
+    """Solve in place with COLMAP's VLOG(2) on and read CASPAR's progress.
+
+    Args:
+        reconstruction: The model, adjusted in place.
+        config: The solve's config.
+        options: The solve's options.
+
+    Returns:
+        The trace and the wall time of `adjuster.solve()`.
+    """
+    saved: tuple[int, bool] = (pycolmap.logging.verbose_level, pycolmap.logging.logtostderr)
+    pycolmap.logging.verbose_level = 2
+    pycolmap.logging.logtostderr = True
+    adjuster: pycolmap.BundleAdjuster = pycolmap.create_default_bundle_adjuster(options, config, reconstruction)
+    seconds: list[float] = []
+
+    def run() -> None:
+        started: float = time.perf_counter()
+        adjuster.solve()
+        seconds.append(time.perf_counter() - started)
+
+    try:
+        text: str = _captured_output(run)
+    finally:
+        pycolmap.logging.verbose_level, pycolmap.logging.logtostderr = saved
+    return parse_trace(text), seconds[0]
+
+
 def trace_caspar(reconstruction: pycolmap.Reconstruction, options: pycolmap.BundleAdjustmentOptions) -> CasparTrace:
     """Solve a copy once with COLMAP's VLOG(2) on and read CASPAR's progress.
 
@@ -179,15 +210,7 @@ def trace_caspar(reconstruction: pycolmap.Reconstruction, options: pycolmap.Bund
         The trace.
     """
     copy = pycolmap.Reconstruction(reconstruction)
-    config: pycolmap.BundleAdjustmentConfig = gauge_config(copy)
-    saved: tuple[int, bool] = (pycolmap.logging.verbose_level, pycolmap.logging.logtostderr)
-    pycolmap.logging.verbose_level = 2
-    pycolmap.logging.logtostderr = True
-    try:
-        text: str = _captured_output(lambda: pycolmap.create_default_bundle_adjuster(options, config, copy).solve())
-    finally:
-        pycolmap.logging.verbose_level, pycolmap.logging.logtostderr = saved
-    return parse_trace(text)
+    return traced_solve(copy, gauge_config(copy), options)[0]
 
 
 def run_baseline(model_dir: Path, runs: int, options: pycolmap.BundleAdjustmentOptions) -> CasparBaseline:
