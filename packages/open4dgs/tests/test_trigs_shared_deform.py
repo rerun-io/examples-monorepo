@@ -144,8 +144,8 @@ def test_open4dgs_trainer_step_matches_the_stock_per_camera_step(kind: str, call
 
 def test_a_camera_drawn_twice_renders_once_with_the_gradients_and_relocation_cue_of_the_duplicates(monkeypatch: pytest.MonkeyPatch) -> None:
     """5 cameras drawn with replacement from 5 (TRiGS's official sampler caps the batch at the training cameras): the
-    batched group rasterizes each distinct camera once and computes its losses once, and the step's gradients and
-    relocation accumulators match the stock trainer, which renders every draw."""
+    batched group rasterizes each distinct camera once, and the step's gradients and relocation accumulators match the
+    stock trainer, which renders every draw."""
     if not torch.cuda.is_available():
         pytest.skip("needs a CUDA GPU (gsplat rasterization)")
     r_fast, g_fast, _, cams_fast, reloc_fast = _one_step("batched", monkeypatch, batch=5)

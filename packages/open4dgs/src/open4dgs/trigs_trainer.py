@@ -17,8 +17,8 @@ Renders equal the per-camera path bit for bit; parameter gradients differ only i
 
 TRiGS's official sampler draws the step's cameras WITH replacement (``random.choices``): 8 cameras of 6 views are ~4.6
 distinct ones. A drawn twice camera renders the same image at the same time, so the group rasterizes each distinct camera
-once and the trainer computes its losses (photometric and the camera-loss hook) once per step (``_step_memo``); the loop
-still adds them once per draw, so the loss, every gradient and the relocation cue are those of the duplicate renders.
+once; the batched loss weights each distinct camera by its draws and the per-camera loop scores every draw, so the loss,
+every gradient, the logged terms and the relocation cue are those of the duplicate renders.
 
 Three levers from PennyGS (arXiv 2611.27525) and HiGS (arXiv 2611.31918), off in the constructor (``TrainConfig`` turns
 them on):
@@ -41,7 +41,7 @@ backpropagates into a zero tensor of the whole batch) and the row gather is ``in
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal, NamedTuple
+from typing import Literal, NamedTuple
 
 import torch
 from jaxtyping import Float32, Float64, Int64
@@ -50,7 +50,7 @@ from trigs.core.camera import CameraConfig
 from trigs.core.trainer import TrigsTrainer, TrigsTrainingConfig, TrigsTrainingResult
 from trigs.strategy.motion_guided_relocation import MotionGuidedRelocationStrategy
 
-from open4dgs.fused_loss import masked_composite_terms, masked_composite_terms_batch
+from open4dgs.fused_loss import masked_composite_terms
 from open4dgs.strided import GSPLAT_EPS2D, STRIDE, STRIDE_OFFSETS, StrideState, strided_intrinsics, strided_pixels
 
 RENDER_INPUT_KEYS: tuple[str, ...] = ("means", "quats", "scales", "opacities", "colors")
@@ -99,6 +99,9 @@ class SizeBatch(NamedTuple):
     gamma: Tensor
     info: dict
     cams: list[int]
+    """The batch's distinct cameras, in draw order."""
+    draws: tuple[int, ...]
+    """How many times the step drew each of ``cams``."""
     batched: tuple[Tensor, Tensor, Tensor | None]
     """(colors, alphas, depth) of all ``cams``: ``(b, h, w, 3)``, ``(b, h, w, 1)``, ``(b, h, w, 1)`` or None."""
 
@@ -156,10 +159,7 @@ class SharedTimeGroup:
         self._loss: Tensor | None = None
         self._batches: list[SizeBatch] = []
         self._batch_of: dict[int, tuple[int, int]] = {}
-        self._draws: list[tuple[int, ...]] = []
-        """Per size batch: how many times the step drew each of its (distinct) cameras."""
-        if self._batch_cameras:  # per camera, each draw backpropagates at once: a shared loss would run backward twice
-            trainer._step_memo = {}
+        if self._batch_cameras:
             by_size: dict[tuple[int, int], list[int]] = {}
             for cam in dict.fromkeys(self._cam_group):  # distinct cameras, in draw order
                 by_size.setdefault((self._cameras.width_for(cam), self._cameras.height_for(cam)), []).append(cam)
@@ -173,8 +173,8 @@ class SharedTimeGroup:
                 # and the cameras' gradients are then summed; unbind's backward stacks the cameras' gradients once.
                 depth: Tensor | None = info.get("render_depth")
                 depths = depth.unbind(0) if depth is not None else None
-                self._batches.append(SizeBatch(colors.unbind(0), alphas.unbind(0), depths, gamma, info, cams, (colors, alphas, depth)))
-                self._draws.append(tuple(self._cam_group.count(cam) for cam in cams))
+                draws: tuple[int, ...] = tuple(self._cam_group.count(cam) for cam in cams)
+                self._batches.append(SizeBatch(colors.unbind(0), alphas.unbind(0), depths, gamma, info, cams, draws, (colors, alphas, depth)))
 
     def render(self, group_i: int) -> RenderOut:
         """Camera ``cam_group[group_i]``'s render: its slice of the size batch, or its own rasterize call."""
@@ -208,23 +208,18 @@ class SharedTimeGroup:
         """
         trainer = self._trainer
         compiled = trainer._compiled_batch_terms
-        hook = trainer._camera_loss_hook  # the hook itself (the property wraps it for the loop's per-draw memo)
+        hook = trainer.camera_loss_hook
         if not (
             self._batch_cameras
             and len(self._batches) == 1
             and compiled is not None
             and gt_alphas is not None
-            and config.masked_rgb_loss
-            and config.masked_rgb_composite
-            and not config.masked_rgb_random_bg
-            and config.clamp_render_for_loss
-            and "cam_gain" not in self._params
+            and trainer.fused_loss_reproduces(self._params, config)
             and (hook is None or hasattr(hook, "batch"))
         ):
             return None
         batch: SizeBatch = self._batches[0]
-        cams: list[int] = batch.cams
-        draws: tuple[int, ...] = self._draws[0]
+        cams, draws = batch.cams, batch.draws
         colors, alphas, depth = batch.batched
         gt: Tensor = torch.stack([gt_images[frame_idx][c] for c in cams]).to(trainer.device)
         mask: Tensor = torch.stack([gt_alphas[frame_idx][c] for c in cams]).to(trainer.device).float()
@@ -235,15 +230,21 @@ class SharedTimeGroup:
             if depth is None:
                 return None
             hook_loss = hook.batch(
-                step=step, frame_idx=frame_idx, cams=cams, depth=depth[..., 0], alphas=alphas[..., 0], offset=trainer.stride_state.offset
+                step=step,
+                frame_idx=frame_idx,
+                cams=cams,
+                draws=draws,
+                depth=depth[..., 0],
+                alphas=alphas[..., 0],
+                offset=trainer.stride_state.offset,
             )
             if hook_loss is None:
                 return None
         bg: Tensor = trainer._const_tensor(tuple(config.masked_rgb_bg_color), colors.device, colors.dtype)
         l1, pred_l, gt_l, alpha_out, alpha_mask = compiled(colors, alphas, gt, mask, bg, float(config.alpha_loss_eps))
-        from hexels_mojo.fused_ssim import C1, C2, FusedSSIMMap
+        from hexels_mojo.fused_ssim import fused_ssim_per_image
 
-        ssim: Tensor = FusedSSIMMap.apply(C1, C2, pred_l, gt_l, "valid", True).mean(dim=(1, 2, 3))  # pyrefly: ignore[missing-attribute]
+        ssim: Tensor = fused_ssim_per_image(pred_l, gt_l, padding="valid")
         rgb: Tensor = l1 * (1.0 - config.ssim_lambda) + (1.0 - ssim) * config.ssim_lambda
         cam_loss: Tensor = config.lambda_render * rgb + config.lambda_alpha_outside_mask * alpha_out + config.lambda_alpha_mask * alpha_mask
         if hook_loss is not None:
@@ -280,17 +281,16 @@ class SharedTimeGroup:
         """The deferred camera backward and per-batch relocation cues, then the leaves' gradients through deform + gather."""
         if self._loss is not None and self._loss.requires_grad:
             self._loss.backward()
-        for batch, draws in zip(self._batches, self._draws, strict=True):
+        for batch in self._batches:
             relocation.accumulate_2d(reloc_state, batch.info, batch_size=n_group)
-            if max(draws) > 1:
-                add_duplicate_visibility(reloc_state, batch.info, draws)
+            if max(batch.draws) > 1:
+                add_duplicate_visibility(reloc_state, batch.info, batch.draws)
         outs = [self._outputs[k] for k in RENDER_INPUT_KEYS if self._leaves[k].grad is not None and self._outputs[k].requires_grad]
         grads = [self._leaves[k].grad for k in RENDER_INPUT_KEYS if self._leaves[k].grad is not None and self._outputs[k].requires_grad]
         if outs:
             torch.autograd.backward(outs, grads)
-        self._batches, self._draws, self._loss, self._outputs, self._leaves = [], [], None, {}, {}
+        self._batches, self._loss, self._outputs, self._leaves = [], None, {}, {}
         self._trainer.stride_state.offset = None
-        self._trainer._step_memo = None
 
 
 def add_duplicate_visibility(reloc_state: dict, info: dict, draws: tuple[int, ...]) -> None:
@@ -302,14 +302,15 @@ def add_duplicate_visibility(reloc_state: dict, info: dict, draws: tuple[int, ..
     radii: Tensor | None = info.get("radii")
     if visible_accum is None or radii is None:
         return
-    vis: Tensor = radii.detach() > 0
-    if vis.shape[-1] == 2:
-        vis = vis.all(dim=-1)
-    # Python-int weights: a host tensor of the draw counts would be a blocking copy (a host sync) every step.
+    # Only the repeated cameras' visibility, with Python-int weights (a host tensor of the draw counts would be a
+    # blocking copy, a host sync, every step).
     extra: Tensor | None = None
     for j, k in enumerate(draws):
         if k > 1:
-            term: Tensor = (k - 1) * vis[j].to(visible_accum.dtype)
+            vis: Tensor = radii[j].detach() > 0
+            if vis.shape[-1] == 2:
+                vis = vis.all(dim=-1)
+            term: Tensor = (k - 1) * vis.to(visible_accum.dtype)
             extra = term if extra is None else extra + term
     if extra is None:
         return
@@ -369,7 +370,6 @@ class Open4dgsTrainer(TrigsTrainer):
         fused_loss: bool = False,
         **kwargs: object,
     ) -> None:
-        self._camera_loss_hook: Any = None
         super().__init__(*args, **kwargs)  # pyrefly: ignore[bad-argument-type]
         if pixel_stride not in (1, STRIDE):
             raise ValueError(f"pixel_stride must be 1 or {STRIDE}, got {pixel_stride}")
@@ -381,40 +381,18 @@ class Open4dgsTrainer(TrigsTrainer):
         self._compiled_terms = torch.compile(masked_composite_terms, dynamic=True) if fused_loss else None
         # The batched camera loss (``SharedTimeGroup.camera_losses``): its own graph; dynamic=None makes the camera count
         # (the step's distinct cameras, 1-8) a dynamic dimension at its first change instead of one graph per count.
-        self._compiled_batch_terms = torch.compile(masked_composite_terms_batch, dynamic=None) if fused_loss else None
+        self._compiled_batch_terms = torch.compile(masked_composite_terms, dynamic=None) if fused_loss else None
         self.stride_state: StrideState = StrideState()
         self._strided_of: CameraConfig | None = None
         self._strided: dict[tuple[int, int], CameraConfig] = {}
         self._const_cache: dict[tuple[object, str, torch.dtype], Tensor] = {}
-        self._step_memo: dict[tuple[str, int, int], Any] | None = None
-        """While a ``SharedTimeGroup`` runs: each (term, frame, camera)'s losses, computed once for a camera drawn twice."""
-
-    @property
-    def camera_loss_hook(self) -> Any:  # pyrefly: ignore[bad-override]
-        """The recipe's per-camera loss hook (the MoGe-2 prior), called once per distinct camera of a shared-time step."""
-        hook = self._camera_loss_hook
-        if hook is None or self._step_memo is None:
-            return hook
-        memo: dict[tuple[str, int, int], Any] = self._step_memo
-
-        def once(**kwargs: Any) -> Tensor:
-            key: tuple[str, int, int] = ("hook", kwargs["frame_idx"], kwargs["cam_idx"])
-            if key not in memo:
-                memo[key] = hook(**kwargs)
-            return memo[key]
-
-        return once
-
-    @camera_loss_hook.setter
-    def camera_loss_hook(self, hook: Any) -> None:
-        self._camera_loss_hook = hook
 
     def train_from_params(  # pyrefly: ignore[bad-override]  # keyword-only: every caller (TRiGS's train too) passes keywords
         self,
         *,
         gt_images_per_frame: dict[int, list[Tensor]],
         gt_alphas_per_frame: dict[int, list[Tensor]],
-        **kwargs: Any,  # the rest of TrigsTrainer.train_from_params, passed through
+        **kwargs: object,  # the rest of TrigsTrainer.train_from_params, passed through
     ) -> TrigsTrainingResult:
         """Lever 4: with ``pixel_stride=2`` the train loop reads every frame and mask through ``strided_frames``."""
         if self.pixel_stride > 1:
@@ -462,6 +440,18 @@ class Open4dgsTrainer(TrigsTrainer):
             out = self._strided[offset] = strided_camera_config(cameras, offset)
         return out
 
+    def fused_loss_reproduces(self, params: nn.ParameterDict, config: TrigsTrainingConfig) -> bool:
+        """Whether lever 6's fused loss is on and ``config`` is the TRiGS configuration it reproduces (masked composite on a
+        constant background, clamped renders, no per-camera gain)."""
+        return (
+            self._compiled_terms is not None
+            and config.masked_rgb_loss
+            and config.masked_rgb_composite
+            and not config.masked_rgb_random_bg
+            and config.clamp_render_for_loss
+            and "cam_gain" not in params
+        )
+
     def _photometric_losses(
         self,
         params: nn.ParameterDict,
@@ -473,48 +463,20 @@ class Open4dgsTrainer(TrigsTrainer):
         cam_idx: int,
         config: TrigsTrainingConfig,
     ) -> tuple[Tensor, Tensor, Tensor]:
-        """Lever 6: the fused masked-composite loss when the configuration is the one it reproduces, else TRiGS's; once per
-        distinct camera of a shared-time step."""
-        memo = self._step_memo
-        if memo is not None:
-            key: tuple[str, int, int] = ("photo", frame_idx, cam_idx)
-            if key not in memo:
-                memo[key] = self._photometric_terms(params, render_colors, render_alphas, gt_rgb, gt_alphas_per_frame, frame_idx, cam_idx, config)
-            return memo[key]
-        return self._photometric_terms(params, render_colors, render_alphas, gt_rgb, gt_alphas_per_frame, frame_idx, cam_idx, config)
-
-    def _photometric_terms(
-        self,
-        params: nn.ParameterDict,
-        render_colors: Tensor,
-        render_alphas: Tensor,
-        gt_rgb: Tensor,
-        gt_alphas_per_frame: dict[int, list[Tensor]] | None,
-        frame_idx: int,
-        cam_idx: int,
-        config: TrigsTrainingConfig,
-    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Lever 6: the fused masked-composite loss when the configuration is the one it reproduces, else TRiGS's."""
         compiled_terms = self._compiled_terms
-        if not (
-            compiled_terms is not None
-            and config.masked_rgb_loss
-            and config.masked_rgb_composite
-            and not config.masked_rgb_random_bg
-            and config.clamp_render_for_loss
-            and "cam_gain" not in params
-            and gt_alphas_per_frame is not None
-        ):
+        if compiled_terms is None or gt_alphas_per_frame is None or not self.fused_loss_reproduces(params, config):
             return super()._photometric_losses(params, render_colors, render_alphas, gt_rgb, gt_alphas_per_frame, frame_idx, cam_idx, config)
         mask: Tensor = gt_alphas_per_frame[frame_idx][cam_idx].to(self.device).float()
-        alpha: Tensor = render_alphas[0].float()
+        alpha: Tensor = render_alphas.float()
         if mask.ndim != 2 or alpha.shape[-1] != 1 or tuple(mask.shape) != tuple(render_colors.shape[1:3]):
             return super()._photometric_losses(params, render_colors, render_alphas, gt_rgb, gt_alphas_per_frame, frame_idx, cam_idx, config)
         bg: Tensor = self._const_tensor(tuple(config.masked_rgb_bg_color), render_colors.device, render_colors.dtype)
-        l1, pred_l, gt_l, alpha_out, alpha_mask = compiled_terms(render_colors[0], alpha, gt_rgb, mask, bg, float(config.alpha_loss_eps))
-        from hexels_mojo.fused_ssim import fused_ssim
+        l1, pred_l, gt_l, alpha_out, alpha_mask = compiled_terms(render_colors, alpha, gt_rgb[None], mask[None], bg, float(config.alpha_loss_eps))
+        from hexels_mojo.fused_ssim import fused_ssim_per_image
 
-        ssim: Tensor = fused_ssim(pred_l.permute(2, 0, 1)[None], gt_l.permute(2, 0, 1)[None], padding="valid")
-        return l1 * (1.0 - config.ssim_lambda) + (1.0 - ssim) * config.ssim_lambda, alpha_out, alpha_mask
+        ssim: Tensor = fused_ssim_per_image(pred_l, gt_l, padding="valid")
+        return (l1 * (1.0 - config.ssim_lambda) + (1.0 - ssim) * config.ssim_lambda)[0], alpha_out[0], alpha_mask[0]
 
     def _slice_rowwise_params(self, params: nn.ParameterDict | dict, idx: Tensor) -> dict:
         """TRiGS's per-row gather (``v[idx]`` for every row-wise tensor) as ``index_select``: its backward is one
