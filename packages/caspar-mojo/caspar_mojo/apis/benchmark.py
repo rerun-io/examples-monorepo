@@ -8,45 +8,58 @@ LM trial count and PCG iteration count is printed next to its time: after conver
 length, so time per PCG iteration is the fair comparison.
 """
 
-import argparse
 import contextlib
 import dataclasses
 import fcntl
-import json
 import os
 import statistics
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
+from serde import serde
+from serde.json import to_json
 
 from caspar_mojo.problem import BaProblem, CameraModel
 from caspar_mojo.reference.synthetic import make_problem
 from caspar_mojo.solver import solve
 
-PROBLEMS: dict[str, tuple[CameraModel, dict[str, object]]] = {
-    "p1": (CameraModel.PINHOLE, {"n_frames": 400, "n_points": 40000, "visible_fraction": 0.15}),
-    "pinhole-100": (CameraModel.PINHOLE, {}),
-    "simple-radial-100": (CameraModel.SIMPLE_RADIAL, {}),
-    "fisheye-100": (CameraModel.OPENCV_FISHEYE, {}),
-    "full-opencv-100": (CameraModel.FULL_OPENCV, {}),
-    "rig-100": (CameraModel.PINHOLE, {"rig_cameras": 2, "sensor_free": True}),
-    "clip007-shape": (
-        CameraModel.PINHOLE,
-        {"n_frames": 524, "n_points": 300000, "rig_cameras": 6, "visible_fraction": 0.5, "frame_window": 1100},
-    ),
+ProblemName = Literal["p1", "pinhole-100", "simple-radial-100", "fisheye-100", "full-opencv-100", "rig-100", "clip007-shape"]
+
+
+@dataclass(frozen=True, slots=True)
+class Case:
+    """`make_problem` arguments of one benchmark problem (seed 0)."""
+
+    model: CameraModel
+    n_frames: int = 100
+    n_points: int = 20000
+    visible_fraction: float = 0.15
+    rig_cameras: int = 1
+    sensor_free: bool = False
+    frame_window: int | None = None
+
+
+PROBLEMS: dict[ProblemName, Case] = {
+    "p1": Case(CameraModel.PINHOLE, n_frames=400, n_points=40000),
+    "pinhole-100": Case(CameraModel.PINHOLE),
+    "simple-radial-100": Case(CameraModel.SIMPLE_RADIAL),
+    "fisheye-100": Case(CameraModel.OPENCV_FISHEYE),
+    "full-opencv-100": Case(CameraModel.FULL_OPENCV),
+    "rig-100": Case(CameraModel.PINHOLE, rig_cameras=2, sensor_free=True),
+    "clip007-shape": Case(CameraModel.PINHOLE, n_frames=524, n_points=300000, visible_fraction=0.5, rig_cameras=6, frame_window=1100),
 }
-"""Problem name -> camera model and `make_problem` arguments over the 100-frame defaults."""
 
 
 @dataclass(frozen=True, slots=True)
 class Config:
     """What to time."""
 
-    problems: tuple[str, ...] = tuple(PROBLEMS)
-    """Names from `PROBLEMS`."""
-    intrinsics_free: tuple[bool, ...] = (False, True)
+    problems: tuple[ProblemName, ...] = tuple(PROBLEMS)
+    """Problems to time."""
+    intrinsics: tuple[Literal["fixed", "free"], ...] = ("fixed", "free")
     """Run each problem with the focal-and-extra block fixed, refined, or both."""
     runs: int = 7
     """Timed solves per case, after one untimed warm-up."""
@@ -57,7 +70,12 @@ class Config:
     lock: Path | None = None
     """File to flock around each case's solves (a GPU shared between jobs), not around the problem building."""
 
+    def __post_init__(self) -> None:
+        if self.runs < 1:
+            raise ValueError(f"runs must be >= 1, got {self.runs}")
 
+
+@serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
 class Timing:
     """One case: the best and median solver time of `Config.runs` solves, with every run's LM and PCG counts."""
@@ -77,12 +95,29 @@ class Timing:
     exit: str
 
 
-def build(name: str, intrinsics_free: bool) -> BaProblem:
-    """The named problem, observations sorted by camera then frame (the order the scatter pre-reduction wants)."""
-    model, arguments = PROBLEMS[name]
-    sizes: dict[str, object] = {"n_frames": 100, "n_points": 20000, "visible_fraction": 0.15, **arguments}
-    focal_noise = 0.01 if intrinsics_free else 0.0
-    problem = make_problem(model, seed=0, intrinsics_free=intrinsics_free, focal_noise=focal_noise, **sizes)[0]  # type: ignore[arg-type]
+@serde(deny_unknown_fields=True)
+@dataclass(frozen=True, slots=True)
+class TimingTable:
+    """The `--output` file."""
+
+    rows: list[Timing]
+
+
+def build(name: ProblemName, intrinsics_free: bool) -> BaProblem:
+    """The named problem, observations sorted by camera then frame (the order the solver would sort them into)."""
+    case = PROBLEMS[name]
+    problem = make_problem(
+        case.model,
+        n_frames=case.n_frames,
+        n_points=case.n_points,
+        seed=0,
+        rig_cameras=case.rig_cameras,
+        focal_noise=0.01 if intrinsics_free else 0.0,
+        intrinsics_free=intrinsics_free,
+        sensor_free=case.sensor_free,
+        visible_fraction=case.visible_fraction,
+        frame_window=case.frame_window,
+    )[0]
     order = np.lexsort((problem.observation_frame, problem.observation_camera))
     return dataclasses.replace(
         problem,
@@ -93,7 +128,7 @@ def build(name: str, intrinsics_free: bool) -> BaProblem:
     )
 
 
-def time_case(name: str, intrinsics_free: bool, config: Config) -> Timing:
+def time_case(name: ProblemName, intrinsics_free: bool, config: Config) -> Timing:
     """Best and median solver time of one case, with the LM and PCG counts of every run."""
     problem = build(name, intrinsics_free)
     with open(config.lock, "a") if config.lock else contextlib.nullcontext() as lock:
@@ -129,12 +164,12 @@ def main(config: Config) -> None:
     """Time every case and print one line each."""
     rows: list[Timing] = []
     for name in config.problems:
-        for intrinsics_free in config.intrinsics_free:
+        for intrinsics in config.intrinsics:
             start = time.perf_counter()
-            row = time_case(name, intrinsics_free, config)
+            row = time_case(name, intrinsics == "free", config)
             rows.append(row)
             print(
-                f"{name:18s} intr={'free ' if intrinsics_free else 'fixed'} obs={row.observations:>9,} "
+                f"{name:18s} intr={intrinsics:5s} obs={row.observations:>9,} "
                 f"best={1e3 * row.best_s:7.1f} ms median={1e3 * row.median_s:7.1f} ms "
                 f"ms/PCG={row.best_ms_per_pcg:.3f} (median {row.median_ms_per_pcg:.3f}) ms/LM={row.best_ms_per_lm:.2f} "
                 f"LM={row.lm_trials} PCG={row.pcg_iterations} {row.exit} ({time.perf_counter() - start:.0f} s)",
@@ -142,17 +177,4 @@ def main(config: Config) -> None:
             )
     if config.output is not None:
         config.output.parent.mkdir(parents=True, exist_ok=True)
-        config.output.write_text(json.dumps([dataclasses.asdict(row) for row in rows], indent=1))
-
-
-def parse(argv: list[str] | None = None) -> Config:
-    """`Config` from the command line."""
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--problems", nargs="+", choices=list(PROBLEMS), default=list(PROBLEMS))
-    parser.add_argument("--intrinsics", nargs="+", choices=["fixed", "free"], default=["fixed", "free"])
-    parser.add_argument("--runs", type=int, default=7)
-    parser.add_argument("--profile", action="store_true")
-    parser.add_argument("--output", type=Path)
-    parser.add_argument("--lock", type=Path)
-    args = parser.parse_args(argv)
-    return Config(tuple(args.problems), tuple(i == "free" for i in args.intrinsics), args.runs, args.profile, args.output, args.lock)
+        config.output.write_text(to_json(TimingTable(rows)))

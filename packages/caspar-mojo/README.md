@@ -27,13 +27,18 @@ principal point, mixed camera models in one problem.
 | `score_kernel` | `Model` | `score`, every factor variant |
 | `point_gather_kernel` | `Model`, `REFINE_INTRINSICS`, `REFINE_RIG`, `BACKSUBSTITUTE` | `jtjnjtr_direct` pass 1 of `RcsMatvec` + `RcsPointSolve`; `RcsBackSubstitute` |
 | `cross_points_kernel` | `Model`, `REFINE_INTRINSICS`, `REFINE_RIG`, `CAMERA_TERMS` | `jtjnjtr_direct` pass 2 of `RcsMatvec`, `RcsReduceRhs`'s product |
-| `point_solve_kernel` (node_kernels) | none | `RcsPointSolve` in `RcsReduceRhs` |
+| `point_solve_kernel` (node_kernels) | `K` (calibration block size: the point group follows it) | `RcsPointSolve` in `RcsReduceRhs` |
 | `pcg_precond_kernel` | `K` (calibration block size) | `normalize` (every node type), `update_r*`, `update_step*`, `alpha_*`, the rho dot |
 | `pcg_direction_kernel` | none | `update_p`, `update_Mp`, `start_w*`, `BetaFromNumDenom` |
 | `dot_kernel` | none | the p.w dots |
 | `axpy_kernel` | none | the last `update_step` |
 | `retract_kernel` | `Model` | `retract` (every node type), `pred_decrease_times_two` |
 | `gather_rows_kernel` (factor_kernels) | none | CASPAR's host-side `sort_indices` / `shared_indices` for the point-ordered copy |
+
+The packed layout of the tangent vector and of the block diagonal (group order, block widths, offsets, the
+triangle index), the damped block solve and the predicted-decrease term live in `blocks.mojo` (`Packed[K]`); the
+host allocation, every kernel and the Python test hook (`packed_groups`) read offsets from it only. Score and
+linearisation project through one helper (`observe[Model]`), so LM compares costs from the same arithmetic.
 
 A camera model is one struct of the `CameraModel` trait (`camera_models.mojo`): the projection and its analytic
 Jacobians (d pixel / d camera point, d pixel / d focal-and-extra). The kernels hold no model code. Fixed nodes are

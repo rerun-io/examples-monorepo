@@ -1,4 +1,6 @@
-from caspar_mojo.apis.benchmark import main, parse
+import tyro
+
+from caspar_mojo.apis.benchmark import Config, main
 
 if __name__ == "__main__":
-    main(parse())
+    main(tyro.cli(Config))
