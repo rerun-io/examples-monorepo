@@ -423,7 +423,7 @@ def refine_extrinsics(
                 f"reprojection {latest.mean_reprojection_error_px:.4f} px, "
                 f"left out {stats.num_past_pole} past the rational pole and {stats.num_non_finite} non-finite, "
                 f"BA removed {latest.num_diverged} diverged and {latest.num_past_pole} past the pole, "
-                f"{latest.seconds:.2f}s"
+                f"BA {latest.bundle_adjustment_seconds:.2f} s, {latest.seconds:.2f}s"
             )
         if translation_mm < resolved.translation_tolerance_mm and rotation_deg < resolved.rotation_tolerance_deg:
             converged = True

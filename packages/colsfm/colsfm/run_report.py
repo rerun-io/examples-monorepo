@@ -67,6 +67,9 @@ class MappingStats:
     solves inside `run_mapping` — so this names them rather than adding a row."""
     polish_iterations: int | None = None
     """Ceres iterations that polish took; the measure of how far CASPAR stopped short."""
+    bundle_adjustment_seconds: float | None = None
+    """Seconds inside every bundle adjustment of the mapping passes (rounds, polish, extrinsic rounds), the backend's
+    whole solve call each (for `mojo` the bridge's extraction and write-back too); None in summaries written before it."""
     ba_fallback_reason: str | None = None
     """Why `ba_backend` is not `options.ba_backend`, or None when it is.
 
@@ -99,6 +102,7 @@ class MappingStats:
             ba_backend=mapping.ba_backend,
             polish_seconds=None if polish is None else polish.seconds,
             polish_iterations=None if polish is None else polish.report.num_iterations,
+            bundle_adjustment_seconds=mapping.bundle_adjustment_seconds,
             ba_fallback_reason=mapping.ba_fallback_reason,
         )
 

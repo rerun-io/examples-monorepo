@@ -874,7 +874,7 @@ def run_mapping(
                 f"[colsfm] round {round_index} gate {max_pixel_error:.1f} px: merged {num_merged}, "
                 f"completed {num_completed}, filtered {filtered.total()}, diverged {latest.num_diverged}, past the pole {latest.num_past_pole}, "
                 f"change {observation_change:.6f}, points {latest.num_points3D}, "
-                f"reprojection {latest.mean_reprojection_error_px:.4f} px"
+                f"reprojection {latest.mean_reprojection_error_px:.4f} px, BA {solve.seconds:.2f} s"
             )
         if observation_change < mapping_config.max_observation_change:
             if resolved_options.verbose:
