@@ -28,7 +28,8 @@ build:
     - rm -rf "$SP_DIR/asog" "$SP_DIR"/animated_sog-*.dist-info
     - cd python && python -m pip install . --no-deps --no-build-isolation -vv
     - grep -q "def encode_runtime" "$SP_DIR/asog/encode.py"
-    - grep -q "executor: Executor | None = None" "$SP_DIR/asog/encode.py"
+    # Quoted as a whole: a plain scalar cannot hold the ": " of the signature.
+    - 'grep -q "executor: Executor | None = None" "$SP_DIR/asog/encode.py"'
 
 requirements:
   host:
