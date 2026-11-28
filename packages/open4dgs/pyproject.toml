@@ -48,8 +48,8 @@ ignore_names = [
     "_slice_rowwise_params",
     # open4dgs.trigs_trainer.CameraLosses: read by the recipe's camera-losses seam (patch 0010) in the TRiGS train loop
     "rgb_sum", "alpha_outside_sum", "alpha_mask_sum", "gamma_sum", "cam_idx_log", "render_log", "camera_losses",
-    # recipe seam (patch 0012) and the deform override
-    "_optimizer_step", "_deform",
+    # recipe seam (patch 0012)
+    "_optimizer_step",
 ]
 
 [tool.pytest.ini_options]

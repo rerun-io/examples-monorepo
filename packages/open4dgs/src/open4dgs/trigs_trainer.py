@@ -367,7 +367,6 @@ class Open4dgsTrainer(TrigsTrainer):
         pixel_stride: Literal[1, 2] = 1,
         adam_moments: Literal["fp32", "bf16"] = "fp32",
         fused_loss: bool = False,
-        compile_deform: bool = False,
         **kwargs: object,
     ) -> None:
         self._camera_loss_hook: Any = None
@@ -383,9 +382,6 @@ class Open4dgsTrainer(TrigsTrainer):
         # The batched camera loss (``SharedTimeGroup.camera_losses``): its own graph; dynamic=None makes the camera count
         # (the step's distinct cameras, 1-8) a dynamic dimension at its first change instead of one graph per count.
         self._compiled_batch_terms = torch.compile(masked_composite_terms_batch, dynamic=None) if fused_loss else None
-        # TRiGS's deform as one compiled graph (forward and backward a few fused kernels instead of ~150 elementwise
-        # launches); dynamic=True: the active-row count changes every step.
-        self._compiled_deform = torch.compile(self._eager_deform, dynamic=True) if compile_deform else None
         self.stride_state: StrideState = StrideState()
         self._strided_of: CameraConfig | None = None
         self._strided: dict[tuple[int, int], CameraConfig] = {}
@@ -519,18 +515,6 @@ class Open4dgsTrainer(TrigsTrainer):
 
         ssim: Tensor = fused_ssim(pred_l.permute(2, 0, 1)[None], gt_l.permute(2, 0, 1)[None], padding="valid")
         return l1 * (1.0 - config.ssim_lambda) + (1.0 - ssim) * config.ssim_lambda, alpha_out, alpha_mask
-
-    def _eager_deform(self, params: dict, t: Tensor, config: TrigsTrainingConfig) -> tuple[Tensor, Tensor, Tensor]:
-        return TrigsTrainer._deform(self, params, t, config)  # pyrefly: ignore[bad-argument-type]
-
-    def _deform(self, params: nn.ParameterDict | dict, t: float | Tensor, config: TrigsTrainingConfig) -> tuple[Tensor, Tensor, Tensor]:
-        """With ``compile_deform``: TRiGS's deform compiled, the time always a device tensor (a float would be a constant
-        of the graph, one recompile per frame)."""
-        compiled = self._compiled_deform
-        if compiled is None:
-            return super()._deform(params, t, config)  # pyrefly: ignore[bad-argument-type]
-        t_dev: Tensor = t if isinstance(t, Tensor) else self._const_tensor(float(t), params["means"].device, params["times"].dtype)
-        return compiled(dict(params), t_dev, config)
 
     def _slice_rowwise_params(self, params: nn.ParameterDict | dict, idx: Tensor) -> dict:
         """TRiGS's per-row gather (``v[idx]`` for every row-wise tensor) as ``index_select``: its backward is one

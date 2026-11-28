@@ -78,8 +78,6 @@ class TrainConfig:
     fused_loss: bool = True
     """Photometric loss as one ``torch.compile``d function per camera (PennyGS 3.5's single pass; same maths, Triton
     kernels compiled at the first step)."""
-    compile_deform: bool = False
-    """TRiGS's deform as one ``torch.compile``d graph (dynamic shapes; same maths, fewer launches; compiled at the first step)."""
     resident_frames: bool = True
     """Keep the training frames and masks on the GPU for the run when they fit (``resident_device``); off = the CPU path
     (the trainer copies each camera's frame and mask every step)."""
@@ -590,7 +588,6 @@ def train_clip(
         pixel_stride=config.pixel_stride,
         adam_moments=config.adam_moments,
         fused_loss=config.fused_loss,
-        compile_deform=config.compile_deform,
     )
     trainer.camera_loss_hook = prior
     # The model as it trains: TRiGS updates ``params`` in place; the returned clip replaces them with the result's.
