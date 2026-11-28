@@ -75,6 +75,8 @@ torchvision = "*"
 # only together with the rerun-sdk pins; the conda rerun-sdk and gradio in [feature.common.dependencies] satisfy it
 # through pixi's conda->PyPI mapping. A wheel, not ai-demos' conda gradio-rerun-canonical: replacing the PyPI wheel
 # with a conda package of the same files makes pixi delete those files in existing envs.
+# pixi 0.83 records no hash for a URL wheel and ignores a #sha256= fragment (checked with an empty cache), so the
+# release is the anchor: its SHA256SUMS lists 9c67bf7e00b8c64ed0e49ff8d8194e696ac17c6dfa30e8af131567024428b8dd for this file.
 gradio-rerun = { url = "https://github.com/pablovela5620/ai-demos/releases/download/rerun-canonical-0.44.0-a61ddc2/gradio_rerun-0.44.0-py3-none-any.whl" }  # pin-bump: hold
 datafusion = "==54.0.0"  # rerun-sdk[catalog]; on PyPI, as its conda build pins libprotobuf against the opencv/ffmpeg stack
 simplecv = { path = "packages/simplecv", editable = true }
