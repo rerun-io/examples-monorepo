@@ -21476,7 +21476,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.2-pyh5ded981_0.conda
       - conda_source: asog-src[d2c103e5] @ recipes/asog-src
       - conda_source: fastgraphcompute-src[11f98a24] @ recipes/fastgraphcompute-src
-      - conda_source: gradio-rerun-src[2037b287] @ recipes/gradio-rerun-src
+      - conda_source: gradio-rerun-src[0f13b6dc] @ recipes/gradio-rerun-src
       - conda_source: gvhmr-src[d4a50600] @ recipes/gvhmr-src
       - conda_source: open4dgs-trigs-src[42c9fd36] @ recipes/open4dgs-trigs-src
       - conda_source: sageattention-src[fdaeb1b9] @ recipes/sageattention-src
@@ -22118,7 +22118,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.2-pyh5ded981_0.conda
       - conda_source: asog-src[7c33a97c] @ recipes/asog-src
       - conda_source: fastgraphcompute-src[15304bf1] @ recipes/fastgraphcompute-src
-      - conda_source: gradio-rerun-src[814409b2] @ recipes/gradio-rerun-src
+      - conda_source: gradio-rerun-src[6e53dcf8] @ recipes/gradio-rerun-src
       - conda_source: gvhmr-src[d4a50600] @ recipes/gvhmr-src
       - conda_source: open4dgs-trigs-src[0e9ecbb3] @ recipes/open4dgs-trigs-src
       - conda_source: sageattention-src[275ad343] @ recipes/sageattention-src
@@ -22785,7 +22785,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.2-pyh5ded981_0.conda
       - conda_source: asog-src[d2c103e5] @ recipes/asog-src
       - conda_source: fastgraphcompute-src[11f98a24] @ recipes/fastgraphcompute-src
-      - conda_source: gradio-rerun-src[2037b287] @ recipes/gradio-rerun-src
+      - conda_source: gradio-rerun-src[0f13b6dc] @ recipes/gradio-rerun-src
       - conda_source: gvhmr-src[d4a50600] @ recipes/gvhmr-src
       - conda_source: open4dgs-trigs-src[42c9fd36] @ recipes/open4dgs-trigs-src
       - conda_source: sageattention-src[fdaeb1b9] @ recipes/sageattention-src
@@ -23436,7 +23436,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.2-pyh5ded981_0.conda
       - conda_source: asog-src[7c33a97c] @ recipes/asog-src
       - conda_source: fastgraphcompute-src[15304bf1] @ recipes/fastgraphcompute-src
-      - conda_source: gradio-rerun-src[814409b2] @ recipes/gradio-rerun-src
+      - conda_source: gradio-rerun-src[6e53dcf8] @ recipes/gradio-rerun-src
       - conda_source: gvhmr-src[d4a50600] @ recipes/gvhmr-src
       - conda_source: open4dgs-trigs-src[0e9ecbb3] @ recipes/open4dgs-trigs-src
       - conda_source: sageattention-src[275ad343] @ recipes/sageattention-src
@@ -188357,13 +188357,13 @@ packages:
   - conda: https://prefix.dev/conda-forge/noarch/typing_extensions-4.16.0-pyhcf101f3_0.conda
   - conda: https://prefix.dev/conda-forge/noarch/tzdata-2026e-h5d301ff_0.conda
   - conda: https://prefix.dev/conda-forge/noarch/wheel-0.48.0-pyhd8ed1ab_0.conda
-- conda_source: gradio-rerun-src[2037b287] @ recipes/gradio-rerun-src
+- conda_source: gradio-rerun-src[0f13b6dc] @ recipes/gradio-rerun-src
   variants:
     target_platform: noarch
   depends:
   - gradio >=6.0.0
   - python *
-  - python >=3.10
+  - python 3.12.*
   - rerun-sdk ==0.44.0
   build_packages:
   - conda: https://prefix.dev/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda
@@ -188683,13 +188683,13 @@ packages:
   - conda: https://prefix.dev/conda-forge/noarch/wheel-0.48.0-pyhd8ed1ab_0.conda
   - conda: https://prefix.dev/conda-forge/noarch/widgetsnbextension-4.0.16-pyhd8ed1ab_0.conda
   - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.2-pyh5ded981_0.conda
-- conda_source: gradio-rerun-src[814409b2] @ recipes/gradio-rerun-src
+- conda_source: gradio-rerun-src[6e53dcf8] @ recipes/gradio-rerun-src
   variants:
     target_platform: noarch
   depends:
   - gradio >=6.0.0
   - python *
-  - python >=3.10
+  - python 3.12.*
   - rerun-sdk ==0.44.0
   build_packages:
   - conda: https://prefix.dev/conda-forge/linux-aarch64/_openmp_mutex-4.5-20_gnu.conda
