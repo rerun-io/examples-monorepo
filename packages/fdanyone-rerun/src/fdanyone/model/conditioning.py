@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import logging
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from dataclasses import dataclass
@@ -288,10 +289,11 @@ def _execute_pose_job(
     # host memory cost several times the decode. Decodes run on threads, so later videos decode while earlier ones
     # are prepared.
     with ThreadPoolExecutor(max_workers=len(job.skeletons), thread_name_prefix="skeleton-decode") as pool:
-        decodes = [pool.submit(conditioning.decode_skeleton_frames, skeleton) for skeleton in job.skeletons]
-        for batch_index, (skeleton, decode) in enumerate(zip(job.skeletons, decodes, strict=True)):
+        # A finished future keeps its frames: each is dropped from the queue once its video is prepared.
+        decodes = deque(pool.submit(conditioning.decode_skeleton_frames, skeleton) for skeleton in job.skeletons)
+        for batch_index, skeleton in enumerate(job.skeletons):
             LOGGER.info("Loading skeleton conditioning from %s", skeleton.path.name)
-            video = conditioning.prepare_skeleton(decode.result(), skeleton)
+            video = conditioning.prepare_skeleton(decodes.popleft().result(), skeleton)
             current_shape = tuple(video.shape)
             if video_shape is None:
                 video_shape = current_shape
