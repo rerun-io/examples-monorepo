@@ -31,7 +31,6 @@ from torch import Tensor
 
 from open4dgs.catalog_clip import FRAME_TIMELINE
 from open4dgs.properties import rrd_cells
-from open4dgs.run_log import RunProperties
 from open4dgs.trigs_adapter import TrainedClip
 
 SH_C0: float = 0.28209479177387814
@@ -191,6 +190,9 @@ def write_asog_rrd(run_dir: Path, asog: bytes, out: Path, cut: float, preview_ro
 
     The ASOG writer of ``open4dgs-export`` (which registers).
     """
+    # run_log imports open4dgs.evaluate and with it torchmetrics (2 s): fdanyone-run imports this module but not this writer
+    from open4dgs.run_log import RunProperties
+
     reader: RrdReader = RrdReader(run_dir / "run.rrd")
     frame_start: int = RunProperties.from_cells(rrd_cells(reader, "run")).frame_start
     parsed = asog_decode.parse_asog(asog, f"{run_dir.name} asog")
