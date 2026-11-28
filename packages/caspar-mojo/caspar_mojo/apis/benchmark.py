@@ -7,7 +7,9 @@ time: after convergence float32 noise decides the tail length, so time per PCG i
 """
 
 import argparse
+import contextlib
 import dataclasses
+import fcntl
 import json
 import os
 import statistics
@@ -46,6 +48,8 @@ class Config:
     """One more solve per case with CASPAR_MOJO_PROF=1 (a sync after every kernel, so never timed)."""
     output: Path | None = None
     """JSON file for the result rows (outside the repository)."""
+    lock: Path | None = None
+    """File to flock around each case's solves (a GPU shared between jobs), not around the problem building."""
 
 
 def build(name: str, intrinsics_free: bool) -> BaProblem:
@@ -67,8 +71,17 @@ def build(name: str, intrinsics_free: bool) -> BaProblem:
 def time_case(name: str, intrinsics_free: bool, config: Config) -> dict[str, object]:
     """Best and median solver time of one case, with the LM and PCG counts of every run."""
     problem = build(name, intrinsics_free)
-    solve(problem)
-    results = [solve(problem) for _ in range(config.runs)]
+    with open(config.lock, "a") if config.lock else contextlib.nullcontext() as lock:
+        if lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        solve(problem)
+        results = [solve(problem) for _ in range(config.runs)]
+        if config.profile:
+            os.environ["CASPAR_MOJO_PROF"] = "1"
+            try:
+                solve(problem)
+            finally:
+                del os.environ["CASPAR_MOJO_PROF"]
     seconds = [r.solve_seconds for r in results]
     best = min(range(len(results)), key=lambda i: seconds[i])
     row: dict[str, object] = {
@@ -85,12 +98,6 @@ def time_case(name: str, intrinsics_free: bool, config: Config) -> dict[str, obj
         "final_cost": results[best].final_cost,
         "exit": results[best].exit_reason,
     }
-    if config.profile:
-        os.environ["CASPAR_MOJO_PROF"] = "1"
-        try:
-            solve(problem)
-        finally:
-            del os.environ["CASPAR_MOJO_PROF"]
     return row
 
 
@@ -122,5 +129,6 @@ def parse(argv: list[str] | None = None) -> Config:
     parser.add_argument("--runs", type=int, default=7)
     parser.add_argument("--profile", action="store_true")
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--lock", type=Path)
     args = parser.parse_args(argv)
-    return Config(tuple(args.problems), tuple(i == "free" for i in args.intrinsics), args.runs, args.profile, args.output)
+    return Config(tuple(args.problems), tuple(i == "free" for i in args.intrinsics), args.runs, args.profile, args.output, args.lock)
