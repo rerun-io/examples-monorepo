@@ -13,6 +13,7 @@ import hashlib
 import math
 import time
 from collections.abc import Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Literal, TypeAlias
 
@@ -50,29 +51,71 @@ TORCH_PREDICTOR: str = "MoGeV2TorchPredictor fp16 autocast"
 """Layer property ``predictor`` of maps from the torch predictor (a clip with a camera outside the engine's aspect range)."""
 
 
+IN_FLIGHT: int = 2
+"""Batches whose postprocess may still be pending while the network runs the next one (each holds its network-size maps)."""
+
+
 def compute_clip_priors(
     clip: MultiViewClip, camera_names: Sequence[str], predictor: object, batch_size: int = 8, device: torch.device | None = None
 ) -> ClipPriors:
-    """MoGe-2 maps for ``camera_names`` at every clip frame, from the clip's own (undistorted, resized) frames."""
+    """MoGe-2 maps for ``camera_names`` at every clip frame, from the clip's own (undistorted, resized) frames.
+
+    On CUDA with a monopriors predictor, each batch's postprocess (MoGe's shift solve syncs the device and runs scipy on
+    the host) runs on a worker thread and a second CUDA stream while the network runs the next batch, instead of leaving
+    the GPU idle; the maps are those of ``predict_geometry``.
+    """
     dev: torch.device = device if device is not None else torch.device("cuda")
-    depths: list[Tensor] = []
-    normals: list[Tensor] = []
-    for name in camera_names:
-        cam: int = clip.camera_names.index(name)
-        # The calibrated focal fixes MoGe's shift recovery (metrictrail ``recover_metric_depth`` pattern); MoGe assumes a
-        # centred principal point.
-        fov_x: float = math.degrees(2.0 * math.atan(clip.frames[cam].shape[2] / (2.0 * float(clip.K[cam, 0, 0]))))
-        d_parts: list[Tensor] = []
-        n_parts: list[Tensor] = []
-        for start in range(0, clip.frames[cam].shape[0], batch_size):
-            batch: Tensor = clip.frames[cam][start : start + batch_size].to(dev)
-            out = predictor.predict_geometry(batch, fov_x=fov_x)  # type: ignore[attr-defined]
-            valid: Tensor = (out.mask_bhw > 0.5) & (out.depth_bhw > 0)
-            d_parts.append(torch.where(valid, out.depth_bhw, 0.0).half().cpu())
-            n_parts.append(encode_normals(out.normals_bhw3, valid).cpu())
-        depths.append(torch.cat(d_parts))
-        normals.append(torch.cat(n_parts))
-    return ClipPriors(camera_names=tuple(camera_names), frame_indices=clip.frame_indices.clone(), depth=tuple(depths), normals=tuple(normals))
+    pipelined: bool = dev.type == "cuda" and hasattr(predictor, "forward_geometry")
+    post_stream: torch.cuda.Stream | None = torch.cuda.Stream(dev) if pipelined else None
+
+    def maps(out: object) -> tuple[Tensor, Tensor]:
+        valid: Tensor = (out.mask_bhw > 0.5) & (out.depth_bhw > 0)  # type: ignore[attr-defined]
+        return torch.where(valid, out.depth_bhw, 0.0).half().cpu(), encode_normals(out.normals_bhw3, valid).cpu()  # type: ignore[attr-defined]
+
+    def post(graph: tuple[Tensor, ...], ready: torch.cuda.Event, output_hw: tuple[int, int], fov_x: float) -> tuple[Tensor, Tensor]:
+        from monopriors.models.moge_v2.predictor import postprocess_moge_v2_geometry
+
+        with torch.cuda.stream(post_stream):
+            post_stream.wait_event(ready)  # type: ignore[union-attr]
+            return maps(postprocess_moge_v2_geometry(graph, output_hw, fov_x=fov_x))  # type: ignore[arg-type]
+
+    results: dict[str, list[Future[tuple[Tensor, Tensor]]]] = {name: [] for name in camera_names}
+    in_flight: list[Future[tuple[Tensor, Tensor]]] = []
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        for name in camera_names:
+            cam: int = clip.camera_names.index(name)
+            # The calibrated focal fixes MoGe's shift recovery (metrictrail ``recover_metric_depth`` pattern); MoGe assumes a
+            # centred principal point.
+            fov_x: float = math.degrees(2.0 * math.atan(clip.frames[cam].shape[2] / (2.0 * float(clip.K[cam, 0, 0]))))
+            output_hw: tuple[int, int] = (clip.frames[cam].shape[1], clip.frames[cam].shape[2])
+            for start in range(0, clip.frames[cam].shape[0], batch_size):
+                batch: Tensor = clip.frames[cam][start : start + batch_size].to(dev)
+                job: Future[tuple[Tensor, Tensor]]
+                if not pipelined:
+                    job = Future()
+                    job.set_result(maps(predictor.predict_geometry(batch, fov_x=fov_x)))  # type: ignore[attr-defined]
+                else:
+                    graph: tuple[Tensor, ...] = predictor.forward_geometry(batch)  # type: ignore[attr-defined]
+                    # The engine's outputs alias its buffers until its next call: the postprocess gets its own copies.
+                    owned: tuple[Tensor, ...] = type(graph)(*(tensor.clone() for tensor in graph))  # type: ignore[call-arg]
+                    for tensor in owned:
+                        tensor.record_stream(post_stream)  # type: ignore[arg-type]
+                    ready: torch.cuda.Event = torch.cuda.Event()
+                    ready.record()
+                    if len(in_flight) >= IN_FLIGHT:
+                        in_flight.pop(0).result()
+                    job = pool.submit(post, owned, ready, output_hw, fov_x)
+                    in_flight.append(job)
+                results[name].append(job)
+        parts: dict[str, list[tuple[Tensor, Tensor]]] = {name: [job.result() for job in jobs] for name, jobs in results.items()}
+    if post_stream is not None:
+        torch.cuda.current_stream(dev).wait_stream(post_stream)
+    return ClipPriors(
+        camera_names=tuple(camera_names),
+        frame_indices=clip.frame_indices.clone(),
+        depth=tuple(torch.cat([depth for depth, _ in parts[name]]) for name in camera_names),
+        normals=tuple(torch.cat([normal for _, normal in parts[name]]) for name in camera_names),
+    )
 
 
 def as_stored(priors: ClipPriors) -> ClipPriors:
