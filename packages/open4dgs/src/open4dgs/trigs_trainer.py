@@ -202,12 +202,13 @@ class SharedTimeGroup:
 
         Batched when the group is one size batch, the fused loss is on and its configuration holds (as in
         ``Open4dgsTrainer._photometric_losses``), and the camera-loss hook (the MoGe-2 prior) has a ``batch`` entry. The
-        maths is the per-camera loop's: one fused composite-loss call and one SSIM call for all cameras, the prior's terms
-        per camera in one pass, the summed camera losses / n for the one deferred backward (``finish``).
+        maths is the per-camera loop's: one fused composite-loss call and one SSIM call for the step's distinct cameras, the
+        prior's terms per camera in one pass, each camera's loss weighted by its draws / n (the loop adds a camera drawn k
+        times k times) and summed for the one deferred backward (``finish``).
         """
         trainer = self._trainer
         compiled = trainer._compiled_batch_terms
-        hook = trainer.camera_loss_hook
+        hook = trainer._camera_loss_hook  # the hook itself (the property wraps it for the loop's per-draw memo)
         if not (
             self._batch_cameras
             and len(self._batches) == 1
@@ -223,6 +224,7 @@ class SharedTimeGroup:
             return None
         batch: SizeBatch = self._batches[0]
         cams: list[int] = batch.cams
+        draws: tuple[int, ...] = self._draws[0]
         colors, alphas, depth = batch.batched
         gt: Tensor = torch.stack([gt_images[frame_idx][c] for c in cams]).to(trainer.device)
         mask: Tensor = torch.stack([gt_alphas[frame_idx][c] for c in cams]).to(trainer.device).float()
@@ -247,13 +249,16 @@ class SharedTimeGroup:
         if hook_loss is not None:
             cam_loss = cam_loss + hook_loss
         n_group: int = len(self._cam_group)
-        self._loss = (cam_loss / n_group).sum()
+        # Per-camera weights draws / n as a cached device constant (a fresh host tensor would be a blocking copy per step).
+        weight: Tensor = trainer._const_tensor(tuple(k / n_group for k in draws), colors.device, colors.dtype)
+        self._loss = (cam_loss * weight).sum()
+        counts: Tensor = trainer._const_tensor(tuple(float(k) for k in draws), colors.device, torch.float64)
         log_images: bool = bool(config.verbose) or config.tb_stats_every > 0
         info: dict = batch.info
         return CameraLosses(
-            rgb_sum=rgb.detach().double().sum(),
-            alpha_outside_sum=alpha_out.detach().double().sum(),
-            alpha_mask_sum=alpha_mask.detach().double().sum(),
+            rgb_sum=(rgb.detach().double() * counts).sum(),
+            alpha_outside_sum=(alpha_out.detach().double() * counts).sum(),
+            alpha_mask_sum=(alpha_mask.detach().double() * counts).sum(),
             gamma_sum=batch.gamma * float(n_group),
             active_idx=info["active_idx"],
             cam_idx_log=cams[0],
@@ -375,8 +380,9 @@ class Open4dgsTrainer(TrigsTrainer):
         # Lever 6, None when off. dynamic=True: one compile for every image size (ROI cameras each have their own size;
         # per-size compiles hit dynamo's recompile limit and fall back to eager).
         self._compiled_terms = torch.compile(masked_composite_terms, dynamic=True) if fused_loss else None
-        # The batched camera loss (``SharedTimeGroup.camera_losses``): its own graph, one compile per batch shape.
-        self._compiled_batch_terms = torch.compile(masked_composite_terms_batch, dynamic=False) if fused_loss else None
+        # The batched camera loss (``SharedTimeGroup.camera_losses``): its own graph; dynamic=None makes the camera count
+        # (the step's distinct cameras, 1-8) a dynamic dimension at its first change instead of one graph per count.
+        self._compiled_batch_terms = torch.compile(masked_composite_terms_batch, dynamic=None) if fused_loss else None
         # TRiGS's deform as one compiled graph (forward and backward a few fused kernels instead of ~150 elementwise
         # launches); dynamic=True: the active-row count changes every step.
         self._compiled_deform = torch.compile(self._eager_deform, dynamic=True) if compile_deform else None

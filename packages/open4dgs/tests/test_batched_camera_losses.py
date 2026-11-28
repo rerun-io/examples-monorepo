@@ -127,6 +127,7 @@ def _one_step(
     def counted(self, *x, **k):
         out = camera_losses(self, *x, **k) if batched else None
         calls["batched"] += out is not None
+        calls["most_draws"] = max(calls.get("most_draws", 0), *self._draws[0])
         return out
 
     monkeypatch.setattr(SharedTimeGroup, "camera_losses", counted)
@@ -157,6 +158,7 @@ def _one_step(
     if prior:
         trainer.camera_loss_hook.finish()
         rows.update({k: [v for _, v in r] for k, r in trainer.camera_loss_hook.rows.items()})
+    assert calls.get("most_draws", 0) > 1, "the step must draw a camera twice (TRiGS samples with replacement)"
     return grads, rows, calls["batched"]
 
 

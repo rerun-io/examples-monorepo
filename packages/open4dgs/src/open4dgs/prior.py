@@ -229,13 +229,13 @@ _COMPILED_TERMS: list = []
 
 
 def _batch_terms(depth: Tensor):  # noqa: ANN202  # prior_terms or its compiled graph
-    """``prior_terms`` for a camera batch: compiled on CUDA (one graph per batch shape and gate branch; ~0.35 ms of
+    """``prior_terms`` for a camera batch: compiled on CUDA (one graph per image size and gate branch; ~0.35 ms of
     launches instead of ~1 ms eager for six 352x640 cameras, forward + backward), eager elsewhere and while beartype
     checks the process (``PIXI_DEV_MODE``: it cannot check dynamo's fake tensors against jaxtyping hints)."""
     if not depth.is_cuda or os.environ.get("PIXI_DEV_MODE") == "1":
         return prior_terms
     if not _COMPILED_TERMS:
-        _COMPILED_TERMS.append(torch.compile(prior_terms, dynamic=False))
+        _COMPILED_TERMS.append(torch.compile(prior_terms, dynamic=None))  # the camera count turns dynamic at its first change
     return _COMPILED_TERMS[0]
 
 
