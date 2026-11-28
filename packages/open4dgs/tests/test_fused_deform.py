@@ -1,6 +1,11 @@
 """``Open4dgsTrainer(fused_deform=True)._render_inputs`` (``open4dgs.fused_deform.gather_deform``) equals TRiGS's own
 gather + deform + rasterizer-input prep: values and every parameter's gradient."""
 
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 import torch
 
@@ -71,22 +76,36 @@ def test_fused_render_inputs_equal_trigs(sh_degree: int, t: float) -> None:
             torch.testing.assert_close(a, b, rtol=1e-5, atol=1e-6)
 
 
-@pytest.mark.integration
-def test_compiled_fused_render_inputs_equal_trigs_on_cuda() -> None:
-    """The compiled graph (CUDA) against TRiGS eager, over active sets of different lengths (one dynamic graph)."""
-    if not torch.cuda.is_available():
-        pytest.skip("needs a CUDA GPU (torch.compile / Triton)")
+def check_compiled_render_inputs_on_cuda() -> None:
+    """The compiled graph (CUDA) against TRiGS eager, over active sets of different lengths, with no recompile after the
+    first length (the active-row dim is dynamic). Runs in a child process: under pytest ``PIXI_DEV_MODE`` selects eager."""
+    from open4dgs.fused_deform import compiled_gather_deform, gather_deform
     from open4dgs.trigs_trainer import Open4dgsTrainer
 
+    assert compiled_gather_deform(torch.device("cuda")) is not gather_deform
     params = _params("cuda")
     trainer = Open4dgsTrainer(device="cuda")
+    graphs: list[int] = []
     for i, m in enumerate((2500, 3100, 1900)):
         idx = torch.randperm(4000, generator=torch.Generator().manual_seed(i))[:m].sort().values.cuda()
         t = torch.tensor(0.5 + i, device="cuda")
         ref, ref_g = _render(trainer, params, idx, t, 3, fused=False)
         got, got_g = _render(trainer, params, idx, t, 3, fused=True)
+        graphs.append(int(torch._dynamo.utils.counters["stats"]["unique_graphs"]))
         for k in ("means", "quats", "scales", "opacities", "colors", "gamma"):
             torch.testing.assert_close(got[k], ref[k], rtol=1e-5, atol=1e-5)
         for a, b in zip(got_g, ref_g, strict=True):
+            assert (a is None) == (b is None)
             if a is not None:
                 torch.testing.assert_close(a, b, rtol=1e-4, atol=1e-5)
+    assert graphs[0] >= 1 and graphs[1:] == [graphs[0]] * 2, f"compiled graphs after each length: {graphs}"
+
+
+@pytest.mark.integration
+def test_compiled_fused_render_inputs_equal_trigs_on_cuda() -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("needs a CUDA GPU (torch.compile / Triton)")
+    env: dict[str, str] = dict(os.environ)
+    env["PIXI_DEV_MODE"] = "0"
+    env["PYTHONPATH"] = str(Path(__file__).parent) + os.pathsep + env.get("PYTHONPATH", "")
+    subprocess.run([sys.executable, "-c", "import test_fused_deform as m; m.check_compiled_render_inputs_on_cuda()"], check=True, env=env)

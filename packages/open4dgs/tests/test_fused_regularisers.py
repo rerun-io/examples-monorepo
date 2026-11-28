@@ -1,12 +1,18 @@
 """``open4dgs.fused_regularisers.core_regularisers`` equals TRiGS's per-step regulariser code (the training loop's
 static-excluded terms): values and every parameter's gradient, also with no dynamic row."""
 
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 import torch
 
 pytest.importorskip("trigs", reason="TRiGS comes from recipes/open4dgs-trigs-src (open4dgs envs)")
 
 ZETA = ("zeta_c0_t", "zeta_c0_r", "zeta_c1_t", "zeta_c1_r", "zeta_c2_t", "zeta_c2_r", "zeta_base_t", "zeta_base_r")
+"""Spelled out, not imported: the test checks that ``ZETA_KEYS`` (the trainer's packing) is this order."""
 
 
 def _params(n: int, static_fraction: float) -> dict[str, torch.Tensor]:
@@ -45,13 +51,25 @@ def _reference(p: dict[str, torch.Tensor], n: int, gamma: torch.Tensor, rigid_id
     return motion, rigid, reg, sigma, scale
 
 
+@pytest.mark.parametrize("nonfinite_static", [False, True])
 @pytest.mark.parametrize("static_fraction", [0.3, 1.0])
 @pytest.mark.parametrize("scale_rows", ["all", "dynamic", "off"])
-def test_core_regularisers_equal_the_trigs_loop(static_fraction: float, scale_rows: str) -> None:
-    from open4dgs.fused_regularisers import core_regularisers
+def test_core_regularisers_equal_the_trigs_loop(static_fraction: float, scale_rows: str, nonfinite_static: bool) -> None:
+    """``nonfinite_static``: excluded (static) rows with an overflowing log-scale and NaN motion coefficients, which the
+    loop gathers away before its nonlinear terms (its opacity and duration terms gather after them, so the loop itself
+    has NaN gradients there)."""
+    from open4dgs.fused_regularisers import ZETA_KEYS, core_regularisers
 
+    assert ZETA_KEYS == ZETA
+    if nonfinite_static and scale_rows == "all":
+        pytest.skip("the all-rows scale term reads static rows")
     n = 3000
     p = _params(n, static_fraction)
+    if nonfinite_static:
+        static = p["is_static"].reshape(-1) > 0.5
+        with torch.no_grad():
+            p["scales"][static] = 100.0
+            p["zeta_c1_r"][static] = float("nan")
     gamma = torch.rand(n, 1)
     dyn = torch.nonzero(p["is_static"].reshape(-1) <= 0.5).reshape(-1)
     rigid_idx = dyn if dyn.numel() > 3 else torch.arange(10)
@@ -72,7 +90,6 @@ def test_core_regularisers_equal_the_trigs_loop(static_fraction: float, scale_ro
         False,
         0.2,
         scale_rows,
-        n,
     )
     weights = (1.0, 0.3, 0.7, 1.3, 0.9)
     for a, b in zip(got, ref, strict=True):
@@ -101,3 +118,59 @@ def test_seam_falls_back_outside_its_configuration() -> None:
     assert Open4dgsTrainer(device="cpu")._core_regularisers(p, cfg, gamma, nn, idx, 0.2) is None
     assert on._core_regularisers(p, cfg, gamma, None, idx, 0.2) is None  # delayed pruning: no rigidity graph
     assert on._core_regularisers(p, TrigsTrainingConfig(lambda_motion_residual=0.1), gamma, nn, idx, 0.2) is None
+
+
+def check_compiled_core_regularisers_on_cuda() -> None:
+    """The compiled graph (CUDA) against the eager function, over rigidity graphs of different lengths, with no recompile
+    after the first. Runs in a child process: under pytest ``PIXI_DEV_MODE`` selects eager."""
+    from open4dgs.fused_regularisers import ZETA_KEYS, compiled_core_regularisers, core_regularisers
+
+    compiled = compiled_core_regularisers(torch.device("cuda"))
+    assert compiled is not core_regularisers
+    n = 3000
+    p = {k: v.detach().cuda().requires_grad_(v.requires_grad) for k, v in _params(n, 0.3).items()}
+    gamma = torch.rand(n, 1, device="cuda")
+    dyn = torch.nonzero(p["is_static"].reshape(-1) <= 0.5).reshape(-1)
+    leaves = [v for v in p.values() if v.requires_grad]
+    graphs: list[int] = []
+    for i, m in enumerate((int(dyn.numel()), 1500, 900)):
+        rigid_idx = dyn[:m]
+        nn_indices = torch.randint(0, m, (m, 3), generator=torch.Generator().manual_seed(i)).cuda()
+        torch._dynamo.maybe_mark_dynamic(rigid_idx, 0)
+        torch._dynamo.maybe_mark_dynamic(nn_indices, 0)
+        args = (
+            tuple(p[k] for k in ZETA_KEYS),
+            p["sh0"],
+            p["opacities"],
+            p["log_durations"],
+            p["scales"],
+            p["is_static"],
+            gamma,
+            rigid_idx,
+            nn_indices,
+            50.0,
+            False,
+            0.2,
+            "dynamic",
+        )
+        ref, got = core_regularisers(*args), compiled(*args)
+        graphs.append(int(torch._dynamo.utils.counters["stats"]["unique_graphs"]))
+        for a, b in zip(got, ref, strict=True):
+            torch.testing.assert_close(a, b, rtol=1e-5, atol=1e-7)
+        gb = torch.autograd.grad(torch.stack(ref).sum(), leaves, allow_unused=True)
+        ga = torch.autograd.grad(torch.stack(got).sum(), leaves, allow_unused=True)
+        for a, b in zip(ga, gb, strict=True):
+            assert (a is None) == (b is None)
+            if a is not None:
+                torch.testing.assert_close(a, b, rtol=1e-4, atol=1e-8)
+    assert graphs[0] >= 1 and graphs[1:] == [graphs[0]] * 2, f"compiled graphs after each length: {graphs}"
+
+
+@pytest.mark.integration
+def test_compiled_core_regularisers_equal_eager_on_cuda() -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("needs a CUDA GPU (torch.compile / Triton)")
+    env: dict[str, str] = dict(os.environ)
+    env["PIXI_DEV_MODE"] = "0"
+    env["PYTHONPATH"] = str(Path(__file__).parent) + os.pathsep + env.get("PYTHONPATH", "")
+    subprocess.run([sys.executable, "-c", "import test_fused_regularisers as m; m.check_compiled_core_regularisers_on_cuda()"], check=True, env=env)

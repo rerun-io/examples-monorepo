@@ -5,7 +5,9 @@
 maths as ``_slice_rowwise_params`` + ``_deform`` + the opacity / scale / colour prep, on the active rows only.
 """
 
+import functools
 import os
+from collections.abc import Callable
 
 import torch
 import torch.nn.functional as F
@@ -34,6 +36,9 @@ DEFORM_KEYS: tuple[str, ...] = (
 )
 """Row-wise parameters ``gather_deform`` reads, in its argument order (``shN`` and ``is_static`` are optional)."""
 
+DeformOutputs = tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]
+"""(means_t, quats_t, gamma, scales, opacities, colors) of the active rows."""
+
 
 def gather_deform(
     rows: tuple[Tensor, ...],
@@ -46,7 +51,7 @@ def gather_deform(
     gauge_eps: float,
     gauge_denom_clamp: float,
     smooth_cull_tau: float,
-) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+) -> DeformOutputs:
     """The active rows ``idx`` of ``rows`` (``DEFORM_KEYS`` order) deformed to time ``t``.
 
     Returns (means_t, quats_t, gamma, scales, opacities, colors) as ``_render_inputs`` builds them; ``smooth_cull_tau`` 0
@@ -97,19 +102,14 @@ def gather_deform(
     return means_t, quats_t, gamma, torch.exp(scales), effective_opa, colors
 
 
-_COMPILED: list = []
+@functools.cache
+def _compiled_gather_deform() -> Callable[..., DeformOutputs]:
+    return torch.compile(gather_deform, dynamic=False)
 
 
-def compiled_gather_deform(device: torch.device):  # noqa: ANN201  # gather_deform or its compiled graph
+def compiled_gather_deform(device: torch.device) -> Callable[..., DeformOutputs]:
     """``gather_deform`` compiled on CUDA (the active-row count is dynamic: one graph per ``with_shN``), eager elsewhere
     and while beartype checks the process (``PIXI_DEV_MODE``: it cannot check dynamo's fake tensors)."""
     if device.type != "cuda" or os.environ.get("PIXI_DEV_MODE") == "1":
         return gather_deform
-    if not _COMPILED:
-        _COMPILED.append(torch.compile(gather_deform, dynamic=False))
-    return _COMPILED[0]
-
-
-def mark_rows_dynamic(idx: Tensor) -> None:
-    """The active-row index's length varies every step: one graph for every length, not a recompile per length."""
-    torch._dynamo.maybe_mark_dynamic(idx, 0)
+    return _compiled_gather_deform()

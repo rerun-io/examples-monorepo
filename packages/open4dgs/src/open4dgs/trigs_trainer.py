@@ -50,9 +50,9 @@ from trigs.core.camera import CameraConfig
 from trigs.core.trainer import TrigsTrainer, TrigsTrainingConfig, TrigsTrainingResult
 from trigs.strategy.motion_guided_relocation import MotionGuidedRelocationStrategy
 
-from open4dgs.fused_deform import DEFORM_KEYS, compiled_gather_deform, mark_rows_dynamic
+from open4dgs.fused_deform import DEFORM_KEYS, compiled_gather_deform
 from open4dgs.fused_loss import masked_composite_terms
-from open4dgs.fused_regularisers import compiled_core_regularisers
+from open4dgs.fused_regularisers import ZETA_KEYS, RegulariserTerms, ScaleRows, compiled_core_regularisers
 from open4dgs.strided import GSPLAT_EPS2D, STRIDE, STRIDE_OFFSETS, StrideState, strided_intrinsics, strided_pixels
 
 RENDER_INPUT_KEYS: tuple[str, ...] = ("means", "quats", "scales", "opacities", "colors")
@@ -465,7 +465,7 @@ class Open4dgsTrainer(TrigsTrainer):
         smooth: bool = bool(getattr(config, "temporal_gamma_smooth_cull", False)) and bool(getattr(config, "temporal_active_cull", False))
         shN: Tensor | None = params.get("shN")
         with_shN: bool = sh_degree > 0 and shN is not None
-        mark_rows_dynamic(active_idx)
+        torch._dynamo.maybe_mark_dynamic(active_idx, 0)  # the active-row count changes every step: one graph for all
         means_t, quats_t, gamma, scales, opacities, colors = compiled_gather_deform(device)(
             tuple(params[k] for k in DEFORM_KEYS),
             shN,
@@ -497,7 +497,7 @@ class Open4dgsTrainer(TrigsTrainer):
         nn_indices: Tensor | None,
         rigid_loss_idx: Tensor | None,
         sigma_floor_target: float,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor] | None:
+    ) -> RegulariserTerms | None:
         """With ``fused_regularisers`` (recipe patch 0013's seam): the step's motion, rigid, opacity, sigma-floor and scale
         terms as one (compiled) ``core_regularisers`` call; None (the loop's own terms) outside the configuration it
         reproduces (static rows excluded, no motion residual, a rigidity graph, no chunked training)."""
@@ -512,17 +512,17 @@ class Open4dgsTrainer(TrigsTrainer):
             and float(getattr(config, "lambda_motion_residual", 0.0)) == 0.0
         ):
             return None
-        scale_rows: str = (
+        scale_rows: ScaleRows = (
             "off"
             if float(getattr(config, "lambda_scale_reg", 0.0)) <= 0.0
             else "all"
             if getattr(config, "scale_reg_include_static", True)
             else "dynamic"
         )
-        mark_rows_dynamic(rigid_loss_idx)
-        mark_rows_dynamic(nn_indices)
+        torch._dynamo.maybe_mark_dynamic(rigid_loss_idx, 0)  # the rigidity graph's rows change at every kNN refresh
+        torch._dynamo.maybe_mark_dynamic(nn_indices, 0)
         return compiled_core_regularisers(params["means"].device)(
-            tuple(params[k] for k in ("zeta_c0_t", "zeta_c0_r", "zeta_c1_t", "zeta_c1_r", "zeta_c2_t", "zeta_c2_r", "zeta_base_t", "zeta_base_r")),
+            tuple(params[k] for k in ZETA_KEYS),
             params["sh0"],
             params["opacities"],
             params["log_durations"],
@@ -535,7 +535,6 @@ class Open4dgsTrainer(TrigsTrainer):
             bool(getattr(config, "rigid_color_weight_detach", False)),
             float(sigma_floor_target),
             scale_rows,
-            int(params["means"].shape[0]),
         )
 
     def strided_cameras(self, cameras: CameraConfig, offset: tuple[int, int]) -> CameraConfig:
