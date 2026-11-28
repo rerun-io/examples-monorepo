@@ -3425,6 +3425,11 @@ cmd = "python tools/apps/download.py"
 cwd = "packages/dataforge"
 description = "Fetch (or verify, for local corpora) a dataset's raw tree"
 
+[feature.dataforge.tasks.dataforge-insta360-face-masks]
+cmd = "python tools/apps/insta360_face_masks.py"
+cwd = "packages/dataforge"
+description = "Join an Insta360 segment's lens_mask layer into its cube faces and register the masks layer (--segment --catalog-url --output-dir; env dataforge-cuda)"
+
 [feature.dataforge.tasks.dataforge-convert]
 cmd = "python tools/apps/convert.py"
 cwd = "packages/dataforge"

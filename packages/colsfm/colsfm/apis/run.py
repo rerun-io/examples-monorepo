@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Annotated, TypeAlias
 
 import tyro
+from rerun.catalog import CatalogClient
+from simplecv.catalog_layers import register_layer
 from simplecv.run_record import RunStart, start_run
 
 from colsfm import DATA_DIR, MODEL_DIR_ENV
@@ -55,7 +57,8 @@ class RunCommand:
 
 @dataclass(frozen=True)
 class CatalogCommand:
-    """Read a catalog segment, run all eight stages on it, and write the run as a layer of that segment."""
+    """Read a catalog segment, run all eight stages on it, and write the run as a layer of that segment (registered as
+    ``colsfm`` when the input is a catalog segment, not local files)."""
 
     source: CatalogInputConfig
     """Segment (on a catalog, or a local base rrd plus layer rrds), cameras, initial trajectory and sampling."""
@@ -94,6 +97,10 @@ class CatalogCommand:
             f"[colsfm] layer {layer.path}: {layer.num_rig_poses} rig poses, {layer.num_points} points, "
             f"{layer.metrics.registered_images} registered images, {layer.metrics.mean_reprojection_error_px:.3f} px"
         )
+        # A local input is served by a private catalog that ends with this run; only a real catalog keeps the layer.
+        if self.source.rrd is None:
+            register_layer(CatalogClient(source.catalog_url).get_dataset(name=source.dataset), [layer.path], DEFAULT_SOURCE)
+            print(f"[colsfm] registered {layer.path} as layer {DEFAULT_SOURCE} of {source.segment}")
 
 
 @dataclass(frozen=True, slots=True)

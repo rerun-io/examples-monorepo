@@ -168,3 +168,18 @@ def test_a_named_blueprint_replaces_its_holder_and_a_failed_one_keeps_it(tmp_pat
             register_named_blueprint(entry, (tmp_path / "missing.rbl").as_uri(), "layout")
         assert [(blueprint.id, blueprint.name) for blueprint in entry.blueprints()] == [(second.id, "layout"), (table.id, "table")]
         assert entry.default_blueprint() == second
+
+
+@pytest.mark.integration
+def test_a_segments_registered_layer_files_come_from_the_catalog(tmp_path: Path) -> None:
+    """What a stage that reads layer files needs from the catalog: each layer's file, by layer name."""
+    from simplecv.catalog_layers import registered_layer_files
+
+    base: Path = _write_layer(tmp_path / "base.rrd", "capture", "base", send_properties=True)
+    masks: Path = _write_layer(tmp_path / "masks.rrd", "masks", "masks", send_properties=False)
+    with rr.server.Server() as server:
+        entry = ensure_dataset(server.client(), "files")
+        register_layer(entry, [base], None)
+        register_layer(entry, [masks], "masks")
+        assert registered_layer_files(entry, "segment") == {"base": base.resolve(), "masks": masks.resolve()}
+        assert registered_layer_files(entry, "absent") == {}
