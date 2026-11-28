@@ -251,7 +251,7 @@ def main(config: Config) -> None:
     print(f"runs (s): {', '.join(f'{s:.3f}' for s in baseline.seconds)}")
     print("| model | GPU | best s | median s | solver-only s | px before | px after | LM iters | PCG iters | residuals | termination (CASPAR exit) |")
     print(
-        f"| {config.model_dir.name} | {config.gpu_label} | {baseline.best_seconds:.3f} | {baseline.median_seconds:.3f} | "
+        f"| {config.model_dir.name}{' +intrinsics' if config.refine_intrinsics else ''}{' +rig' if config.refine_sensor_from_rig else ''} | {config.gpu_label} | {baseline.best_seconds:.3f} | {baseline.median_seconds:.3f} | "
         f"{trace.solver_seconds:.3f} | {baseline.reprojection_before_px:.4f} | {baseline.reprojection_after_px:.4f} | "
         f"{trace.iterations} | {trace.pcg_iterations} | {baseline.num_residuals} | {baseline.termination} ({trace.exit_reason}) |"
     )
