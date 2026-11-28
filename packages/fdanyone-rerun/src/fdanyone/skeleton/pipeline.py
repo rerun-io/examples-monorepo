@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import sys
+from collections.abc import Iterator
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
@@ -15,6 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
+from jaxtyping import Float32
 
 from fdanyone.assets import BIREFNET_REPO_ID, BIREFNET_REVISION, DOWNLOAD_COMMAND
 from fdanyone.config import CAMERA, CROP, FOREGROUND, INFERENCE, SKELETON, CameraConfig
@@ -37,7 +39,7 @@ from fdanyone.motion.result import MotionResult
 from fdanyone.skeleton.keypoints import KEYPOINT_NAMES
 from fdanyone.skeleton.renderer import estimate_body_height, projected_body_scales, render_goliath40
 from fdanyone.vendor.pytorch3d_compat import install_if_needed as install_pytorch3d_compat
-from fdanyone.video import CanonicalClip, iter_rgb_video, write_lossless_video, write_video
+from fdanyone.video import CanonicalClip, read_rgb_video, write_lossless_video, write_video
 from fdanyone.views import ViewPlan
 
 if TYPE_CHECKING:
@@ -73,9 +75,15 @@ class Conditioning:
         return _decode_video_frames(skeleton.path, self.num_frames)
 
     def prepare_skeleton(self, frames: list[Tensor], skeleton: SkeletonVideo) -> Tensor:
-        """Decoded skeleton frames as ``[3, frames, height, width]`` float32 in [-1, 1] on the media-prep device."""
+        """Decoded skeleton frames as ``[3, frames, height, width]`` float32 in [-1, 1] on the media-prep device.
 
-        return _prepare_video_frames(frames, skeleton.crop)
+        ``_video_tensor``'s crop and normalisation without its host copy: the pose batch is on the GPU, and the float32
+        round trip through host memory costs several times the decode.
+        """
+
+        import torch
+
+        return torch.cat(list(_prepared_chunks(frames, skeleton.crop))).permute(1, 0, 2, 3)
 
     @classmethod
     def load(cls, directory: str | Path) -> Conditioning:
@@ -191,43 +199,31 @@ def _crop_and_normalize(tensor, crop: Crop | None):
 def _decode_video_frames(path: Path, num_frames: int) -> list[Tensor]:
     import torch
 
-    frames = [torch.from_numpy(frame) for frame in iter_rgb_video(path)]
-    if len(frames) != num_frames:
-        raise FourDAnyoneError(f"Video {path} has {len(frames)} decoded frames, expected {num_frames}.")
-    return frames
+    return [torch.from_numpy(frame) for frame in read_rgb_video(path, expected_frames=num_frames)]
 
 
-def _prepare_video_frames(frames: list[Tensor], crop: Crop | None) -> Tensor:
-    """``_video_tensor``'s crop and normalisation, kept on the media-prep device as ``[3, frames, height, width]``.
-
-    A consumer that needs the clip on the GPU skips the float32 round trip through host memory, which costs several
-    times the decode itself.
-    """
+def _prepared_chunks(frames: list[Tensor], crop: Crop | None) -> Iterator[Tensor]:
+    """Cropped, normalised ``[chunk, 3, height, width]`` float32 batches of ``frames`` on the media-prep device."""
 
     import torch
 
     device = _media_prep_device()
-    chunks = [
-        _crop_and_normalize(torch.stack(frames[start : start + MEDIA_PREP_CHUNK_FRAMES]).to(device).permute(0, 3, 1, 2), crop)
-        for start in range(0, len(frames), MEDIA_PREP_CHUNK_FRAMES)
-    ]
-    return torch.cat(chunks).permute(1, 0, 2, 3)
+    for start in range(0, len(frames), MEDIA_PREP_CHUNK_FRAMES):
+        batch = torch.stack(frames[start : start + MEDIA_PREP_CHUNK_FRAMES]).to(device).permute(0, 3, 1, 2)
+        yield _crop_and_normalize(batch, crop)
 
 
 def _video_tensor(path: Path, num_frames: int, *, crop: Crop | None = None):
     """Decode a whole clip and crop/resize it in GPU batches instead of one CPU bicubic per frame.
 
-    Returns ``[1, 3, frames, height, width]`` float32 in [-1, 1] on the CPU.
+    Returns ``[1, 3, frames, height, width]`` float32 in [-1, 1] on the CPU; each GPU batch is copied out as it is
+    made, so the device holds one batch at a time.
     """
 
     import torch
 
     frames = _decode_video_frames(path, num_frames)
-    device = _media_prep_device()
-    output = []
-    for start in range(0, num_frames, MEDIA_PREP_CHUNK_FRAMES):
-        batch = torch.stack(frames[start : start + MEDIA_PREP_CHUNK_FRAMES]).to(device).permute(0, 3, 1, 2)
-        output.append(_crop_and_normalize(batch, crop).cpu())
+    output = [chunk.cpu() for chunk in _prepared_chunks(frames, crop)]
     return torch.cat(output).permute(1, 0, 2, 3).unsqueeze(0).contiguous()
 
 
@@ -412,12 +408,12 @@ def _resized_camera(camera: Camera, image_height: int, image_width: int) -> Came
 class _SkeletonVideoJob:
     """One view's projected keypoints, drawn and encoded into its skeleton video by ``_write_skeleton_video``."""
 
-    keypoints_2d: np.ndarray
-    """[frames, 70, 2] float32 pixel positions on the source canvas."""
-    keypoint_depths: np.ndarray
-    """[frames, 70] float32 camera depths."""
-    body_scales: np.ndarray
-    """[frames] float32 projected body size in pixels."""
+    keypoints_2d: Float32[np.ndarray, "frames 70 2"]
+    """Pixel positions on the source canvas."""
+    keypoint_depths: Float32[np.ndarray, "frames 70"]
+    """Camera depths."""
+    body_scales: Float32[np.ndarray, " frames"]
+    """Projected body size in pixels."""
     canvas_height: int
     canvas_width: int
     output_height: int

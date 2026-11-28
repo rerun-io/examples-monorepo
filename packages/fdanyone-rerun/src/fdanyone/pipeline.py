@@ -350,14 +350,16 @@ def run_pipeline(
     regressor = resolve_regressor(mhr70_regressor_path, model_dir=model_dir)
     foreground_model = resolve_foreground_model(model_dir)
     PROGRESS.info("Preparing the 121-frame clip", extra={"fraction": 0.10})
-    # Both workers start now: their interpreters and imports (~4 s each) overlap the clip preparation and GVHMR.
-    motion_worker = (
-        None if output.motion_dir.exists() else _start_worker("fdanyone.motion.worker", worker_python, str(gvhmr_root))
-    )
-    skeleton_worker = _start_worker("fdanyone.skeleton.worker", worker_python)
+    motion_worker = None
+    skeleton_worker = None
     prefetch = None
     scratch = None
     try:
+        # Both workers start now: their interpreters and imports (~4 s each) overlap the clip preparation and GVHMR.
+        # They start inside the try so a failed second start still ends the first (it would wait on stdin forever).
+        if not output.motion_dir.exists():
+            motion_worker = _start_worker("fdanyone.motion.worker", worker_python, str(gvhmr_root))
+        skeleton_worker = _start_worker("fdanyone.skeleton.worker", worker_python)
         clip = decode_canonical_clip(
             video_path,
             num_frames=INFERENCE.num_frames,

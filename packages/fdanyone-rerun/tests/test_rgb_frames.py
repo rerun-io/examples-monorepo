@@ -1,4 +1,4 @@
-"""The publication boundary's uint8 frames equal the released host-side conversion (CPU tensor; CUDA when present)."""
+"""The publication boundary's uint8 frames equal the released host-side conversion (CPU tensor; the CUDA case is integration)."""
 
 import numpy as np
 import pytest
@@ -12,7 +12,10 @@ def _released(video: torch.Tensor) -> list[np.ndarray]:
     return [scaled[:, index].permute(1, 2, 0).numpy().astype(np.uint8) for index in range(scaled.shape[1])]
 
 
-@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA"))])
+@pytest.mark.parametrize(
+    "device",
+    ["cpu", pytest.param("cuda", marks=[pytest.mark.integration, pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")])],
+)
 def test_rgb_frames_match_the_released_conversion(device: str) -> None:
     generator = torch.Generator().manual_seed(0)
     # [-1.2, 1.2] covers both clamps; exact .5 steps sit on the truncation boundaries.
