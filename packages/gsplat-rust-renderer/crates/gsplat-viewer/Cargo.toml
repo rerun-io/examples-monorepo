@@ -3,23 +3,18 @@ name = "gsplat-viewer"
 version = "0.1.0"
 edition = "2024"
 
-[[bin]]
-name = "gsplat-rust-renderer"
-path = "src/main.rs"
-required-features = ["app"]
 
 [features]
 default = ["app"]
-# The standalone gsplat-rust-renderer binary (application.rs) and its runtime. The canonical viewer links the library
-# without it, so none of these reach rerun-canonical. `default_web` = the stock views (map, audio) without analytics;
+# The headless viewer App that `gsplat probe` builds (application.rs) until the probe moves to the canonical viewer.
+# The canonical viewer links the library without it. `default_web` = the stock views (map, audio) without analytics;
 # analytics' reqwest pulls a second wasm-streams, whose exported JS classes collide in wasm-bindgen.
-app = ["dep:clap", "dep:egui_kittest", "dep:re_crash_handler", "dep:re_grpc_server", "dep:tokio", "dep:re_video", "re_viewer/default_web"]
+app = ["dep:re_video", "re_viewer/default_web"]
 
 [dependencies]
 gsplat-core = { path = "../gsplat-core" }
 anyhow.workspace = true
 canonical-viewer-extension = { path = "../../../canonical-viewer/rust/crates/extension" }
-clap = { workspace = true, optional = true }
 # Rerun 0.44 is on glam 0.33 (re_math); gsplat-core and Brush stay on the workspace glam 0.30.
 # The viewer speaks Rerun's glam and converts at the gsplat-core boundary (`gsplat_core::glam`).
 glam = "0.33"
@@ -47,10 +42,6 @@ web-sys = { version = "0.3", features = ["Location", "Navigator", "Window"] }
 # and the canonical viewer link the lib.
 # Rerun 0.44 uses egui/eframe 0.37, so the headless kittest harness must stay on the same egui family as re_viewer.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-egui_kittest = { workspace = true, optional = true }
-re_crash_handler = { workspace = true, optional = true }
-re_grpc_server = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true }
 # Native AV1 decoding at full speed (the lens and face videos of dataforge recordings): `nasm` turns on dav1d's
 # assembly. Without it Rerun 0.44 refuses AV1 on Linux x86-64 ("compile Rerun with the `nasm` feature") and decodes
 # 2-3x slower on Apple silicon. x86-64 assembles with nasm (the pixi feature's `nasm`); Apple silicon with the C

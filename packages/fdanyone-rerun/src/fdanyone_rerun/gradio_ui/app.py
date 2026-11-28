@@ -63,8 +63,8 @@ DESCRIPTION: str = (
 NO_WEBGPU: str = (
     "<b>This browser has no WebGPU</b>, so the viewer cannot run the gsplat renderer: the 4D person is drawn with "
     "Rerun's basic splats and looks blurry. On Linux Chrome: enable <code>chrome://flags/#enable-vulkan</code> and "
-    "relaunch. Or download the run's recording and open it in the native gsplat viewer "
-    "(<code>packages/gsplat-rust-renderer/target/release/gsplat-rust-renderer &lt;run&gt;.rrd</code>)."
+    "relaunch. Or download the run's recording and open it in the native canonical viewer "
+    "(<code>rerun-canonical &lt;run&gt;.rrd</code>)."
 )
 """Shown above the viewer when the page finds no WebGPU adapter (the gsplat renderer needs WebGPU's compute limits)."""
 WEBGPU_CHECK_JS: str = (

@@ -105,7 +105,7 @@ page offers it for download when the run has finished.
 
 The gsplat renderer in the embedded viewer needs WebGPU. A browser without it (Linux Chrome until
 `chrome://flags/#enable-vulkan` is enabled) gets Rerun's basic splats, and the page says so above the viewer; the saved
-recording plays in the native gsplat viewer (`packages/gsplat-rust-renderer`).
+recording plays in the native canonical viewer (`rerun-canonical`, `packages/canonical-viewer`).
 
 On a GPU shared with other jobs, pass `--gpu-lock <file>` (e.g. `/tmp/gpu-5090.lock`): the app holds that flock only
 while a run is on the GPU and says "Waiting for the GPU" until it gets it. Do not wrap the whole app in `flock`: an app

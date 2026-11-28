@@ -3,14 +3,9 @@
 //!
 //! The archetype, decoder and visualizer are out-of-tree scaffolding for checking depth as video end to end;
 //! they are deleted once `DepthVideoStream` ships in Rerun.
-#[cfg(feature = "app")]
-mod application;
 mod archetype;
 mod decoder;
 mod visualizer;
-
-#[cfg(feature = "app")]
-pub use application::run;
 
 use canonical_viewer_extension::Extension;
 use re_sdk_types::View as _;
