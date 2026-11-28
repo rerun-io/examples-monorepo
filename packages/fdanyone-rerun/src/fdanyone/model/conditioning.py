@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import logging
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from dataclasses import dataclass
@@ -284,28 +285,30 @@ def _execute_pose_job(
     video_shape = None
     batch = None
     prefix = pose_encoder.temporal_prefix
-    for batch_index, skeleton in enumerate(job.skeletons):
-        LOGGER.info("Loading skeleton conditioning from %s", skeleton.path.name)
-        decoded = conditioning.load_skeleton_tensor([skeleton]).to(dtype=torch.bfloat16, device="cpu").contiguous()
-        if decoded.ndim != 5 or decoded.shape[0] != 1:
-            raise FourDAnyoneError(f"Expected one 5D skeleton tensor, got shape {tuple(decoded.shape)}.")
-        current_shape = tuple(decoded.shape[1:])
-        if video_shape is None:
-            video_shape = current_shape
-            batch = torch.empty(
-                (job.batch_size, video_shape[0], video_shape[1] + prefix, *video_shape[2:]),
-                dtype=torch.bfloat16,
-                device=device,
-            ).fill_(-1)
-        elif current_shape != video_shape:
-            raise FourDAnyoneError(
-                f"Skeleton {skeleton.path} has shape {tuple(decoded.shape)}, expected {(1, *video_shape)}."
-            )
-        # Construct the exact contiguous input previously produced by cat in
-        # PoseEncoder. Null slots remain -1, including their temporal prefix.
-        batch[batch_index, :, :prefix].copy_(decoded[0, :, :1])
-        batch[batch_index, :, prefix:].copy_(decoded[0])
-        del decoded
+    # Crop and normalisation stay on the GPU and write straight into the BF16 batch: the float32 round trip through
+    # host memory cost several times the decode. Decodes run on threads, so later videos decode while earlier ones
+    # are prepared.
+    with ThreadPoolExecutor(max_workers=len(job.skeletons), thread_name_prefix="skeleton-decode") as pool:
+        # A finished future keeps its frames: each is dropped from the queue once its video is prepared.
+        decodes = deque(pool.submit(conditioning.decode_skeleton_frames, skeleton) for skeleton in job.skeletons)
+        for batch_index, skeleton in enumerate(job.skeletons):
+            LOGGER.info("Loading skeleton conditioning from %s", skeleton.path.name)
+            video = conditioning.prepare_skeleton(decodes.popleft().result(), skeleton)
+            current_shape = tuple(video.shape)
+            if video_shape is None:
+                video_shape = current_shape
+                batch = torch.empty(
+                    (job.batch_size, video_shape[0], video_shape[1] + prefix, *video_shape[2:]),
+                    dtype=torch.bfloat16,
+                    device=device,
+                ).fill_(-1)
+            elif current_shape != video_shape:
+                raise FourDAnyoneError(f"Skeleton {skeleton.path} has shape {current_shape}, expected {video_shape}.")
+            # Construct the exact contiguous input previously produced by cat in
+            # PoseEncoder. Null slots remain -1, including their temporal prefix.
+            batch[batch_index, :, :prefix].copy_(video[:, :1])
+            batch[batch_index, :, prefix:].copy_(video)
+            del video
 
     encoded = _encode_pose_batch(pose_encoder, batch)
     job.builder.store(job, encoded)

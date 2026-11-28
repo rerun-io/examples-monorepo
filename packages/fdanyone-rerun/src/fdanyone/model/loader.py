@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from concurrent.futures import Future, ThreadPoolExecutor
-
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -86,6 +85,91 @@ def _load_checkpoint(
         )
 
 
+_SAFETENSORS_DTYPES: dict[str, str] = {
+    "BF16": "bfloat16",
+    "F16": "float16",
+    "F32": "float32",
+    "F64": "float64",
+    "I64": "int64",
+    "I32": "int32",
+    "U8": "uint8",
+    "BOOL": "bool",
+    "F8_E4M3": "float8_e4m3fn",
+}
+
+
+def read_safetensors(
+    path: Path,
+    *,
+    exclude_prefixes: tuple[str, ...] = (),
+    read_threads: int = 4,
+    chunk_bytes: int = 64 * 1024**2,
+) -> tuple[dict[str, torch.Tensor], dict[str, str]]:
+    """Read a whole safetensors file into one host buffer and return views of it.
+
+    ``safe_open(...).get_tensor`` returns tensors backed by a private file mapping, so nothing is read until a page is
+    touched: a prefetch built on it reads nothing, and the 12 GB NAS read lands in the first ``.to(device)`` on the
+    critical path. Large parallel ``pread`` calls read it here instead, on the prefetch thread.
+    """
+
+    import json
+    import math
+    import os
+    import struct
+
+    import torch
+
+    # One descriptor for the header, the size check and the payload: a file replaced between opens cannot pair one
+    # file's header with another's bytes.
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        (header_size,) = struct.unpack("<Q", os.pread(fd, 8, 0))
+        header = json.loads(os.pread(fd, header_size, 8))
+        metadata = dict(header.pop("__metadata__", None) or {})
+        data_start = 8 + header_size
+        data_size = max((int(entry["data_offsets"][1]) for entry in header.values()), default=0)
+        file_size = os.fstat(fd).st_size
+        if file_size < data_start + data_size:
+            raise ValueError(f"{path} is truncated: {file_size} bytes, header needs {data_start + data_size}.")
+        unknown = {entry["dtype"] for entry in header.values()} - _SAFETENSORS_DTYPES.keys()
+        if unknown:
+            raise AssetError(f"{path} has tensor dtypes this reader does not map: {sorted(unknown)}.")
+        # The format's layout rule, as safetensors checks it: the tensors tile the data section with no gap or overlap.
+        end = 0
+        for key, entry in sorted(header.items(), key=lambda item: item[1]["data_offsets"][0]):
+            start, stop = (int(offset) for offset in entry["data_offsets"])
+            itemsize = getattr(torch, _SAFETENSORS_DTYPES[entry["dtype"]]).itemsize
+            if start != end or stop - start != math.prod(entry["shape"]) * itemsize:
+                raise AssetError(f"{path} has an invalid layout at tensor {key!r}: offsets {entry['data_offsets']}.")
+            end = stop
+
+        buffer = torch.empty(data_size, dtype=torch.uint8)
+        view = memoryview(buffer.numpy())
+
+        def read(offset: int) -> None:
+            end = min(offset + chunk_bytes, data_size)
+            while offset < end:
+                count = os.preadv(fd, [view[offset:end]], data_start + offset)
+                if count <= 0:
+                    raise ValueError(f"{path} is truncated at byte {data_start + offset}.")
+                offset += count
+
+        with ThreadPoolExecutor(max_workers=read_threads, thread_name_prefix="checkpoint-read") as pool:
+            for future in [pool.submit(read, offset) for offset in range(0, data_size, chunk_bytes)]:
+                future.result()
+    finally:
+        os.close(fd)
+
+    tensors = {}
+    for key, entry in header.items():
+        if any(key.startswith(prefix) for prefix in exclude_prefixes):
+            continue
+        start, end = (int(offset) for offset in entry["data_offsets"])
+        dtype = getattr(torch, _SAFETENSORS_DTYPES[entry["dtype"]])
+        tensors[key] = buffer[start:end].view(dtype).view(entry["shape"])
+    return tensors, metadata
+
+
 def _strict_assign(module, state_dict: dict, label: str) -> None:
     """Load into a meta-initialized module without a second parameter copy."""
 
@@ -114,7 +198,7 @@ def _load_dit(checkpoint_path: Path, attention_backend: str):
 
     with torch.device("meta"):
         dit = FourDAnyoneDiT(attention_backend=attention_backend)
-    state_dict, metadata = _load_checkpoint(checkpoint_path, exclude_prefixes=(POSE_ENCODER_PREFIX,))
+    state_dict, metadata = read_safetensors(checkpoint_path, exclude_prefixes=(POSE_ENCODER_PREFIX,))
     _strict_assign(dit, state_dict, "4DAnyone DiT checkpoint")
     del state_dict
     # ``freqs`` is a derived, non-persistent tensor and therefore is not in the

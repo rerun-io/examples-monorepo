@@ -13,6 +13,10 @@ CUDA_MAX_SPLIT_SIZE_MB = 4096
 LOW_MEMORY_GPU_MAX_BYTES = 24 * 1024**3
 
 
+WAIT_FOR_REQUEST: str = "--wait-for-request"
+"""Worker argument (motion and skeleton workers): import the heavy modules first, then read the request path from
+stdin; an empty line exits."""
+
 def _visible_gpu_identifiers(environment: MutableMapping[str, str]) -> tuple[str, ...] | None:
     """Return CUDA-visible NVIDIA identifiers without initializing CUDA."""
 
