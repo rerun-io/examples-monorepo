@@ -5,8 +5,6 @@ The host arrays go in as contiguous float32 / int32 / uint8 copies, passed to `_
 there and writes the accepted state back. Quaternions are normalised here, at write-back, as COLMAP's adapter does.
 """
 
-from __future__ import annotations
-
 import time
 from typing import Final, NamedTuple, TypeAlias
 
@@ -29,6 +27,9 @@ CALIB_SIZE: Final[dict[CameraModel, int]] = {
     CameraModel.FULL_OPENCV: 10,
 }
 """Focal-and-extra parameters per model: the width of a refined intrinsics block."""
+
+DEFAULT_OPTIONS: Final[BaOptions] = BaOptions()
+"""colsfm's CASPAR settings (frozen, shared)."""
 
 
 class Linearization(NamedTuple):
@@ -84,7 +85,7 @@ def _normalized(poses: Float32[ndarray, "n 7"]) -> Float64[ndarray, "n 7"]:
     return out
 
 
-def solve(problem: BaProblem, options: BaOptions = BaOptions()) -> BaResult:
+def solve(problem: BaProblem, options: BaOptions = DEFAULT_OPTIONS) -> BaResult:
     """CASPAR's `GraphSolver::solve` with the reduced camera system, on the GPU."""
     start: float = time.perf_counter()
     if not options.reduced_camera_system:
