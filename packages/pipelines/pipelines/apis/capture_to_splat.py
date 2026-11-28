@@ -15,7 +15,7 @@ from rerun.catalog import CatalogClient
 from simplecv.run_record import RunRecord, read_run_record
 
 from pipelines.capture_to_splat import InputProfile, flow_steps
-from pipelines.runner import Launch, run_flow, step_command
+from pipelines.runner import Launch, run_flow, task_command
 from pipelines.step import Step
 
 WORKSPACE_MANIFEST: Path = Path(__file__).resolve().parents[4] / "pixi.toml"
@@ -57,7 +57,8 @@ def main(config: Config) -> None:
     launch: Launch = Launch(manifest=WORKSPACE_MANIFEST, pixi=config.pixi, gpu_lock=config.gpu_lock, memory_max=config.memory_max)
     if config.action == "plan":
         for step in steps:
-            print(f"{step.name} -> layer {step.layer}: {' '.join(step_command(step, launch))}")
+            for task in step.tasks:
+                print(f"{step.name} -> layer {step.layer}: {' '.join(task_command(task, launch))}")
         return
     client: CatalogClient = CatalogClient(config.catalog_url)
     if config.action == "show":

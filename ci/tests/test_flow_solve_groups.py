@@ -25,5 +25,5 @@ def test_every_step_of_a_capture_to_splat_profile_runs_in_one_solve_group(tmp_pa
     flow: ModuleType = _flow_module("capture_to_splat")
     for profile in ("insta360", "robocap"):
         steps = flow.flow_steps(profile, segment=f"{profile}__s", catalog_url="u", output_root=tmp_path)
-        groups: set[object] = {environments[step.environment].get("solve-group") for step in steps}
+        groups: set[object] = {environments[task.environment].get("solve-group") for step in steps for task in step.tasks}
         assert len(groups) == 1 and None not in groups, f"{profile}: {groups}"

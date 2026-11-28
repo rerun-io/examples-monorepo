@@ -8,7 +8,7 @@ the segment's prefix (``insta360__<clip>``: dataset ``insta360``), which is also
 from pathlib import Path
 from typing import Literal, TypeAlias
 
-from pipelines.step import Step
+from pipelines.step import Step, Task
 
 InputProfile: TypeAlias = Literal["insta360", "robocap"]
 """What the base came from. ``insta360``: two fisheye lenses and their cube faces, masked (lens masks, masked SLAM, face
@@ -44,23 +44,23 @@ def flow_steps(profile: InputProfile, *, segment: str, catalog_url: str, output_
     )
     if profile == "robocap":
         return (
-            Step("slam", "slam_rs", dataset, segment, "slam-rs-cuda", "slam-rs-catalog-layer", slam),
+            Step("slam", "slam_rs", dataset, segment, (Task("slam-rs-cuda", "slam-rs-catalog-layer", slam),)),
             # The colsfm-robocap task's camera rig: the four fisheyes, the front pair stereo, every 4th frameset.
-            Step("colsfm", "colsfm", dataset, segment, "colsfm", "colsfm-catalog", (
+            Step("colsfm", "colsfm", dataset, segment, (Task("colsfm", "colsfm-catalog", (
                 *colsfm, "--source.cameras", "left_front", "right_front", "left", "right", "--source.stereo-pairs", "left_front", "right_front",
                 "--source.frame-stride", "4", "--source.trim-start-seconds", "2", "--source.trim-end-seconds", "2",
-            )),
+            )),)),
         )
     lens_masks: tuple[str, ...] = ("--dataset", dataset, "--segment", segment, "--catalog-url", catalog_url, "--output-dir", str(root / "lens_mask"))
     return (
-        Step("lens_masks", "lens_mask", dataset, segment, "posekit", "posekit-lens-masks", lens_masks),
+        Step("lens_masks", "lens_mask", dataset, segment, (Task("posekit", "posekit-lens-masks", lens_masks),)),
         # The lens masks are the cameras' people_mask entities in the lens_mask layer; the face masks, the faces' in masks.
-        Step("slam", "slam_rs", dataset, segment, "slam-rs-cuda", "slam-rs-catalog-layer", (*slam, "--mask-entity", "people_mask")),
-        Step("face_masks", "masks", dataset, segment, "dataforge-cuda", "dataforge-insta360-face-masks",
-             ("--segment", segment, "--catalog-url", catalog_url, "--output-dir", str(root / "masks"))),
-        Step("colsfm", "colsfm", dataset, segment, "colsfm", "colsfm-catalog", (
+        Step("slam", "slam_rs", dataset, segment, (Task("slam-rs-cuda", "slam-rs-catalog-layer", (*slam, "--mask-entity", "people_mask")),)),
+        Step("face_masks", "masks", dataset, segment, (Task("dataforge-cuda", "dataforge-insta360-face-masks",
+             ("--segment", segment, "--catalog-url", catalog_url, "--output-dir", str(root / "masks"))),)),
+        Step("colsfm", "colsfm", dataset, segment, (Task("colsfm", "colsfm-catalog", (
             *colsfm, "--source.cameras", "cube6_front0", "cube6_front1", "cube6_left", "cube6_right", "cube6_up", "cube6_down",
             "--source.mask-entity", "people_mask", "--source.frame-stride", "1",
             "--options.config-dir", "colsfm/resources/configs/insta360-cube", "--options.align-to-prior",
-        )),
+        )),)),
     )
