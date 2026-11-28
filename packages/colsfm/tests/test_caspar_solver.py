@@ -457,7 +457,7 @@ class RigDiff:
 @pytest.fixture
 def _needs_the_rig_factor() -> None:
     if not detect_caspar_capability().refines_sensor_from_rig:
-        pytest.skip("this CASPAR build does not refine sensor_from_rig (_caspar_refines_sensor_from_rig); build recipes/colmap-src caspar-rig-refine")
+        pytest.skip("this CASPAR build does not refine sensor_from_rig (_caspar_refines_sensor_from_rig); install ai-demos colmap-caspar (the colsfm environment)")
 
 
 def _rig_problem(model: str, seed: int = 1) -> tuple[pycolmap.Reconstruction, pycolmap.Reconstruction]:

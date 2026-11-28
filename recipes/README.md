@@ -2,7 +2,8 @@
 
 Each directory here builds one upstream project, pinned to a single commit, as a conda package with
 rattler-build (`recipe.yaml` beside a `[package]` manifest, backend `pixi-build-rattler-build`).
-Environments consume it as a source dependency: `<name> = { path = "recipes/<name>" }`.
+Environments consume it as a source dependency: `<name> = { path = "recipes/<name>" }`. The exception is
+`colmap-src`, which holds only patches ("colmap-src" below).
 `packages/` holds only our own code; slam-rs and dpretrieval stay there (see the follow-up below).
 
 | Package | Upstream, pinned source | Licence | Patches | Consuming features |
@@ -10,7 +11,7 @@ Environments consume it as a source dependency: `<name> = { path = "recipes/<nam
 | `asog-src` | [arrival-space/animated-sog](https://github.com/arrival-space/animated-sog) archive `bc976cf`, sha256 `0beb3975…`; installs `asog` (the Animated SOG `.asog` encoder and reference decoder, `python/`), pure Python, numpy only (the SH palette k-means uses the environment's CUDA torch); the JS players and the flip-book pipeline are not used | not declared in the recipe | 1 (hook: `encode_runtime` takes the in-memory `TrigsRuntime` that `encode` reads from a `.trigsbin`, so `packages/open4dgs` encodes a checkpoint without writing one) | `open4dgs`, `fdanyone-rerun` (linux-64, linux-aarch64) |
 | `asmk-src` | [jenicek/asmk](https://github.com/jenicek/asmk) git `2a96d9c`; pure Python: the Cython `asmk.hamming` is `packages/asmk-rs`'s `asmk_rs` | not declared in the recipe | 2 (`pyproject.toml`; `asmk.hamming` → `asmk_rs`, no `setup.py`) | `mast3r-slam` (linux-64) |
 | `brush-src` | [ArthurBrussee/brush](https://github.com/ArthurBrussee/brush) git `1388f74` | not declared in the recipe | 1 | `gsplat-rust-renderer` |
-| `colmap-src` | [colmap/colmap](https://github.com/colmap/colmap) git `137f2168` (main, 4.3.0.dev0), libcolmap + pycolmap with `CASPAR_ENABLED=ON`, CUDA 13, sm_86 + sm_89 + sm_120 (linux-64) / sm_121 (linux-aarch64) | BSD-3-Clause (`LICENSE`) | 8 (two Caspar adapters, `OPENCV_FISHEYE` and fixed-calibration `FULL_OPENCV`; a database rollback hook; the PCG beta fix and the reduced camera system; the diag-exit status; `sensor_from_rig` refinement; the adapters and the rig refinement each carry a Symforce-generated fp32 kernel patch; every patched file is sha256-checked in `patches/SHA256SUMS` before the build; see "Patch or package" and `patches/PROVENANCE.md`) | `colsfm` |
+| `colmap-src` | [colmap/colmap](https://github.com/colmap/colmap) git `137f2168` (main, 4.3.0.dev0), libcolmap + pycolmap with `CASPAR_ENABLED=ON`, CUDA 13, sm_86 + sm_89 + sm_120 (linux-64) / sm_121 (linux-aarch64) | BSD-3-Clause (`LICENSE`) | 8 (two Caspar adapters, `OPENCV_FISHEYE` and fixed-calibration `FULL_OPENCV`; a database rollback hook; the PCG beta fix and the reduced camera system; the diag-exit status; `sensor_from_rig` refinement; the adapters and the rig refinement each carry a Symforce-generated fp32 kernel patch; every patched file is sha256-checked in `patches/SHA256SUMS` before the build; see "Patch or package" and `patches/PROVENANCE.md`) | none: patches only; ai-demos `colmap-caspar` builds them and `colsfm` installs that package ("colmap-src" below) |
 | `dinov3-src` | [facebookresearch/dinov3](https://github.com/facebookresearch/dinov3) archive `5aa7e93`, sha256 `194fc7a6…` | DINOv3 License (`LICENSE.md`) | 0 | `posekit`, `mv-api`, `mamma`, `exo-calib`, `selfcap-curate`, `posekit-sam3d-body`, `metrictrail`, `open4dgs` |
 | `egohand-src` | [NVIDIA/IsaacCapture](https://github.com/NVIDIA/IsaacCapture) archive `479063c` (`src/python/isaaccapture_egopost`), sha256 `49dd5594…`; installs `egohand` and `egohand_inference` | OpenMDW-1.1 (+ `THIRD_PARTY_LICENSES.md`) | 6 | `posekit`, `mv-api`, `mamma`, `exo-calib`, `selfcap-curate` |
 | `fastgraphcompute-src` | [jkiesele/FastGraphCompute](https://github.com/jkiesele/FastGraphCompute) archive `4044d7d`, sha256 `687f86b0…`; CUDA kernels for sm_120 + sm_121 against conda-forge torch 2.12 (exact binned kNN, arXiv 2511.10442) | not declared in the recipe (no licence file upstream) | 1 (build fix: build the extensions one after another) | `open4dgs`, `fdanyone-rerun` (linux-64, linux-aarch64) |
@@ -38,6 +39,19 @@ Bump a recipe:
    (rattler-build 0.77) says "not implemented yet"; run `git diff` in that source's checkout in the
    work directory instead.
 3. Install every consuming environment (`pixi install -e <env>`) and run its gate.
+
+## colmap-src
+
+`recipes/colmap-src` holds only COLMAP's patches (`patches/`, `PROVENANCE.md`, `tools/`). The build script is
+pablovela5620/ai-demos `recipes/colmap-caspar`: it takes these patches from this repository at a pinned commit, and
+`colsfm` installs that prebuilt package, so no worktree compiles COLMAP's CUDA kernels. A PR that changes a patch
+pushes it first, points the ai-demos recipe at that PR commit (`monorepo_rev` and each patch's sha256) with a new
+build number, and moves `[feature.colsfm]`'s `colmap-caspar` pin once that build is on the channel; the colsfm gate
+then runs in the same PR. Do not rebase that commit away once it is pinned (or point `monorepo_rev` at a main commit
+with the same patch bytes after the merge): a commit in no branch can stop serving its raw URLs. To try a patch
+before publishing, build the ai-demos recipe locally (`rattler-build build --recipe recipes/colmap-caspar` with
+the ci-build flags) with `monorepo_rev` at the pushed commit. The package's run_exports pin its host libraries (onnxruntime-cpp, abseil, protobuf,
+OpenImageIO, ceres, ...): a lock that moves one of them for colsfm needs a new colmap-caspar build first.
 
 ## Patch or package
 

@@ -1,8 +1,9 @@
 # Provenance of the colmap-src patches
 
-The eight patches apply, in `recipe.yaml`'s order, to colmap/colmap `137f21680c79d3f2fffbb1d11deb367162aa6f83` (main,
-2026-11-15, after FlexGlue #4908..#4969). `SHA256SUMS` hashes all 709 files they touch (verified by the recipe's Step 0
-before the build). `tools/cut_patches.sh` cuts the three rig patches, re-hashes `SHA256SUMS` and checks that all eight
+The eight patches apply, in the order of the patch table below (also in `tools/cut_patches.sh` and ai-demos
+`recipes/colmap-caspar`), to colmap/colmap `137f21680c79d3f2fffbb1d11deb367162aa6f83` (main,
+2026-11-15, after FlexGlue #4908..#4969). `SHA256SUMS` hashes all 709 files they touch (the ai-demos recipe checks them
+before it compiles). `tools/cut_patches.sh` cuts the three rig patches, re-hashes `SHA256SUMS` and checks that all eight
 apply to a fresh checkout of the pin ("Source branch" below).
 
 ## Source branch
@@ -11,9 +12,9 @@ All eight patches come from one branch, `caspar-rig-refine-on-fisheye-fix` @ `29
 in a local clone of colmap/colmap on pablo-dl-server (`~/wt-colmap-recut`, a worktree of
 `~/0Dev/forks/colmap-caspar-fisheye`). Its first five commits are `caspar-fisheye-fix-ray-main` (the OPENCV_FISHEYE ray
 angle below); the rig commits were cherry-picked from the older `caspar-rig-refine-main` @ `186e11b5`, and the 36
-OPENCV_FISHEYE rig kernels regenerated with that ray core (2026-11-25). **The branch is pushed nowhere** (its only remote is colmap/colmap): until it is
-pushed to a fork (for example pablovela5620/colmap), nobody can re-cut or extend these patches on another machine. That
-push is a decision for Pablo. One commit per patch, on top of the pin:
+OPENCV_FISHEYE rig kernels regenerated with that ray core (2026-11-25). The branch is public at
+[pablovela5620/colmap `caspar-rig-refine-on-fisheye-fix`](https://github.com/pablovela5620/colmap/tree/caspar-rig-refine-on-fisheye-fix)
+(@ `2978f202`, pushed 2026-11-27), so the patches can be re-cut on any machine. One commit per patch, on top of the pin:
 
 | Commit | Patch (`git diff --full-index <previous> <commit>`) |
 |---|---|
@@ -35,8 +36,14 @@ recipes/colmap-src/tools/cut_patches.sh ~/wt-colmap-recut 573b507f a5503ebb 2978
 
 | Patch | Kind | Content |
 |---|---|---|
-| `add-caspar-adapters.patch` | hand-written, 4 files (56 KB) | `OpenCVFisheyeAdapter` and `FullOpenCVAdapter` in `caspar_model_adapter.h`, their dispatch in `bundle_adjustment_caspar.cc`, their residuals plus the SumStore padding-thread fix in `Symforce-Caspar/caspar_generate.py`, two FAQ lines |
+| `add-caspar-adapters.patch` | hand-written, 4 files (56 KB) | `OpenCVFisheyeAdapter` and `FullOpenCVAdapter` in `caspar_model_adapter.h`, their dispatch in `bundle_adjustment_caspar.cc`, their residuals plus the SumStore padding-thread fix in `Symforce-Caspar/caspar_generate.py`, two FAQ lines. FULL_OPENCV: fixed intrinsics and fixed `sensor_from_rig` only (twelve parameters do not fit a tunable calib in Caspar's shared memory, as in upstream PR #4657) |
 | `add-caspar-adapters-generated-f32.patch` | Symforce output (2.7 MB) | 266 new fp32 kernel files (224 OPENCV_FISHEYE, 42 FULL_OPENCV) and the 4 regenerated aggregates (`solver.{h,cc}`, `caspar_mappings.{h,cu}`) |
+| `add-database-transaction-rollback.patch` | hand-written hook, 4 files | `DatabaseTransaction::Rollback` and pycolmap's `with DatabaseTransaction(db):` rolling back when the block raises: upstream commits on an exception, so colsfm's chunk writes (matches + verified geometries) could not be all-or-nothing |
+| `caspar-pcg-beta-recurrence.patch` | hand-written, 2 files | Symforce 0.12's PCG computed beta as rho_k / rho_0 and lost conjugacy from the third iteration on; `BetaFromNumDenom` keeps rho_k as the next divisor |
+| `caspar-reduced-camera-system.patch` | hand-written, 9 files | an option-gated reduced camera system (colsfm turns it on): points eliminated inside the PCG, which stops on the Ceres/rootba Q criterion; span helpers rendered by `tools/caspar_rcs_helpers.py`. With the beta fix, KITTI 06 reaches 816 mm Sim(3) ATE alone, against 1,184 mm without (below) |
+| `caspar-diag-exit-no-convergence.patch` | hand-written, 1 file | `CONVERGED_DIAG_EXIT` (LM damping past its limit after uphill steps) is reported as `NO_CONVERGENCE` |
+| `caspar-rig-refine.patch` | hand-written, 5 files | `refine_sensor_from_rig` on CASPAR: a tunable SensorFromRig node per model and 40 rig factors in `caspar_generate.py`, the adapter's rig bookkeeping (Ceres' rules for which `sensor_from_rig` is variable), the C++ test; four-node factors use `AddSumDirect` to fit 48 KB |
+| `caspar-rig-refine-generated-f32.patch` | Symforce output | 424 rig kernel files and the 4 aggregates (`solver.{h,cc}` with the reduced-camera-system edits re-applied) |
 
 ## History
 
@@ -94,7 +101,7 @@ so the factor depended on the scene scale. Root cause: `loop-and-quality/a7/casp
 
 Both adapter patches were re-cut as above: 45 regenerated `opencv_fisheye*` kernels, the aggregates unchanged, every
 other generated file byte for byte as the generator env gives it. Source: local branch `caspar-fisheye-fix-ray-main` @
-`573b507f` in `~/0Dev/forks/colmap-caspar-fisheye` on pablo-dl-server (pushed nowhere): `4c5ea2aa` hand-written,
+`573b507f` in `~/0Dev/forks/colmap-caspar-fisheye` on pablo-dl-server (an ancestor of the public branch above): `4c5ea2aa` hand-written,
 `8a608f5b` generated, then the other three patches, one commit each. colsfm `tests/test_caspar_solver.py` checks it: the
 rim rig at scene scales 1, 0.01 and 0.002 ends at Ceres' cost, both solvers scored on one set of observations (in front
 at the start and in Ceres' solution).
