@@ -7,8 +7,8 @@ and the length of that tail varies from run to run. So:
   is within `CONVERGED` of its final cost (same accept flags, best cost within 1e-3). That trial itself is left out:
   its damping comes from the quality ratio of a decrease near the float32 noise. PCG iterations are compared per trial
   (within 1) only while the best cost is more than `PCG_CONVERGED` above the final one; closer to it the Q stop meets
-  its threshold on float32 noise (the joint rig + intrinsics case: the same trial runs 11 to 19 iterations over five
-  Mojo runs on the 3060), so there only the prefix's total is compared, within 30 %;
+  its threshold on float32 noise (the joint rig + intrinsics case: one trial runs 11 to 19 iterations over five Mojo
+  runs on the 3060), so there only the prefix's total is compared, within 30 %;
 - costs against the float64 reference: initial within 1e-4, final within 1 %;
 - the exit reason equals the float32 reference's, and the trial count is within a factor 2 of it (a gross check);
 - the state is compared through what it predicts, the pixels, because each tail accept moves it along a nearly flat
@@ -37,8 +37,9 @@ pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("native")]
 OPTIONS = BaOptions(solver_iter_max=40)
 CONVERGED = 1e-5
 """Relative distance to the final cost at which a trace counts as converged."""
-PCG_CONVERGED = 1e-4
-"""Relative distance to the final cost below which the per-trial PCG count is float32 noise at the Q stop."""
+PCG_CONVERGED = 1e-3
+"""Relative distance to the final cost below which the per-trial PCG count is float32 noise at the Q stop (the joint
+rig + intrinsics case, trial 5 at 4.4e-4: 13-14 iterations on the 3060 in five runs, 17 on the GB10 and the reference)."""
 QUADRATIC_SLACK = 1.1
 """Room for the third-order terms of the cost around its minimum (measured: at most 1.01 on 12 cases x 2 GPUs)."""
 
