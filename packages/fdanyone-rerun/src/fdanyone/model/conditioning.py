@@ -284,8 +284,9 @@ def _execute_pose_job(
     video_shape = None
     batch = None
     prefix = pose_encoder.temporal_prefix
-    # Decodes run side by side (the RGB conversion releases the GIL); crop and normalisation stay on the GPU and
-    # write straight into the BF16 batch, without a float32 round trip through host memory.
+    # Crop and normalisation stay on the GPU and write straight into the BF16 batch: the float32 round trip through
+    # host memory cost several times the decode. Decodes run on threads, so later videos decode while earlier ones
+    # are prepared.
     with ThreadPoolExecutor(max_workers=len(job.skeletons), thread_name_prefix="skeleton-decode") as pool:
         decodes = [pool.submit(conditioning.decode_skeleton_frames, skeleton) for skeleton in job.skeletons]
         for batch_index, (skeleton, decode) in enumerate(zip(job.skeletons, decodes, strict=True)):
