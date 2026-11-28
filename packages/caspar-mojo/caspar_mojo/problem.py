@@ -40,13 +40,13 @@ class CameraModel(IntEnum):
     """`[fx, fy, cx, cy, k1, k2, p1, p2, k3, k4, k5, k6]`."""
 
 
-INTRINSICS_COUNT: Final[dict[CameraModel, int]] = {
-    CameraModel.PINHOLE: 4,
-    CameraModel.SIMPLE_RADIAL: 4,
-    CameraModel.OPENCV_FISHEYE: 8,
-    CameraModel.FULL_OPENCV: 12,
+FOCAL_AND_EXTRA_COLUMNS: Final[dict[CameraModel, tuple[int, ...]]] = {
+    CameraModel.PINHOLE: (0, 1),
+    CameraModel.SIMPLE_RADIAL: (0, 3),
+    CameraModel.OPENCV_FISHEYE: (0, 1, 4, 5, 6, 7),
+    CameraModel.FULL_OPENCV: (0, 1, 4, 5, 6, 7, 8, 9, 10, 11),
 }
-"""How many leading columns of an `intrinsics` row each model uses."""
+"""Columns of an `intrinsics` row that `intrinsics_free` refines (CASPAR's FocalAndExtra node), in tangent order."""
 
 
 @dataclass(frozen=True, slots=True)

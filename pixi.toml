@@ -2410,11 +2410,11 @@ platforms = ["linux-64", "linux-aarch64"]
 [feature.caspar-mojo-pkg.activation.env]
 PACKAGE_DIR = "packages/caspar-mojo"
 
-# The test lanes build the extension first: a missing or stale .so must not skip or pass silently.
+# The unit lane needs no GPU and no extension; the GPU lanes build both libraries first, so a missing or stale
+# .so fails instead of skipping.
 [feature.caspar-mojo-pkg.tasks.tests]
 cmd = "cd $PACKAGE_DIR && pytest -q"
-depends-on = ["caspar-mojo-build"]
-description = "Build caspar-mojo, then run the package unit tests"
+description = "Run the package unit tests (no GPU, no build)"
 
 [feature.caspar-mojo-pkg.tasks.tests-integration]
 cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m integration \"$@\" || test $? -eq 5' _"
@@ -2423,8 +2423,7 @@ description = "Build caspar-mojo and its C library, then run the package integra
 
 [feature.caspar-mojo-pkg.tasks.tests-golden]
 cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m golden \"$@\" || test $? -eq 5' _"
-depends-on = ["caspar-mojo-build"]
-description = "Build caspar-mojo, then run the package golden reference tests"
+description = "Run the package golden reference tests (none yet; add the build dependency with the first one)"
 
 [feature.caspar-mojo.tasks.caspar-mojo-build]
 cmd = "mojo build --emit shared-lib -I caspar_mojo/mojo -o caspar_mojo/_caspar_mojo.so caspar_mojo/mojo/_caspar_mojo.mojo"
@@ -2441,12 +2440,13 @@ description = "Build libcaspar_mojo.so, the C-ABI solver library (GPU kernels fo
 inputs = ["packages/caspar-mojo/caspar_mojo/mojo/*.mojo"]
 outputs = ["packages/caspar-mojo/caspar_mojo/libcaspar_mojo.so"]
 
-# A non-Mojo process linking the library, as COLMAP does: needs a GPU and the host C compiler.
-[feature.caspar-mojo.tasks.caspar-mojo-test-c]
-cmd = "mkdir -p build && cc -O1 -Iinclude tests/c/test_c_api.c -Lcaspar_mojo -lcaspar_mojo -Wl,-rpath,$PWD/caspar_mojo -o build/test_c_api && ./build/test_c_api"
+# COLMAP vendors include/caspar_mojo.h as src/colmap/estimators/caspar/caspar_mojo.h: this compares the copy, so the
+# header is edited in one place. (The C test program runs in tests-integration, tests/test_c_api.py.)
+[feature.caspar-mojo.tasks.caspar-mojo-header-check]
+args = ["colmap_dir"]
+cmd = "cmp include/caspar_mojo.h {{ colmap_dir }}/src/colmap/estimators/caspar/caspar_mojo.h"
 cwd = "packages/caspar-mojo"
-depends-on = ["caspar-mojo-build-c"]
-description = "Compile and run the C test program against libcaspar_mojo.so"
+description = "Check that a COLMAP tree vendors this package's C header byte for byte"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # sam2-streaming — the vendored SAM 2 fork's own lane: its connected-components kernel in Mojo

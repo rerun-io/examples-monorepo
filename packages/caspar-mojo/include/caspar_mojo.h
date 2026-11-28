@@ -7,6 +7,15 @@
  * writes the accepted state into `CasparMojoState`. Poses are [qx, qy, qz, qw, tx, ty, tz]; quaternions come back
  * unnormalised (the caller normalises at write-back, as COLMAP's CASPAR adapter does).
  *
+ * The library trusts its input, as the kernels index with it unchecked: every array has exactly the length given
+ * below; observation_frame, observation_camera and observation_point hold rows in [0, num_frames), [0, num_cameras)
+ * and [0, num_points); every *_free byte is 0 or 1. (The Python door, caspar_mojo/solver.py, checks the same
+ * contract before it hands out addresses.) Observations may come in any order; grouped by (camera, frame) they
+ * run fastest.
+ *
+ * This file is the one source of the ABI: COLMAP vendors it byte for byte (checked by the caspar-mojo-header-check
+ * task), and tests/test_c_api.py checks the ctypes declarations and Python constants against it.
+ *
  * Load with dlopen; check caspar_mojo_abi_version() == CASPAR_MOJO_ABI_VERSION before any other call.
  */
 #ifndef CASPAR_MOJO_H_
@@ -53,9 +62,9 @@ typedef struct CasparMojoProblem {
   const float* points;            /* [num_points][3] */
   const uint8_t* point_free;      /* [num_points] */
   const float* pixels;            /* [num_observations][2] */
-  const int32_t* observation_frame;
-  const int32_t* observation_camera;
-  const int32_t* observation_point;
+  const int32_t* observation_frame;  /* [num_observations] row of rig_from_world */
+  const int32_t* observation_camera; /* [num_observations] row of the per-camera arrays */
+  const int32_t* observation_point;  /* [num_observations] row of points */
 } CasparMojoProblem;
 
 /* CASPAR's SolverParams under its names; the reduced camera system is the only mode. */

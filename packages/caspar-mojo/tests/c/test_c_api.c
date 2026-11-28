@@ -1,5 +1,6 @@
-/* Links against libcaspar_mojo.so like COLMAP's C++ would: solves a small exact PINHOLE problem from perturbed
- * points and poses, and checks the unsupported-model path reports through the error buffer. Exit 0 = pass. */
+/* Links against libcaspar_mojo.so like COLMAP's C++ would, through the public header: checks the ABI version and
+ * the support query, solves a small exact PINHOLE problem from perturbed points and poses three times, and checks
+ * that the unsupported-model path reports through the error buffer. Exit 0 = pass. */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,6 +11,14 @@
 enum { NF = 6, NP = 64, NO = NF * NP };
 
 int main(void) {
+  if (caspar_mojo_abi_version() != CASPAR_MOJO_ABI_VERSION) {
+    printf("abi %d, header %d\n", caspar_mojo_abi_version(), CASPAR_MOJO_ABI_VERSION);
+    return 1;
+  }
+  if (!caspar_mojo_supports(CASPAR_MOJO_FULL_OPENCV, 1, 1) || caspar_mojo_supports(CASPAR_MOJO_FULL_OPENCV + 1, 0, 0)) {
+    printf("caspar_mojo_supports disagrees with the header's model list\n");
+    return 1;
+  }
   float intr[12] = {500, 500, 320, 240}, sfr[7] = {0, 0, 0, 1, 0, 0, 0}, poses[NF * 7], pts[NP * 3], pix[NO * 2];
   uint8_t intr_free = 0, sfr_free = 0, pose_free[NF], pt_free[NP];
   int32_t of[NO], oc[NO], op[NO];
@@ -39,17 +48,20 @@ int main(void) {
   const CasparMojoState st = {out_intr, out_sfr, out_poses, out_pts};
   CasparMojoStats s;
   char err[256] = "";
-  int32_t rc = 0;
+  int solved = 1;
   for (int run = 0; run < 3; ++run) { /* later calls show the per-call cost without the first-call start-up */
-    rc = caspar_mojo_solve(&pr, &opt, &st, &s, err, sizeof(err));
-    printf("run %d total %.4f s\n", run, s.total_seconds);
+    const int32_t rc = caspar_mojo_solve(&pr, &opt, &st, &s, err, sizeof(err));
+    if (rc != CASPAR_MOJO_OK) { /* stats are written only on success */
+      printf("run %d rc %d err '%s'\n", run, rc, err);
+      return 1;
+    }
+    printf("run %d cost %.6g -> %.6g iters %ld pcg %ld exit %ld solve %.4f s total %.4f s\n", run, s.initial_cost,
+           s.final_cost, (long)s.iterations, (long)s.pcg_iterations, (long)s.exit_reason, s.solve_seconds,
+           s.total_seconds);
+    solved = solved && s.final_cost < 1e-6 * s.initial_cost && out_poses[3] == 1.0f;
   }
-  printf("abi %d rc %d cost %.6g -> %.6g iters %ld pcg %ld exit %ld solve %.4f s total %.4f s err '%s'\n",
-         caspar_mojo_abi_version(), rc, s.initial_cost, s.final_cost, (long)s.iterations, (long)s.pcg_iterations,
-         (long)s.exit_reason, s.solve_seconds, s.total_seconds, err);
-  const int solved = rc == CASPAR_MOJO_OK && s.final_cost < 1e-6 * s.initial_cost && out_poses[3] == 1.0f;
   pr.camera_model = CASPAR_MOJO_FULL_OPENCV + 1;
-  rc = caspar_mojo_solve(&pr, &opt, &st, &s, err, sizeof(err));
+  const int32_t rc = caspar_mojo_solve(&pr, &opt, &st, &s, err, sizeof(err));
   printf("unsupported model: rc %d err '%s'\n", rc, err);
   return solved && rc == CASPAR_MOJO_UNSUPPORTED && strstr(err, "camera model") != NULL ? 0 : 1;
 }

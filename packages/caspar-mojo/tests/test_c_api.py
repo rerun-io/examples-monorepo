@@ -1,21 +1,27 @@
-"""The C ABI (`libcaspar_mojo.so`, `include/caspar_mojo.h`) against the Python door on the same problem.
+"""The C ABI (`libcaspar_mojo.so`) against its one header, `include/caspar_mojo.h`, and against the Python door.
 
-Both call the same Mojo `solve`; only the boundary differs (ctypes structs vs `(address, *shape)` tuples), so the
-initial cost must agree to float32 summation noise and the final state to the float32 tail of the LM run.
+The header is the single source of the ABI. A C probe compiled against it reports every field's offset and type and
+every constant; the ctypes declarations here and the Python constants must agree with it (a reordered same-width
+field or a renumbered constant fails here, without a GPU). The integration tests then run the C program built against
+the header, and solve one problem through ctypes and through the Python door: both call the same Mojo `solve`, so the
+initial cost agrees to float32 summation noise and the final state to the float32 tail of the LM run.
 """
 
 import ctypes
+import shutil
+import subprocess
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from caspar_mojo.problem import BaOptions, CameraModel
+from caspar_mojo.problem import MAX_INTRINSICS, BaOptions, CameraModel
 from caspar_mojo.reference.synthetic import make_problem
+from caspar_mojo.solver import EXIT_REASONS, solve
 
-pytestmark = pytest.mark.integration
-
-LIBRARY = Path(__file__).parents[1] / "caspar_mojo" / "libcaspar_mojo.so"
+ROOT = Path(__file__).parents[1]
+HEADER = ROOT / "include" / "caspar_mojo.h"
+LIBRARY = ROOT / "caspar_mojo" / "libcaspar_mojo.so"
 
 F32P = ctypes.POINTER(ctypes.c_float)
 U8P = ctypes.POINTER(ctypes.c_uint8)
@@ -77,22 +83,93 @@ class Stats(ctypes.Structure):
     ]
 
 
+STRUCTS: dict[str, type[ctypes.Structure]] = {
+    "CasparMojoProblem": Problem,
+    "CasparMojoOptions": Options,
+    "CasparMojoState": State,
+    "CasparMojoStats": Stats,
+}
+"""Header struct name -> its ctypes declaration."""
+
+KINDS: dict[object, str] = {ctypes.c_int64: "i64", ctypes.c_double: "f64", F32P: "f32*", U8P: "u8*", I32P: "i32*"}
+"""ctypes type -> the probe's name for the C type."""
+
+CONSTANTS: dict[str, int] = {
+    "CASPAR_MOJO_MAX_INTRINSICS": MAX_INTRINSICS,
+    **{f"CASPAR_MOJO_{model.name}": int(model) for model in CameraModel},
+    **{f"CASPAR_MOJO_EXIT_{name}": code for code, name in enumerate(EXIT_REASONS)},
+}
+"""Header constants and the Python values they must equal."""
+
+PROBE_PRELUDE = """#include <stddef.h>
+#include <stdio.h>
+#include "caspar_mojo.h"
+#define KIND(x) _Generic((x), int64_t: "i64", double: "f64", const float*: "f32*", float*: "f32*", \\
+                         const uint8_t*: "u8*", const int32_t*: "i32*", default: "?")
+int main(void) {
+"""
+
+
+def _compiler() -> str:
+    compiler = shutil.which("cc")
+    if compiler is None:
+        pytest.skip("no C compiler (cc) on PATH: the header checks compile against include/caspar_mojo.h")
+    return compiler
+
+
+def _probe(tmp_path: Path) -> dict[str, str]:
+    """`name -> value` lines printed by a C program compiled against the header."""
+    lines: list[str] = [PROBE_PRELUDE]
+    for struct, declaration in STRUCTS.items():
+        lines.append(f'  printf("{struct} %zu\\n", sizeof({struct}));')
+        for field, _ in declaration._fields_:
+            lines.append(f'  printf("{struct}.{field} %zu %s\\n", offsetof({struct}, {field}), KIND((({struct}*)0)->{field}));')
+    lines += [f'  printf("{name} %d\\n", {name});' for name in ("CASPAR_MOJO_ABI_VERSION", *CONSTANTS)]
+    lines.append("  return 0;\n}\n")
+    source = tmp_path / "probe.c"
+    source.write_text("\n".join(lines))
+    binary = tmp_path / "probe"
+    subprocess.run([_compiler(), "-std=c11", f"-I{HEADER.parent}", str(source), "-o", str(binary)], check=True)
+    output = subprocess.run([str(binary)], check=True, capture_output=True, text=True).stdout
+    return dict(line.split(" ", 1) for line in output.splitlines())
+
+
+def test_ctypes_and_python_constants_match_the_header(tmp_path: Path) -> None:
+    probe = _probe(tmp_path)
+    for struct, declaration in STRUCTS.items():
+        assert int(probe[struct]) == ctypes.sizeof(declaration), struct
+        for field, kind in declaration._fields_:
+            assert probe[f"{struct}.{field}"] == f"{getattr(declaration, field).offset} {KINDS[kind]}", (struct, field)
+    for name, value in CONSTANTS.items():
+        assert int(probe[name]) == value, name
+
+
+def _abi_version(tmp_path: Path) -> int:
+    return int(_probe(tmp_path)["CASPAR_MOJO_ABI_VERSION"])
+
+
+@pytest.mark.integration
+def test_c_program_runs_against_the_header(c_library: ctypes.CDLL, tmp_path: Path) -> None:
+    binary = tmp_path / "test_c_api"
+    command = [_compiler(), "-O1", f"-I{HEADER.parent}", str(ROOT / "tests" / "c" / "test_c_api.c"), f"-L{LIBRARY.parent}", "-lcaspar_mojo"]
+    subprocess.run([*command, f"-Wl,-rpath,{LIBRARY.parent}", "-o", str(binary)], check=True)
+    run = subprocess.run([str(binary)], capture_output=True, text=True, timeout=600)
+    assert run.returncode == 0, run.stdout + run.stderr
+
+
 def _ptr(array: np.ndarray, pointer_type: type) -> object:
     return array.ctypes.data_as(pointer_type)
 
 
-def test_c_abi_matches_python_door() -> None:
-    if not LIBRARY.exists():
-        pytest.skip(f"{LIBRARY.name} is not built: pixi run -e caspar-mojo-dev caspar-mojo-build-c")
-    solver = pytest.importorskip("caspar_mojo.solver", reason="the Mojo extension is not built")
-    library = ctypes.CDLL(str(LIBRARY))
-    library.caspar_mojo_solve.restype = ctypes.c_int32
-    library.caspar_mojo_abi_version.restype = ctypes.c_int32
-    assert library.caspar_mojo_abi_version() == 1
+@pytest.mark.integration
+def test_c_abi_matches_python_door(c_library: ctypes.CDLL, tmp_path: Path) -> None:
+    c_library.caspar_mojo_solve.restype = ctypes.c_int32
+    c_library.caspar_mojo_abi_version.restype = ctypes.c_int32
+    assert c_library.caspar_mojo_abi_version() == _abi_version(tmp_path)
 
     problem = make_problem(CameraModel.PINHOLE, n_frames=13, n_points=1023, seed=11)[0]
     options = BaOptions(solver_iter_max=40)
-    expected = solver.solve(problem, options)
+    expected = solve(problem, options)
 
     f32 = [
         np.ascontiguousarray(a, dtype=np.float32)
@@ -134,12 +211,12 @@ def test_c_abi_matches_python_door() -> None:
     state = State(*(_ptr(a, F32P) for a in outputs))
     stats = Stats()
     error = ctypes.create_string_buffer(1024)
-    code = library.caspar_mojo_solve(ctypes.byref(c_problem), ctypes.byref(c_options), ctypes.byref(state), ctypes.byref(stats), error, len(error))
+    code = c_library.caspar_mojo_solve(ctypes.byref(c_problem), ctypes.byref(c_options), ctypes.byref(state), ctypes.byref(stats), error, len(error))
     assert code == 0, error.value
 
     assert stats.initial_cost == pytest.approx(expected.initial_cost, rel=1e-5)
     assert stats.final_cost == pytest.approx(expected.final_cost, rel=1e-3)
-    assert ("MAX_ITERATIONS", "CONVERGED_DIAG_EXIT", "CONVERGED_SCORE_THRESHOLD")[stats.exit_reason] == expected.exit_reason
+    assert EXIT_REASONS[stats.exit_reason] == expected.exit_reason
     extent = float(np.ptp(problem.points, axis=0).max())
     np.testing.assert_allclose(outputs[3], expected.points, rtol=0, atol=1e-4 * extent)
     np.testing.assert_allclose(outputs[2][:, 4:], expected.rig_from_world[:, 4:], rtol=0, atol=1e-4 * extent)
