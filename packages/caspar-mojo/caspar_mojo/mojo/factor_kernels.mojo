@@ -10,7 +10,10 @@ Scatter-adds into the gradient, the block diagonal and the products use relaxed 
 """
 
 from std.atomic import Atomic, Ordering
-from max.gpu import global_idx, lane_id
+from max.gpu import WARP_SIZE, global_idx, lane_id, thread_idx
+from max.gpu.memory import AddressSpace
+from max.gpu.sync import barrier
+from std.memory import stack_allocation
 from max.gpu.primitives import warp
 
 from layout import ImmTileTensor, MutTileTensor, row_major
@@ -55,6 +58,74 @@ def tri_index[D: Int](i: Int, j: Int) -> Int:
 def atomic_add(p: F32Ptr, offset: Int, value: Float32):
     # CUDA's atomicAdd (relaxed, device scope); Mojo's default ordering adds a fence per add, about 3x slower.
     _ = Atomic[Float32, scope="device"].fetch_add[ordering=Ordering.relaxed](p.unsafe_offset(offset), value)
+
+
+@always_inline
+def warp_uniform(key: Int) -> Bool:
+    """Whether every lane of the warp holds the same key. Observations come sorted by camera then image, so a
+    warp usually shares its pose (and its camera); one atomic per warp then replaces 32 on one address."""
+    var k = Int32(key)
+    return warp.min(k) == warp.max(k)
+
+
+comptime BLOCK = 256
+"""Threads per block of every per-observation kernel (the block reductions below assume it)."""
+comptime WARPS = BLOCK // WARP_SIZE
+comptime NOT_UNIFORM: Int32 = -2
+
+
+@always_inline
+def block_uniform(key: Int) -> Bool:
+    """Whether every thread of the block holds the same key. Block-uniform; every thread must call it."""
+    var keys = stack_allocation[WARPS, Int32, address_space=AddressSpace.SHARED]()
+    var k = Int32(key)
+    var same = warp.min(k) == warp.max(k)
+    if lane_id() == 0:
+        keys[unsafe_offset=thread_idx.x // WARP_SIZE] = k if same else NOT_UNIFORM
+    barrier()
+    var first = keys[unsafe_offset=0]
+    var uniform = first != NOT_UNIFORM
+    comptime for w in range(1, WARPS):
+        uniform = uniform and keys[unsafe_offset=w] == first
+    barrier()
+    return uniform
+
+
+@always_inline
+def scatter_values[D: Int](dst: F32Ptr, key: Int, values: Array[Float32, D]):
+    """dst[key:key+D] += values summed over the block when the block shares `key`, else over each warp that
+    shares it, else per thread. One device atomic per block replaces 256 on one address: observations come
+    sorted by camera then image, so a block nearly always shares its pose. Every thread must call it."""
+    if block_uniform(key):
+        var sums = stack_allocation[WARPS * D, Float32, address_space=AddressSpace.SHARED]()
+        var warp_index = thread_idx.x // WARP_SIZE
+        comptime for i in range(D):
+            var total = warp.sum(values[i])
+            if lane_id() == 0:
+                sums[unsafe_offset=warp_index * D + i] = total
+        barrier()
+        var t = thread_idx.x
+        if t < D and key >= 0:
+            var total: Float32 = 0.0
+            comptime for w in range(WARPS):
+                total += sums[unsafe_offset=w * D + t]
+            atomic_add(dst, key + t, total)
+        barrier()
+        return
+    var uniform = warp_uniform(key)
+    comptime for i in range(D):
+        scatter_add(dst, key + i, values[i], uniform, key >= 0)
+
+
+@always_inline
+def scatter_add(dst: F32Ptr, offset: Int, value: Float32, uniform: Bool, active: Bool):
+    """dst[offset] += value; `uniform` (warp-uniform) sums the warp first. Every lane must call it."""
+    if uniform:
+        var total = warp.sum(value)
+        if active and lane_id() == 0:
+            atomic_add(dst, offset, total)
+    elif active:
+        atomic_add(dst, offset, value)
 
 
 @always_inline
@@ -117,18 +188,23 @@ def observe[Model: CameraModel](
 
 @always_inline
 def accumulate_block[D: Int](
-    j: Array[Float32, 2 * D], jac: Jac, n: Int, col: Int, e0: Float32, e1: Float32, v: Int, h: Int, g: F32Ptr, hblk: F32Ptr
+    j: Array[Float32, 2 * D], jac: Jac, n: Int, valid: Bool, col: Int, e0: Float32, e1: Float32, v: Int, h: Int, g: F32Ptr, hblk: F32Ptr
 ):
-    """Cache J in jac[col:col+2D, n]; when the node is free (v >= 0), g[v:v+D] -= J^T e and J^T J into hblk[h:]."""
+    """Cache J in jac[col:col+2D, n]; for a free node (v >= 0), g[v:v+D] -= J^T e and J^T J into hblk[h:].
+    Every lane must call it; `valid` is False past the last observation."""
     comptime assert jac.flat_rank == 2
-    comptime for i in range(2 * D):
-        jac[col + i, n] = j[i]
-    if v < 0:
-        return
+    if valid:
+        comptime for i in range(2 * D):
+            jac[col + i, n] = j[i]
+    var key = v if valid else -1
+    var grad = Array[Float32, D](fill=0.0)
+    var hess = Array[Float32, tri(D)](fill=0.0)
     comptime for i in range(D):
-        atomic_add(g, v + i, -(j[i] * e0 + j[D + i] * e1))
+        grad[i] = -(j[i] * e0 + j[D + i] * e1)
         comptime for k in range(i, D):
-            atomic_add(hblk, h + tri_index[D](i, k), j[i] * j[k] + j[D + i] * j[D + k])
+            hess[tri_index[D](i, k)] = j[i] * j[k] + j[D + i] * j[D + k]
+    scatter_values[D](g, key, grad)
+    scatter_values[tri(D)](hblk, h if key >= 0 else -1, hess)
 
 
 @always_inline
@@ -169,60 +245,61 @@ def linearize_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bo
     comptime assert pose_off.flat_rank == 1 and rig_off.flat_rank == 1 and calib_off.flat_rank == 1
     comptime assert point_off.flat_rank == 1 and jac.flat_rank == 2
     comptime K = Model.NUM_CALIB
-    var n = global_idx.x
-    var cost: Float32 = 0.0
-    if n < Int(obs_frame.dim[0]()):
-        var frame = Int(obs_frame[n][0])
-        var camera = Int(obs_camera[n][0])
-        var point = Int(obs_point[n][0])
-        var o = observe[Model](n, poses, rigs, intrinsics, points, frame, camera, point, pixels)
-        cost = 0.5 * (o.e0 * o.e0 + o.e1 * o.e1)
-        var j_pose = Array[Float32, 12](fill=0.0)
-        var j_point = Array[Float32, 6](fill=0.0)
-        var j_rig = Array[Float32, 12](fill=0.0)
-        comptime for r in range(2):
-            var dp = Vec3(o.proj.d_point[3 * r], o.proj.d_point[3 * r + 1], o.proj.d_point[3 * r + 2])
-            # a = d pixel / d camera point * R_sensor (w.r.t. the rig-frame point), b = a * R_rig (w.r.t. the world point).
-            var a = Vec3(
-                dp.x * o.r_sensor[0, 0] + dp.y * o.r_sensor[1, 0] + dp.z * o.r_sensor[2, 0],
-                dp.x * o.r_sensor[0, 1] + dp.y * o.r_sensor[1, 1] + dp.z * o.r_sensor[2, 1],
-                dp.x * o.r_sensor[0, 2] + dp.y * o.r_sensor[1, 2] + dp.z * o.r_sensor[2, 2],
-            )
-            var b = Vec3(
-                a.x * o.r_rig[0, 0] + a.y * o.r_rig[1, 0] + a.z * o.r_rig[2, 0],
-                a.x * o.r_rig[0, 1] + a.y * o.r_rig[1, 1] + a.z * o.r_rig[2, 1],
-                a.x * o.r_rig[0, 2] + a.y * o.r_rig[1, 2] + a.z * o.r_rig[2, 2],
-            )
-            # Right perturbation R exp(w): d/dw = -J R [X]x, whose row is X x (J R); likewise P_rig x a for the rig.
-            var rot = cross(o.world, b)
-            j_pose[6 * r + 0] = rot.x
-            j_pose[6 * r + 1] = rot.y
-            j_pose[6 * r + 2] = rot.z
-            j_pose[6 * r + 3] = a.x
-            j_pose[6 * r + 4] = a.y
-            j_pose[6 * r + 5] = a.z
-            j_point[3 * r + 0] = b.x
-            j_point[3 * r + 1] = b.y
-            j_point[3 * r + 2] = b.z
-            var rig_rot = cross(o.rig_point, a)
-            j_rig[6 * r + 0] = rig_rot.x
-            j_rig[6 * r + 1] = rig_rot.y
-            j_rig[6 * r + 2] = rig_rot.z
-            j_rig[6 * r + 3] = dp.x
-            j_rig[6 * r + 4] = dp.y
-            j_rig[6 * r + 5] = dp.z
-        var nn6 = Int(n6)
-        var nc = Int(n_calib)
-        var po = Int(pose_off[frame][0])
-        accumulate_block[6](j_pose, jac, n, J_POSE, o.e0, o.e1, po, h_offset[K](po, nn6, nc), g, hblk)
-        var pto = Int(point_off[point][0])
-        accumulate_block[3](j_point, jac, n, J_POINT, o.e0, o.e1, pto, h_offset[K](pto, nn6, nc), g, hblk)
-        comptime if REFINE_RIG:
-            var ro = Int(rig_off[camera][0])
-            accumulate_block[6](j_rig, jac, n, J_RIG, o.e0, o.e1, ro, h_offset[K](ro, nn6, nc), g, hblk)
-        comptime if REFINE_INTRINSICS:
-            var co = Int(calib_off[camera][0])
-            accumulate_block[K](o.proj.d_calib, jac, n, calib_column[REFINE_RIG](), o.e0, o.e1, co, h_offset[K](co, nn6, nc), g, hblk)
+    # Lanes past the end recompute the last observation and add nothing, so every lane reaches the warp sums.
+    var n_obs = Int(obs_frame.dim[0]())
+    var valid = global_idx.x < n_obs
+    var n = min(global_idx.x, n_obs - 1)
+    var frame = Int(obs_frame[n][0])
+    var camera = Int(obs_camera[n][0])
+    var point = Int(obs_point[n][0])
+    var o = observe[Model](n, poses, rigs, intrinsics, points, frame, camera, point, pixels)
+    var cost: Float32 = 0.5 * (o.e0 * o.e0 + o.e1 * o.e1) if valid else 0.0
+    var j_pose = Array[Float32, 12](fill=0.0)
+    var j_point = Array[Float32, 6](fill=0.0)
+    var j_rig = Array[Float32, 12](fill=0.0)
+    comptime for r in range(2):
+        var dp = Vec3(o.proj.d_point[3 * r], o.proj.d_point[3 * r + 1], o.proj.d_point[3 * r + 2])
+        # a = d pixel / d camera point * R_sensor (w.r.t. the rig-frame point), b = a * R_rig (w.r.t. the world point).
+        var a = Vec3(
+            dp.x * o.r_sensor[0, 0] + dp.y * o.r_sensor[1, 0] + dp.z * o.r_sensor[2, 0],
+            dp.x * o.r_sensor[0, 1] + dp.y * o.r_sensor[1, 1] + dp.z * o.r_sensor[2, 1],
+            dp.x * o.r_sensor[0, 2] + dp.y * o.r_sensor[1, 2] + dp.z * o.r_sensor[2, 2],
+        )
+        var b = Vec3(
+            a.x * o.r_rig[0, 0] + a.y * o.r_rig[1, 0] + a.z * o.r_rig[2, 0],
+            a.x * o.r_rig[0, 1] + a.y * o.r_rig[1, 1] + a.z * o.r_rig[2, 1],
+            a.x * o.r_rig[0, 2] + a.y * o.r_rig[1, 2] + a.z * o.r_rig[2, 2],
+        )
+        # Right perturbation R exp(w): d/dw = -J R [X]x, whose row is X x (J R); likewise P_rig x a for the rig.
+        var rot = cross(o.world, b)
+        j_pose[6 * r + 0] = rot.x
+        j_pose[6 * r + 1] = rot.y
+        j_pose[6 * r + 2] = rot.z
+        j_pose[6 * r + 3] = a.x
+        j_pose[6 * r + 4] = a.y
+        j_pose[6 * r + 5] = a.z
+        j_point[3 * r + 0] = b.x
+        j_point[3 * r + 1] = b.y
+        j_point[3 * r + 2] = b.z
+        var rig_rot = cross(o.rig_point, a)
+        j_rig[6 * r + 0] = rig_rot.x
+        j_rig[6 * r + 1] = rig_rot.y
+        j_rig[6 * r + 2] = rig_rot.z
+        j_rig[6 * r + 3] = dp.x
+        j_rig[6 * r + 4] = dp.y
+        j_rig[6 * r + 5] = dp.z
+    var nn6 = Int(n6)
+    var nc = Int(n_calib)
+    var po = Int(pose_off[frame][0])
+    accumulate_block[6](j_pose, jac, n, valid, J_POSE, o.e0, o.e1, po, h_offset[K](po, nn6, nc), g, hblk)
+    var pto = Int(point_off[point][0])
+    accumulate_block[3](j_point, jac, n, valid, J_POINT, o.e0, o.e1, pto, h_offset[K](pto, nn6, nc), g, hblk)
+    comptime if REFINE_RIG:
+        var ro = Int(rig_off[camera][0])
+        accumulate_block[6](j_rig, jac, n, valid, J_RIG, o.e0, o.e1, ro, h_offset[K](ro, nn6, nc), g, hblk)
+    comptime if REFINE_INTRINSICS:
+        var co = Int(calib_off[camera][0])
+        accumulate_block[K](o.proj.d_calib, jac, n, valid, calib_column[REFINE_RIG](), o.e0, o.e1, co, h_offset[K](co, nn6, nc), g, hblk)
     reduce_add(scalars, Int(cost_slot), cost)
 
 
@@ -264,11 +341,13 @@ def block_times[D: Int](jac: JacIn, n: Int, col: Int, x: VecIn, v: Int) -> Tuple
 
 
 @always_inline
-def add_block_transpose[D: Int](jac: JacIn, n: Int, col: Int, u0: Float32, u1: Float32, dst: F32Ptr, v: Int):
-    """dst[v:v+D] += J^T u for one 2xD block."""
+def add_block_transpose[D: Int](jac: JacIn, n: Int, col: Int, u0: Float32, u1: Float32, dst: F32Ptr, key: Int):
+    """dst[key:key+D] += J^T u for one 2xD block; key -1 adds nothing. Every lane must call it."""
     comptime assert jac.flat_rank == 2
+    var values = Array[Float32, D](fill=0.0)
     comptime for i in range(D):
-        atomic_add(dst, v + i, jac[col + i, n][0] * u0 + jac[col + D + i, n][0] * u1)
+        values[i] = jac[col + i, n][0] * u0 + jac[col + D + i, n][0] * u1
+    scatter_values[D](dst, key, values)
 
 
 def cross_cameras_kernel[K: Int, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
@@ -287,17 +366,17 @@ def cross_cameras_kernel[K: Int, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
     comptime assert obs_frame.flat_rank == 1 and obs_camera.flat_rank == 1 and obs_point.flat_rank == 1
     comptime assert pose_off.flat_rank == 1 and rig_off.flat_rank == 1 and calib_off.flat_rank == 1
     comptime assert point_off.flat_rank == 1
-    var n = global_idx.x
-    if n >= Int(obs_frame.dim[0]()):
-        return
+    var n_obs = Int(obs_frame.dim[0]())
+    var valid = global_idx.x < n_obs
+    var n = min(global_idx.x, n_obs - 1)
     var camera = Int(obs_camera[n][0])
-    var po = Int(pose_off[Int(obs_frame[n][0])][0])
+    var po = Int(pose_off[Int(obs_frame[n][0])][0]) if valid else -1
     var ro = -1
     var co = -1
     comptime if REFINE_RIG:
-        ro = Int(rig_off[camera][0])
+        ro = Int(rig_off[camera][0]) if valid else -1
     comptime if REFINE_INTRINSICS:
-        co = Int(calib_off[camera][0])
+        co = Int(calib_off[camera][0]) if valid else -1
     var up = (Float32(0.0), Float32(0.0))
     var ur = (Float32(0.0), Float32(0.0))
     var uc = (Float32(0.0), Float32(0.0))
@@ -310,15 +389,13 @@ def cross_cameras_kernel[K: Int, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
     var u0 = up[0] + ur[0] + uc[0]
     var u1 = up[1] + ur[1] + uc[1]
     comptime if REFINE_RIG or REFINE_INTRINSICS:
-        if po >= 0:
-            add_block_transpose[6](jac, n, J_POSE, u0 - up[0], u1 - up[1], dst, po)
-        if ro >= 0:
+        add_block_transpose[6](jac, n, J_POSE, u0 - up[0], u1 - up[1], dst, po)
+        comptime if REFINE_RIG:
             add_block_transpose[6](jac, n, J_RIG, u0 - ur[0], u1 - ur[1], dst, ro)
-        if co >= 0:
+        comptime if REFINE_INTRINSICS:
             add_block_transpose[K](jac, n, calib_column[REFINE_RIG](), u0 - uc[0], u1 - uc[1], dst, co)
-    var pto = Int(point_off[Int(obs_point[n][0])][0])
-    if pto >= 0:
-        add_block_transpose[3](jac, n, J_POINT, u0, u1, dst, pto)
+    var pto = Int(point_off[Int(obs_point[n][0])][0]) if valid else -1
+    add_block_transpose[3](jac, n, J_POINT, u0, u1, dst, pto)
 
 
 def cross_points_kernel[K: Int, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
@@ -337,22 +414,20 @@ def cross_points_kernel[K: Int, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
     comptime assert obs_frame.flat_rank == 1 and obs_camera.flat_rank == 1 and obs_point.flat_rank == 1
     comptime assert pose_off.flat_rank == 1 and rig_off.flat_rank == 1 and calib_off.flat_rank == 1
     comptime assert point_off.flat_rank == 1
-    var n = global_idx.x
-    if n >= Int(obs_frame.dim[0]()):
-        return
-    var pto = Int(point_off[Int(obs_point[n][0])][0])
-    if pto < 0:
-        return
-    var u = block_times[3](jac, n, J_POINT, x, pto)
-    var po = Int(pose_off[Int(obs_frame[n][0])][0])
-    if po >= 0:
-        add_block_transpose[6](jac, n, J_POSE, u[0], u[1], dst, po)
+    var n_obs = Int(obs_frame.dim[0]())
+    var valid = global_idx.x < n_obs
+    var n = min(global_idx.x, n_obs - 1)
+    var pto = Int(point_off[Int(obs_point[n][0])][0]) if valid else -1
+    var u = (Float32(0.0), Float32(0.0))
+    if pto >= 0:
+        u = block_times[3](jac, n, J_POINT, x, pto)
+    # A fixed point adds nothing: its lanes join the warp sums with key -1.
+    var po = Int(pose_off[Int(obs_frame[n][0])][0]) if pto >= 0 else -1
+    add_block_transpose[6](jac, n, J_POSE, u[0], u[1], dst, po)
     var camera = Int(obs_camera[n][0])
     comptime if REFINE_RIG:
-        var ro = Int(rig_off[camera][0])
-        if ro >= 0:
-            add_block_transpose[6](jac, n, J_RIG, u[0], u[1], dst, ro)
+        var ro = Int(rig_off[camera][0]) if pto >= 0 else -1
+        add_block_transpose[6](jac, n, J_RIG, u[0], u[1], dst, ro)
     comptime if REFINE_INTRINSICS:
-        var co = Int(calib_off[camera][0])
-        if co >= 0:
-            add_block_transpose[K](jac, n, calib_column[REFINE_RIG](), u[0], u[1], dst, co)
+        var co = Int(calib_off[camera][0]) if pto >= 0 else -1
+        add_block_transpose[K](jac, n, calib_column[REFINE_RIG](), u[0], u[1], dst, co)
