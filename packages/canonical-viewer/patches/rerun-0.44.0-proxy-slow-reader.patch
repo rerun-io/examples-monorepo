@@ -1,0 +1,199 @@
+diff --git a/crates/utils/re_quota_channel/src/async_broadcast_channel.rs b/crates/utils/re_quota_channel/src/async_broadcast_channel.rs
+index febf638..6d9b887 100644
+--- a/crates/utils/re_quota_channel/src/async_broadcast_channel.rs
++++ b/crates/utils/re_quota_channel/src/async_broadcast_channel.rs
+@@ -13,16 +13,31 @@
+ //! Each message sent through the channel is internally wrapped to track when all
+ //! receivers have consumed it. The byte count is only decremented when the last receiver
+ //! drops its copy of the message, ensuring correct accounting even with multiple receivers.
++//!
++//! # Slow receivers
++//!
++//! A receiver that stops reading (for example a web viewer in a backgrounded browser tab)
++//! would otherwise block the sender, and with it every other receiver, forever.
++//! After [`SLOW_RECEIVER_TIMEOUT`] of backpressure the sender stops waiting: it sends
++//! anyway, and the underlying broadcast channel overwrites the oldest message for
++//! whichever receiver is behind. That receiver skips ahead on its next `recv`;
++//! everyone else is unaffected.
+ 
+ use std::fmt;
+ use std::sync::Arc;
++use std::time::Duration;
+ 
+ use parking_lot::Mutex;
+ use tokio::sync::{Notify, broadcast};
+ 
+ use re_byte_size::SizeBytes;
+ 
+-use crate::{BLOCKED_WARNING_THRESHOLD, BLOCKED_WARNING_THRESHOLD_SECS};
++/// How long the sender waits for a full channel to drain before it overflows instead.
++///
++/// The channel is only full once a receiver is already `max_messages` (or `max_bytes`)
++/// behind, so this extra second only ever applies to a receiver that has stalled.
++/// Keep it short: the sender's own producers block while it waits.
++pub const SLOW_RECEIVER_TIMEOUT: Duration = Duration::from_secs(1);
+ 
+ /// Reason why backpressure was applied.
+ enum BackpressureReason {
+@@ -85,6 +100,9 @@ struct Locked {
+ 
+     /// Number of active receivers.
+     num_receivers: usize,
++
++    /// Sending past the limits because a receiver stalled; cleared once a send fits again.
++    overflowing: bool,
+ }
+ 
+ /// Internal wrapper around a message that decrements [`Locked::bytes_in_flight`] when dropped.
+@@ -165,7 +183,11 @@ impl<T: Clone + SizeBytes> Sender<T> {
+ 
+             // Allow if within limits, or if this is the first message (even if oversized)
+             let is_first_message = locked.bytes_in_flight == 0 && locked.messages_in_flight == 0;
+-            if (new_messages <= max_messages && new_bytes <= max_bytes) || is_first_message {
++            let fits = (new_messages <= max_messages && new_bytes <= max_bytes) || is_first_message;
++            if fits {
++                locked.overflowing = false;
++            }
++            if fits || locked.overflowing {
+                 // Reserve the space
+                 locked.bytes_in_flight = new_bytes;
+                 locked.messages_in_flight = new_messages;
+@@ -209,15 +231,12 @@ impl<T: Clone + SizeBytes> Sender<T> {
+ 
+     /// Send a message asynchronously, waiting if bytes or message count exceed limits.
+     ///
+-    /// This will wait until there's enough space before sending.
++    /// Waits at most [`SLOW_RECEIVER_TIMEOUT`] for space. After that the channel overflows:
++    /// the message is sent anyway and the receiver that is behind skips the oldest messages.
+     ///
+     /// Returns `Err` if there are no receivers.
+     pub async fn send_async(&self, value: T) -> Result<usize, NoReceivers<T>> {
+-        use std::time::Instant;
+-
+-        let debug_name = &self.state.debug_name;
+-        let start = Instant::now();
+-        let mut warned = false;
++        let deadline = tokio::time::Instant::now() + SLOW_RECEIVER_TIMEOUT;
+         let mut value = value;
+ 
+         loop {
+@@ -227,22 +246,21 @@ impl<T: Clone + SizeBytes> Sender<T> {
+                 TrySendResult::Full(v) => value = v,
+             }
+ 
+-            if !warned && BLOCKED_WARNING_THRESHOLD < start.elapsed() {
+-                re_log::warn!(
+-                    "{debug_name}: Sender has been blocked for over {BLOCKED_WARNING_THRESHOLD_SECS} seconds waiting for space in channel"
+-                );
+-                warned = true;
++            if deadline <= tokio::time::Instant::now() {
++                let was_overflowing = std::mem::replace(&mut self.state.locked.lock().overflowing, true);
++                if !was_overflowing {
++                    re_log::warn!(
++                        "{}: a receiver stalled for over {SLOW_RECEIVER_TIMEOUT:?}; it will skip the oldest messages",
++                        self.state.debug_name
++                    );
++                }
++                continue; // try_send now sends past the limits
+             }
+ 
+-            // Wait for notification that space is available or receivers changed:
+-            if warned {
+-                self.state.state_changed.notified().await;
+-            } else {
+-                // Wait with timeout so we can check elapsed time
+-                tokio::select! {
+-                    () = self.state.state_changed.notified() => {}
+-                    () = tokio::time::sleep(BLOCKED_WARNING_THRESHOLD) => {}
+-                }
++            // Wait for space, receivers changing, or the deadline:
++            tokio::select! {
++                () = self.state.state_changed.notified() => {}
++                () = tokio::time::sleep_until(deadline) => {}
+             }
+         }
+     }
+@@ -311,8 +329,8 @@ impl<T: std::fmt::Debug> std::error::Error for NoReceivers<T> {}
+ 
+ /// Error returned when receiving fails.
+ ///
+-/// Unlike [`tokio::sync::broadcast::error::RecvError`], this does not include a `Lagged` variant
+-/// because our backpressure mechanism prevents message dropping due to capacity limits.
++/// Unlike [`tokio::sync::broadcast::error::RecvError`], this does not include a `Lagged` variant:
++/// a receiver that fell behind (see [`SLOW_RECEIVER_TIMEOUT`]) skips ahead instead.
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub enum RecvError {
+     /// The channel has been closed (all senders have been dropped).
+@@ -354,14 +372,13 @@ impl<T: Clone + SizeBytes> Receiver<T> {
+                 Err(broadcast::error::RecvError::Closed) => {
+                     return Err(RecvError::Closed);
+                 }
+-                Err(broadcast::error::RecvError::Lagged(_)) => {
+-                    // This should never happen because our backpressure mechanism
+-                    // prevents the underlying broadcast channel from overflowing.
+-                    // If it does happen, it's a bug in our implementation.
+-                    re_log::error_once!(
+-                        "BUG: Bug in re_quota_channel. Data was LOST! Please report this issue."
++                Err(broadcast::error::RecvError::Lagged(skipped)) => {
++                    // This receiver stalled and the sender overflowed (see `SLOW_RECEIVER_TIMEOUT`).
++                    re_log::warn!(
++                        "{}: a stalled receiver skipped {skipped} messages",
++                        self.state.debug_name
+                     );
+-                    // Try to recover by receiving the next message
++                    // Continue with the oldest message still in the channel
+                 }
+             }
+         }
+@@ -422,6 +439,7 @@ pub fn channel<T: Clone>(
+             bytes_in_flight: 0,
+             messages_in_flight: 0,
+             num_receivers: 1, // Start with 1 for the initial receiver
++            overflowing: false,
+         }),
+         state_changed: Notify::new(),
+     });
+@@ -543,6 +561,43 @@ mod tests {
+             .unwrap();
+     }
+ 
++    #[tokio::test]
++    async fn test_stalled_receiver_does_not_block_sender() {
++        // One receiver never reads, like a web viewer in a backgrounded tab.
++        let (tx, mut stalled_rx) = channel::<u32>("test", 4, u64::MAX);
++        let mut live_rx = tx.subscribe();
++        let num_messages = 64;
++
++        let reader = tokio::spawn(async move {
++            let mut received = Vec::new();
++            for _ in 0..num_messages {
++                received.push(live_rx.recv().await.unwrap());
++            }
++            received
++        });
++
++        // The sender waits once for the stalled receiver, then overflows.
++        // Yielding lets the live receiver keep up, as a real viewer does.
++        tokio::time::timeout(SLOW_RECEIVER_TIMEOUT * 3, async {
++            for i in 0..num_messages {
++                tx.send_async(i).await.unwrap();
++                tokio::task::yield_now().await;
++            }
++        })
++        .await
++        .expect("a stalled receiver must not block the sender");
++
++        // The live receiver got everything, in order:
++        let received = tokio::time::timeout(SLOW_RECEIVER_TIMEOUT, reader)
++            .await
++            .expect("the live receiver must not fall behind")
++            .unwrap();
++        assert_eq!(received, (0..num_messages).collect::<Vec<_>>());
++
++        // The stalled receiver skips ahead to the oldest message still in the channel:
++        assert!(0 < stalled_rx.recv().await.unwrap());
++    }
++
+     #[tokio::test]
+     async fn test_oversized_message_when_empty() {
+         let small_limit = 10; // Smaller than a TestMessage
