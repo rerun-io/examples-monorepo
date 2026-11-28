@@ -710,6 +710,28 @@ def test_onnx_content_hash_survives_a_new_process(tmp_path: Path) -> None:
     assert trt_builder.onnx_content_hash(model, cache_dir=cache) != first, "a rewritten weight file is hashed again"
 
 
+def test_files_content_hash_covers_every_byte(tmp_path: Path) -> None:
+    """A snapshot whose weights change only in the middle (same size) gets a new digest."""
+    from trtkit import trt_builder
+
+    config = tmp_path / "config.json"
+    config.write_text("{}")
+    weights = tmp_path / "model.safetensors"
+    payload = bytearray(3 << 20)
+    weights.write_bytes(bytes(payload))
+    first = trt_builder.files_content_hash([config, weights], cache_dir=tmp_path / "cache")
+    payload[len(payload) // 2] = 1
+    weights.write_bytes(bytes(payload))
+    os.utime(weights, ns=(1, 1))  # a copy that keeps nothing of the old version but the size
+    assert trt_builder.files_content_hash([config, weights], cache_dir=tmp_path / "cache") != first
+
+
+def test_cached_engine_is_none_without_an_onnx_file(tmp_path: Path) -> None:
+    from trtkit import TrtBuildConfig, trt_builder
+
+    assert trt_builder.cached_engine(tmp_path / "missing.onnx", TrtBuildConfig(), cache_dir=tmp_path) is None
+
+
 def test_a_broken_hash_record_means_hashing_again(tmp_path: Path) -> None:
     """The digest record is a cache: a truncated record or an unwritable cache directory never fails a model load."""
     from trtkit import trt_builder
@@ -750,3 +772,28 @@ def test_the_torchscript_exporter_marks_the_batch_of_every_input_and_output_dyna
     assert captured["dynamic_axes"] == {"hidden": {0: "batch"}, "context": {0: "batch"}, "updated": {0: "batch"}}
     assert "dynamic_shapes" not in captured
     assert (tmp_path / "gru.onnx").read_bytes() == b"protobuf" and [path.name for path in tmp_path.iterdir()] == ["gru.onnx"]
+
+
+def test_the_dynamo_exporter_takes_an_opset_and_custom_lowerings(tmp_path: Path) -> None:
+    """Graphs with an op the exporter does not lower (BiRefNet's deformable convolution) keep trtkit's atomic publish."""
+    captured: dict[str, object] = {}
+
+    def fake_export_fn(model: object, inputs: object, path: str, **kwargs: object) -> None:
+        captured.update(kwargs)
+        Path(path).write_bytes(b"protobuf")
+        Path(f"{path}.data").write_bytes(b"weights")
+
+    def lowering() -> None: ...
+
+    export_onnx(
+        torch.nn.Identity(),
+        (torch.zeros(8, 3),),
+        tmp_path / "net.onnx",
+        input_names=["image"],
+        output_names=["logits"],
+        export_fn=fake_export_fn,
+        opset_version=20,
+        custom_translation_table={"op": lowering},
+    )
+    assert captured["dynamo"] is True and captured["opset_version"] == 20 and captured["custom_translation_table"] == {"op": lowering}
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["net.onnx", "net.onnx.data"]

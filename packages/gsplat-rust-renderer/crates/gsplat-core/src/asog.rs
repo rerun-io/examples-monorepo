@@ -379,9 +379,9 @@ fn shaped(
     Ok(values)
 }
 
-/// i32 codes per row of the motion streams in [`AsogParts::motion_codes`].
+/// 32-bit words per row of the motion streams in [`AsogParts::motion_codes`].
 ///
-/// Order: opacity, mu, logsigma, anchor (3), omega (9: O0, O1, O2), g (5), flags (static | clip << 1).
+/// Order: opacity, mu, logsigma, anchor (3), omega (9: O0, O1, O2), g (5, f32 bits), flags (static | clip << 1).
 /// `asog_motion.wgsl` reads the same layout.
 pub const MOTION_CODES: usize = 21;
 
@@ -497,7 +497,8 @@ impl AsogParts {
             out.anchors.push(a.map(|v| v as f32));
             out.omega.push(o_life.map(|o| o.map(|v| (v / life) as f32)));
             out.g.push(std::array::from_fn(|j| {
-                (code(15 + j) * mref * w_g[j] / (life * life)) as f32
+                let g = f64::from(f32::from_bits(row[15 + j].cast_unsigned()));
+                (g * mref * w_g[j] / (life * life)) as f32
             }));
             out.is_static.push(row[20] & 1 == 1);
             out.clip.push((row[20] >> 1) as u32);
@@ -524,7 +525,7 @@ pub fn decode(bytes: &[u8], active_threshold: f32) -> Result<Asog, Error> {
 /// Entropy decode only (zlib streams, un-delta / un-zigzag).
 ///
 /// Static integers packed as SOG v2 texels, motion
-/// integers as [`MOTION_CODES`] i32 per row. No de-quantisation: [`decode`] (CPU) or `sog_dequant.wgsl` +
+/// codes as [`MOTION_CODES`] 32-bit words per row. No de-quantisation: [`decode`] (CPU) or `sog_dequant.wgsl` +
 /// `asog_motion.wgsl` do that. Native builds inflate the streams in parallel (one thread each); the web build, which
 /// has no threads, inflates them in order.
 pub fn decode_parts(bytes: &[u8], active_threshold: f32) -> Result<AsogParts, Error> {
@@ -638,7 +639,21 @@ fn decode_parts_with(
     })
 }
 
-/// The motion streams as [`MOTION_CODES`] i32 per row, with the clip index of every row checked.
+/// One motion stream value as its word in [`AsogParts::motion_codes`]: `g` as f32 bits, every other stream as i32.
+///
+/// `g` is quantised relative to `mref`, the smallest angular speed along the clip, so its codes outgrow i32 when that
+/// speed nearly reaches zero. `asog_motion.wgsl` and [`AsogParts::motion`] de-quantise `g` from these f32 bits.
+fn motion_word(name: &'static str, v: i64) -> Result<i32, Error> {
+    if name == "g" {
+        return Ok((v as f32).to_bits().cast_signed());
+    }
+    i32::try_from(v).map_err(|_range| Error::Stream {
+        name: name.into(),
+        problem: format!("value {v} does not fit 32 bits"),
+    })
+}
+
+/// The motion streams as [`MOTION_CODES`] words per row, with the clip index of every row checked.
 fn motion_codes(
     m: &Manifest,
     opacity: Vec<i64>,
@@ -661,10 +676,7 @@ fn motion_codes(
     for i in 0..n {
         for (name, values, width) in &columns {
             for &v in &values[i * width..(i + 1) * width] {
-                out.push(i32::try_from(v).map_err(|_range| Error::Stream {
-                    name: (*name).into(),
-                    problem: format!("value {v} does not fit 32 bits"),
-                })?);
+                out.push(motion_word(name, v)?);
             }
         }
         let flag = out[out.len() - 1];
@@ -719,6 +731,19 @@ mod tests {
         let decoded = decode_stream(&desc, &data).unwrap();
         assert_eq!(decoded, vec![5, -1, 3, 0, 300, 2]);
         assert!(decode_stream(&StreamDesc { count: 4, ..desc }, &data).is_err());
+    }
+
+    #[test]
+    fn g_codes_beyond_i32_keep_their_value_and_other_streams_reject_them() {
+        let wide = i64::from(i32::MAX) * 3;
+        let word = motion_word("g", wide).expect("g beyond i32");
+        assert_eq!(f32::from_bits(word.cast_unsigned()), wide as f32);
+        assert_eq!(
+            f32::from_bits(motion_word("g", -7).unwrap().cast_unsigned()),
+            -7.0
+        );
+        assert!(motion_word("omega", wide).is_err());
+        assert_eq!(motion_word("omega", -7).unwrap(), -7);
     }
 
     #[test]

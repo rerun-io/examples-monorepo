@@ -1,7 +1,7 @@
 """A stand-in for ``pixi run --manifest-path <m> --frozen -e <env> <task> <args>``: the stage tasks of capture_to_splat.
 
 It writes the task's layer like a real stage (``<--output-dir>/<segment>.rrd``, atomically, with its run record) and
-registers it on ``--catalog``/``--catalog-url``. ``FAKE_STAGE_FAIL=<task>`` exits 3 before writing; ``FAKE_STAGE_NOOP=<task>``
+registers it on ``--catalog``/``--catalog-url``. ``FAKE_STAGE_FAIL=<task>`` exits 3 before writing; ``fake-scratch --write <file>`` writes the file and publishes nothing; ``FAKE_STAGE_NOOP=<task>``
 exits 0 without writing;
 ``FAKE_STAGE_KILL=<task>`` kills itself while the layer's temp file is open.
 """
@@ -23,11 +23,14 @@ LAYER_OF_TASK: dict[str, str] = {
 arguments: list[str] = sys.argv[1:]
 task: str = arguments[arguments.index("-e") + 2]
 options: dict[str, str] = {name: value for name, value in zip(arguments, arguments[1:], strict=False) if name.startswith("--")}
-segment: str = options.get("--segment") or options["--source.segment"]
-catalog_url: str = options.get("--catalog") or options.get("--catalog-url") or options["--source.catalog-url"]
 if os.environ.get("FAKE_STAGE_FAIL") == task:
     print(f"{task}: failing on purpose")
     sys.exit(3)
+if task == "fake-scratch":  # a task whose output is scratch of its step: it publishes nothing
+    Path(arguments[arguments.index("--write") + 1]).write_text(task)
+    sys.exit(0)
+segment: str = options.get("--segment") or options["--source.segment"]
+catalog_url: str = options.get("--catalog") or options.get("--catalog-url") or options["--source.catalog-url"]
 if os.environ.get("FAKE_STAGE_NOOP") == task:
     sys.exit(0)
 run = start_run(arguments, source=Path(__file__))

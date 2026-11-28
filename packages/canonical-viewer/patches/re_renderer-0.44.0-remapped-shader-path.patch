@@ -1,0 +1,23 @@
+--- a/crates/ui_tools/re_renderer/src/file_server.rs
++++ b/crates/ui_tools/re_renderer/src/file_server.rs
+@@ -71,7 +71,10 @@
+         let manifest_path = ::std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+         let path = path
+             .strip_prefix(&manifest_path)
+-            .map_or_else(|_| path.clone(), ToOwned::to_owned);
++            // Some compiler caches remap the crate root in file!() but leave
++            // CARGO_MANIFEST_DIR unchanged. The embedded shaders use crate-relative paths.
++            .or_else(|_| path.strip_prefix("/proc/self/cwd"))
++            .unwrap_or(&path);
+ 
+         // At this point our path is guaranteed to be hermetic, and we pre-load
+         // our run-time virtual filesystem using the exact same hermetic prefix.
+@@ -80,7 +83,7 @@
+         // and canonicalize it.
+         use $crate::external::anyhow::Context as _;
+         use $crate::FileSystem as _;
+-        $crate::get_filesystem().canonicalize(&path)
++        $crate::get_filesystem().canonicalize(path)
+             .with_context(|| format!("include_file!({}) (rooted at {:?}) failed while trying to import virtual path {path:?}", $path, file!()))
+             .unwrap()
+     }};

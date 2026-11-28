@@ -67,7 +67,7 @@ def _run(tmp_path: Path, url: str) -> int:
     from pipelines.runner import run_flow
 
     steps = flow_steps("insta360", segment=SEGMENT, catalog_url=url, output_root=tmp_path / "layers")
-    return run_flow(steps, _launch(tmp_path), entry=CatalogClient(url).get_dataset(name="insta360"), segment=SEGMENT, logs=tmp_path / "logs")
+    return run_flow(steps, _launch(tmp_path), client=CatalogClient(url), logs=tmp_path / "logs")
 
 
 def _records(url: str) -> dict[str, object]:
@@ -123,3 +123,46 @@ def test_the_layer_files_restore_a_restarted_catalog(tmp_path: Path, catalog: Ca
     layers: dict[str, Path] = {layer: tmp_path / "layers" / layer / f"{SEGMENT}.rrd" for layer in LAYERS}
     for url in _serve(catalog.base, layers):
         assert _records(url) == before
+
+
+def test_each_step_is_checked_on_the_dataset_and_segment_it_publishes_to(tmp_path: Path, catalog: Catalog) -> None:
+    """A flow can hand off across datasets (person_to_4d: the views' dataset, then the training runs'); the runner reads
+    each step's run record where that step registered its layer."""
+    from rerun.catalog import CatalogClient
+    from simplecv.catalog_layers import ensure_dataset
+    from simplecv.run_record import read_run_record
+
+    from pipelines.runner import run_flow
+    from pipelines.step import Step, Task
+
+    client = CatalogClient(catalog.url)
+    ensure_dataset(client, "runs")
+    out: Path = tmp_path / "layers"
+    steps = (
+        Step("masks", "lens_mask", "insta360", SEGMENT, (Task("posekit", "posekit-lens-masks",
+             ("--segment", SEGMENT, "--catalog-url", catalog.url, "--output-dir", str(out / "lens_mask"))),)),
+        Step("train", "slam_rs", "runs", "runs__r1", (Task("slam-rs-cuda", "slam-rs-catalog-layer",
+             ("--segment", "runs__r1", "--catalog", catalog.url, "--output-dir", str(out / "slam_rs"))),)),
+    )
+    assert run_flow(steps, _launch(tmp_path), client=client, logs=tmp_path / "logs") == 0
+    assert read_run_record(client.get_dataset(name="runs"), "runs__r1", "slam_rs").command.endswith("--segment runs__r1 --catalog " + catalog.url + " --output-dir " + str(out / "slam_rs"))
+
+
+def test_a_step_runs_its_tasks_in_order_and_only_the_last_publishes(tmp_path: Path, catalog: Catalog, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A folded step (person_to_4d: generate, then register) runs each task as its own process, one log each; a failing
+    first task stops the step before the publishing one runs."""
+    from rerun.catalog import CatalogClient
+
+    from pipelines.runner import run_flow
+    from pipelines.step import Step, Task
+
+    out: Path = tmp_path / "layers"
+    scratch = Task("posekit", "fake-scratch", ("--write", str(tmp_path / "scratch.txt")))
+    publish = Task("posekit", "posekit-lens-masks", ("--segment", SEGMENT, "--catalog-url", catalog.url, "--output-dir", str(out / "lens_mask")))
+    steps = (Step("views", "lens_mask", "insta360", SEGMENT, (scratch, publish)),)
+    assert run_flow(steps, _launch(tmp_path), client=CatalogClient(catalog.url), logs=tmp_path / "logs") == 0
+    assert (tmp_path / "scratch.txt").exists() and _records(catalog.url)["lens_mask"] is not None
+    assert sorted(path.name for path in (tmp_path / "logs").iterdir()) == ["00-views-0.log", "00-views-1.log"]
+    monkeypatch.setenv("FAKE_STAGE_FAIL", "fake-scratch")
+    assert run_flow(steps, _launch(tmp_path), client=CatalogClient(catalog.url), logs=tmp_path / "logs2") == 3
+    assert sorted(path.name for path in (tmp_path / "logs2").iterdir()) == ["00-views-0.log"]

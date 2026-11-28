@@ -31,7 +31,7 @@ struct AsogDequantParams {
 }
 
 @group(0) @binding(0) var<uniform> params: AsogDequantParams;
-// MOTION_CODES i32 per row: opacity, mu, logsigma, anchor (3), omega (9: O0, O1, O2), g (5), flags.
+// MOTION_CODES words per row: opacity, mu, logsigma, anchor (3), omega (9: O0, O1, O2), g (5, f32 bits), flags.
 @group(0) @binding(1) var<storage, read> codes: array<i32>;
 // The canonical transforms (f32 x 10: mean, quat wxyz, log scale).
 @group(0) @binding(2) var<storage, read> canonical: array<f32>;
@@ -91,6 +91,6 @@ fn asog_motion_dequant(@builtin(global_invocation_id) gid: vec3<u32>) {
         if j == 0u || j == 4u {
             w = 1.0;
         }
-        rows[r + 16u + j] = f32(codes[c + 15u + j]) * g_scale * w;
+        rows[r + 16u + j] = bitcast<f32>(codes[c + 15u + j]) * g_scale * w;
     }
 }

@@ -1,8 +1,8 @@
 """``fdanyone-register-catalog``: put a finished 4DAnyone run on a Rerun catalog in the shared rig layout (no GPU).
 
 The run is generated once (``fdanyone-run --rr-config.save run.rrd``); this tool moves its recording into the
-``exoego:v2`` rig layout the MAMMA datasets use (``fdanyone_rerun.catalog``), writes it as one segment ``.rrd`` and
-registers that file as the segment's ``base`` layer.
+``exoego:v2`` rig layout the MAMMA datasets use (``fdanyone_rerun.catalog``), writes it as one segment ``.rrd`` with its
+run record (``simplecv.run_record``) and registers that file as the segment's ``base`` layer.
 """
 
 from dataclasses import dataclass
@@ -10,6 +10,8 @@ from pathlib import Path
 
 import rerun.catalog as rrcat
 import rerun.chunk as rrc
+from simplecv.catalog_layers import atomic_recording
+from simplecv.run_record import RunStart, start_run, write_run_record
 
 from fdanyone_rerun.catalog import (
     DATASET,
@@ -50,6 +52,7 @@ class Config:
 
 def main(config: Config) -> Path:
     """Write the segment and register it; returns the segment file."""
+    run: RunStart = start_run(config, source=Path(__file__))
     seed: int | None = config.seed
     source_video: str = config.source_video
     if config.run_dir is not None:
@@ -85,9 +88,12 @@ def main(config: Config) -> Path:
     )
     config.output_dir.mkdir(parents=True, exist_ok=True)
     path: Path = config.output_dir / f"{segment}.rrd"
-    segment_stream(store, cameras, clock, properties).collect(optimize=rrc.OptimizationProfile.OBJECT_STORE).write_rrd(
-        path, application_id=config.dataset, recording_id=segment
-    )
+    # The segment stream has Python callbacks: run it with the native collect, then send the finished chunks. A flow runner
+    # checks the base's run record to tell this run's layer from an older one, so the record rides in the same atomic file.
+    segment_chunks: rrc.ChunkStore = segment_stream(store, cameras, clock, properties).collect(optimize=rrc.OptimizationProfile.OBJECT_STORE)
+    with atomic_recording(path, application_id=config.dataset, recording_id=segment, send_properties=False) as recording:
+        recording.send_chunks(segment_chunks)
+        write_run_record(recording, run.finish("base", segment))
     path.chmod(0o644)
     print(f"{segment}: {len(cameras)} views, {clock.num_frames} frames at {clock.fps} fps ({clock.codec}) -> {path}")
     if config.catalog_url is not None:

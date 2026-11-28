@@ -16,16 +16,18 @@ from jaxtyping import Float32, UInt8
 from numpy import ndarray
 from rerun.catalog import CatalogClient
 from simplecv.catalog_rig_layout import catalog_components, parse_rig_layout
+from simplecv.run_record import RunStart, start_run
 from torch import Tensor
 
+from open4dgs.birefnet_trt import load_matte_model
 from open4dgs.catalog_clip import LOCAL_CATALOG, MultiViewClip, companion_location, read_catalog_clip
 from open4dgs.masks import (
     MATTE_LAYER,
     MESH_PAD_FRACTION,
     MESH_PAD_PX,
     MODEL_NAME,
+    MatteNet,
     clip_mattes,
-    load_birefnet,
     register_mask_layer,
     write_mask_layer,
 )
@@ -60,13 +62,14 @@ class Config:
 
 
 def main(config: Config) -> None:
+    run: RunStart = start_run(config, source=Path(__file__))
     target: str = config.register_dataset or companion_location(config.catalog_url, config.dataset, config.register_url)[1]
     entry = CatalogClient(config.catalog_url).get_dataset(config.dataset)
     cameras: list[str] = config.cameras or [
         camera.name for camera in parse_rig_layout(catalog_components(entry.filter_segments(config.segment_id).schema())).cameras
     ]
     device = torch.device("cuda")
-    model: torch.nn.Module = load_birefnet(config.model_dir, device)
+    model: MatteNet = load_matte_model(config.model_dir, device)
     mattes: list[UInt8[Tensor, "t h w"]] = []
     frame_indices: ndarray | None = None
     started: float = perf_counter()
@@ -100,6 +103,7 @@ def main(config: Config) -> None:
             source_segment=config.segment_id,
             crop=f"smplx box pad {config.pad_fraction} + {config.pad_px} px",
         ),
+        run=run,
     )
     path.parent.chmod(0o775)
     print(f"wrote {path} ({path.stat().st_size / 1e6:.1f} MB)")

@@ -3484,6 +3484,11 @@ cmd = "python tools/apps/capture_to_splat.py"
 cwd = "packages/pipelines"
 description = "Plan, run or show the capture_to_splat flow on a registered base segment ({plan,run,show} --profile --segment --catalog-url)"
 
+[feature.pipelines.tasks.pipelines-person-to-4d]
+cmd = "python tools/apps/person_to_4d.py"
+cwd = "packages/pipelines"
+description = "Plan, run or show the person_to_4d flow on a person video: 4DAnyone views -> Open4DGS mattes -> the trained 4D person as ASOG ({plan,run,show} --video --clip --catalog-url)"
+
 # agent-traces — one Claude or Codex session per recording, without torch.
 [feature.agent-traces]
 platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
@@ -4249,6 +4254,12 @@ cmd = "python tools/run.py"
 depends-on = ["fdanyone-download"]
 cwd = "packages/fdanyone-rerun"
 description = "Generate novel views of the person in a video and log the run to Rerun (needs the GPU); see --help"
+
+[feature.fdanyone-rerun.tasks.fdanyone-birefnet-engine]
+cmd = "python tools/birefnet_engine.py"
+depends-on = ["fdanyone-download"]
+cwd = "packages/fdanyone-rerun"
+description = "Build this machine's BiRefNet TensorRT engine once (the person mattes use it from the next run on; without it they run in torch)"
 
 # The Space's fixed policy on its example clip: six views on one ring 15 degrees above the subject, 4DAnyone-Turbo.
 [feature.fdanyone-rerun.tasks.fdanyone-example]

@@ -13,7 +13,7 @@ import copy
 import os
 import shutil
 import time
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TypeAlias
@@ -199,6 +199,8 @@ def export_onnx(
     export_fn: ExportFn = torch.onnx.export,
     exporter: Literal["dynamo", "torchscript"] = "dynamo",
     rewrite: Callable[[Any], object] | None = None,
+    opset_version: int | None = None,
+    custom_translation_table: Mapping[Any, Callable[..., object]] | None = None,
 ) -> None:
     """Export a model to ONNX with the strongly-typed-TRT recipe.
 
@@ -229,6 +231,10 @@ def export_onnx(
             every input and output and the weights inside the protobuf.
         rewrite: In-place graph surgery on the exported ``onnx.ModelProto`` (its weights stay in the sidecar), applied
             before the file is published, e.g. ``lambda model: fp32_accumulate(model, select)``.
+        opset_version: The dynamo exporter's opset instead of the dtype's default (18, or 23 for bf16), for graphs that
+            need a newer operator (ONNX ``DeformConv`` is opset 19+).
+        custom_translation_table: Dynamo ONNX lowerings for ops the exporter does not translate itself
+            (``torch.onnx.export``'s ``custom_translation_table``).
 
     Raises:
         ValueError: If ``compute_dtype`` is not fp16/bf16/None, both
@@ -241,16 +247,20 @@ def export_onnx(
         raise ValueError("dynamic_dims is the complete shape spec; declare the batch dim inside it instead of dynamic_batch_max.")
     if exporter == "torchscript" and dynamic_dims is not None:
         raise ValueError("dynamic_dims needs the dynamo exporter (torch.export Dims); the torchscript exporter takes dynamic_batch_max only.")
+    if exporter == "torchscript" and (opset_version is not None or custom_translation_table is not None):
+        raise ValueError("opset_version and custom_translation_table are dynamo exporter options.")
     # bf16 Conv/ConvTranspose only exist in ONNX from opset 22; below that,
     # TRT parsers accept the invalid graph and silently miscompile it. 18 is
     # the dynamo baseline for everything else; TRT 11 parses up to 24.
-    opset_version: int = 23 if compute_dtype == torch.bfloat16 else 18
+    opset_version = opset_version or (23 if compute_dtype == torch.bfloat16 else 18)
     # bf16 also forces fp32 islands around transposed convs (see _Fp32Island);
     # derived from the dtype, like the opset — not a caller knob.
     inner: torch.nn.Module = _with_fp32_transposed_convs(model) if compute_dtype == torch.bfloat16 else model
     export_model: torch.nn.Module = _AutocastWrapper(inner, compute_dtype).eval() if compute_dtype is not None else model
 
     kwargs: dict[str, object] = {}
+    if custom_translation_table is not None:
+        kwargs["custom_translation_table"] = dict(custom_translation_table)
     if exporter == "torchscript":
         opset_version = 17
         kwargs["external_data"] = False
