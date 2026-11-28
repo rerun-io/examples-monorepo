@@ -80,9 +80,6 @@ class TrainConfig:
     kernels compiled at the first step)."""
     compile_deform: bool = False
     """TRiGS's deform as one ``torch.compile``d graph (dynamic shapes; same maths, fewer launches; compiled at the first step)."""
-    fused_gather: bool = False
-    """The per-step row gather of every row-wise parameter in one Triton launch, its backward in one more
-    (``open4dgs.row_gather``; same values and gradients)."""
     resident_frames: bool = True
     """Keep the training frames and masks on the GPU for the run when they fit (``resident_device``); off = the CPU path
     (the trainer copies each camera's frame and mask every step)."""
@@ -594,7 +591,6 @@ def train_clip(
         adam_moments=config.adam_moments,
         fused_loss=config.fused_loss,
         compile_deform=config.compile_deform,
-        fused_gather=config.fused_gather,
     )
     trainer.camera_loss_hook = prior
     # The model as it trains: TRiGS updates ``params`` in place; the returned clip replaces them with the result's.
