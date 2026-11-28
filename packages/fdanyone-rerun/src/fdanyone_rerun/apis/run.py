@@ -1,7 +1,12 @@
 """``fdanyone-run``: generate novel views of the person in a video and stream the run into Rerun."""
 
+import logging
+import os
+import sys
 from dataclasses import dataclass, field
+from typing import NoReturn
 
+import rerun as rr
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from fdanyone_rerun.core import RunConfig
@@ -31,3 +36,13 @@ class Config:
 def main(config: Config) -> RunMetadata:
     """Run and stream all phases."""
     return RunStreamer(config.run, config.rr_config.rec_stream, config.previews, config.person if config.train else None).run()
+
+
+def exit_now(recording: rr.RecordingStream) -> NoReturn:
+    """End the CLI process once the run is done: close ``recording`` (its sinks write their last bytes), flush stdio and
+    logging, then exit 0 without the interpreter's teardown, which spends 1-3 s finalising torch, CUDA and the modules."""
+    recording.disconnect()
+    logging.shutdown()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)

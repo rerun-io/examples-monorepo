@@ -1,6 +1,8 @@
 import tyro
 
-from fdanyone_rerun.apis.run import Config, main
+from fdanyone_rerun.apis.run import Config, exit_now, main
 
 if __name__ == "__main__":
-    main(tyro.cli(Config))
+    config: Config = tyro.cli(Config)
+    main(config)
+    exit_now(config.rr_config.rec_stream)
