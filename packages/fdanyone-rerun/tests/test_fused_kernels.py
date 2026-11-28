@@ -134,3 +134,54 @@ def test_frame_major_multiview_layout_matches_the_rearranged_eager_path() -> Non
     branch = torch.randn(f, v * hw, c, device=DEVICE).to(torch.bfloat16)
     expected = x.clone().add_(rearrange(branch, "f (v n) c -> v (f n) c", v=v).clone().mul_(gate))
     assert torch.equal(gated_residual_(x.clone(), branch, gate, frames=f), expected)
+
+
+def test_shared_fp8_projections_equal_the_eager_linears() -> None:
+    import fdanyone.model.fused as fused
+    from fdanyone.model.quantization import Fp8RowwiseLinear, project_fp8_shared
+
+    torch.manual_seed(0)
+    linears = tuple(Fp8RowwiseLinear(torch.nn.Linear(256, 128).to(DEVICE, torch.bfloat16)) for _ in range(3))
+    x = (torch.randn(2, 300, 256, device=DEVICE) * 3).to(torch.bfloat16)
+    with torch.inference_mode():
+        fused.ENABLED = False
+        eager = [linear(x) for linear in linears]
+        fused.ENABLED = True
+        shared = project_fp8_shared(linears, x)
+    assert all(torch.equal(a, b) for a, b in zip(eager, shared, strict=True))
+
+
+def test_dit_block_fused_path_stays_near_the_eager_block() -> None:
+    """One random FP8 DiT block on a 3-view, 4-frame grid: the fused glue changes only FP32 reduction order."""
+
+    import fdanyone.model.fused as fused
+    import fdanyone.vendor.diffsynth.models.wan_video_dit as w
+    from fdanyone.model.quantization import quantize_dit_fp8_w8a8
+
+    torch.manual_seed(0)
+    with torch.device(DEVICE):
+        dit = torch.nn.Module()
+        dit.blocks = torch.nn.ModuleList([torch.nn.Identity()] * 3 + [w.DiTBlock(attention_backend="sdpa")])
+    dit = dit.to(torch.bfloat16).eval().requires_grad_(False)
+    for module in dit.modules():
+        if isinstance(module, torch.nn.Linear):
+            torch.nn.init.normal_(module.weight, std=0.02)
+    assert quantize_dit_fp8_w8a8(dit).module_count == 14
+    block = dit.blocks[3]
+    views, frames, height, width = 3, 4, 8, 6
+    freqs = w.precompute_freqs_cis_3d(128)
+    grid = torch.nn.Module()
+    grid.freqs = freqs
+    spatial = w.FourDAnyoneDiT._spatial_frequencies(grid, frames, height, width, DEVICE)
+    multiview = w.FourDAnyoneDiT._multiview_frequencies(grid, views, height, width, DEVICE)
+    x = torch.randn(views, frames * height * width, 3072, device=DEVICE).to(torch.bfloat16)
+    context = torch.randn(1, 64, 3072, device=DEVICE).to(torch.bfloat16)
+    modulation = (torch.randn(views, 6, 3072, device=DEVICE) * 0.1).to(torch.bfloat16)
+    outputs = []
+    for enabled in (False, True):
+        fused.ENABLED = enabled
+        with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            outputs.append(block(x.clone(), context, modulation, spatial, multiview, (views, frames, height, width)).float())
+    fused.ENABLED = True
+    eager, fast = outputs
+    assert float((fast - eager).norm() / eager.norm()) < 0.02
