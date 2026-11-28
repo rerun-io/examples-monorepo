@@ -18,6 +18,7 @@ import traceback
 import types
 import warnings
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -183,7 +184,7 @@ def _run_preprocess(cfg) -> None:
     import torch
     from hmr4d.utils.geo.hmr_cam import get_bbx_xys_from_xyxy
     from hmr4d.utils.preproc.tracker import Tracker
-    from hmr4d.utils.preproc.vitfeat_extractor import Extractor
+    from hmr4d.utils.preproc.vitfeat_extractor import Extractor, get_batch
     from hmr4d.utils.preproc.vitpose import VitPoseExtractor
     from hmr4d.utils.pylogger import Log
     from hmr4d.utils.video_io_utils import get_video_lwh
@@ -196,42 +197,53 @@ def _run_preprocess(cfg) -> None:
     video_path = cfg.video_path
     paths = cfg.paths
 
-    if not Path(paths.bbx).exists():
-        tracker = Tracker()
-        try:
-            bbx_xyxy = tracker.get_one_track(video_path).float()
-        except IndexError as error:
-            if not _is_empty_tracker_error(error):
-                raise
-            frame_count, width, height = get_video_lwh(video_path)
-            bbx_xyxy = torch.tensor(
-                _full_frame_bbox_xyxy(width, height),
-                dtype=torch.float32,
-            ).repeat(frame_count, 1)
-            Log.warning(
-                "GVHMR tracker produced no usable person track; using a full-frame bbox for "
-                f"all {frame_count} frames of {video_path}."
-            )
-        bbx_xys = get_bbx_xys_from_xyxy(bbx_xyxy, base_enlarge=1.2).float()
-        torch.save({"bbx_xyxy": bbx_xyxy, "bbx_xys": bbx_xys}, paths.bbx)
-        del tracker
-    else:
-        bbx_xys = torch.load(paths.bbx, weights_only=True)["bbx_xys"]
-        Log.info("[Preprocess] bbx (xyxy, xys) from %s", paths.bbx)
+    need_vitpose = not Path(paths.vitpose).exists()
+    need_features = not Path(paths.vit_features).exists()
+    # ViTPose-H and HMR2 (~2.6 GB checkpoints each) build and load on threads while YOLO tracks: their constructors
+    # read the checkpoints and copy them to the GPU, independent of the boxes.
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="gvhmr-load") as loads:
+        vitpose_model = loads.submit(VitPoseExtractor) if need_vitpose else None
+        feature_model = loads.submit(Extractor) if need_features else None
+        if not Path(paths.bbx).exists():
+            tracker = Tracker()
+            try:
+                bbx_xyxy = tracker.get_one_track(video_path).float()
+            except IndexError as error:
+                if not _is_empty_tracker_error(error):
+                    raise
+                frame_count, width, height = get_video_lwh(video_path)
+                bbx_xyxy = torch.tensor(
+                    _full_frame_bbox_xyxy(width, height),
+                    dtype=torch.float32,
+                ).repeat(frame_count, 1)
+                Log.warning(
+                    "GVHMR tracker produced no usable person track; using a full-frame bbox for "
+                    f"all {frame_count} frames of {video_path}."
+                )
+            bbx_xys = get_bbx_xys_from_xyxy(bbx_xyxy, base_enlarge=1.2).float()
+            torch.save({"bbx_xyxy": bbx_xyxy, "bbx_xys": bbx_xys}, paths.bbx)
+            del tracker
+        else:
+            bbx_xys = torch.load(paths.bbx, weights_only=True)["bbx_xys"]
+            Log.info("[Preprocess] bbx (xyxy, xys) from %s", paths.bbx)
 
-    if not Path(paths.vitpose).exists():
-        extractor = VitPoseExtractor()
-        torch.save(extractor.extract(video_path, bbx_xys), paths.vitpose)
-        del extractor
-    else:
-        Log.info("[Preprocess] vitpose from %s", paths.vitpose)
+        if need_vitpose or need_features:
+            # Both extractors build the same 256 px crops (get_batch at img_ds=0.5, a full decode of the clip) when given
+            # the video path; build them once and give both the tensor, with the boxes get_batch returns beside it.
+            crops, crop_bbx_xys = get_batch(video_path, bbx_xys, img_ds=0.5)
+        if need_vitpose:
+            extractor = vitpose_model.result()
+            torch.save(extractor.extract(crops, crop_bbx_xys), paths.vitpose)
+            del extractor, vitpose_model
+        else:
+            Log.info("[Preprocess] vitpose from %s", paths.vitpose)
 
-    if not Path(paths.vit_features).exists():
-        extractor = Extractor()
-        torch.save(extractor.extract_video_features(video_path, bbx_xys), paths.vit_features)
-        del extractor
-    else:
-        Log.info("[Preprocess] vit_features from %s", paths.vit_features)
+        if need_features:
+            extractor = feature_model.result()
+            torch.save(extractor.extract_video_features(crops, crop_bbx_xys), paths.vit_features)
+            del extractor, feature_model
+        else:
+            Log.info("[Preprocess] vit_features from %s", paths.vit_features)
 
     Log.info("[Preprocess] End. Time elapsed: %.2fs", Log.time() - started)
 
@@ -276,6 +288,20 @@ def _verify_gvhmr_decode(clip: CanonicalClip, working_video: Path, reader_factor
         close = getattr(reader, "close", None)
         if close is not None:
             close()
+
+
+def preload_gvhmr(gvhmr_root: str | Path) -> None:
+    """Import what ``run_gvhmr`` imports (torch, Hydra, Lightning, GVHMR, ultralytics) ahead of the request."""
+
+    root, _ = validate_gvhmr(gvhmr_root)
+    with gvhmr_imports(root), _legacy_checkpoint_loading():
+        install_pytorch3d_compat()
+        import hydra  # noqa: F401
+        import torch  # noqa: F401
+        from hmr4d.model.gvhmr.gvhmr_pl_demo import DemoPL  # noqa: F401
+
+        _register_inference_store()
+        from hmr4d.utils.preproc import tracker, vitfeat_extractor, vitpose  # noqa: F401
 
 
 def run_gvhmr(

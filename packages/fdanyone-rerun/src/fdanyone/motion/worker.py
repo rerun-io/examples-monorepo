@@ -6,8 +6,8 @@ import json
 import sys
 from pathlib import Path
 
-from fdanyone.device import select_cuda_device
-from fdanyone.motion.gvhmr import run_gvhmr
+from fdanyone.device import WAIT_FOR_REQUEST, select_cuda_device
+from fdanyone.motion.gvhmr import preload_gvhmr, run_gvhmr
 from fdanyone.video import load_canonical_working_clip
 
 
@@ -26,6 +26,12 @@ def main(request_path: str) -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        raise SystemExit("Usage: python -m fdanyone.motion.worker REQUEST.json")
-    main(sys.argv[1])
+    if len(sys.argv) == 3 and sys.argv[1] == WAIT_FOR_REQUEST:
+        preload_gvhmr(sys.argv[2])
+        request = sys.stdin.readline().strip()
+        if request:
+            main(request)
+    elif len(sys.argv) == 2:
+        main(sys.argv[1])
+    else:
+        raise SystemExit(f"Usage: python -m fdanyone.motion.worker REQUEST.json | {WAIT_FOR_REQUEST} GVHMR_ROOT")

@@ -37,13 +37,21 @@ def _bf16_autocast():
 
 
 def _rgb_frames(video: Tensor) -> tuple[np.ndarray, ...]:
-    """Freeze the released CUDA scaling boundary before CPU publication."""
+    """Freeze the released CUDA scaling boundary before CPU publication.
 
-    scaled = video.detach().float().add_(1.0).mul_(127.5).clamp_(0.0, 255.0).to(device="cpu")
-    return tuple(
-        scaled[:, frame_index].permute(1, 2, 0).numpy().astype(np.uint8) for frame_index in range(scaled.shape[1])
-    )
+    The float-to-uint8 cast truncates toward zero on the device exactly as numpy's ``astype`` did on the host, so one
+    uint8 [frames, H, W, 3] copy replaces a float32 copy four times its size and a per-frame host conversion.
+    """
 
+    import torch
+
+    scaled = video.detach().float().add_(1.0).mul_(127.5).clamp_(0.0, 255.0)
+    frames = scaled.to(torch.uint8).permute(1, 2, 3, 0).contiguous().to(device="cpu").numpy()
+    return tuple(frames[frame_index] for frame_index in range(frames.shape[0]))
+
+
+PUBLISH_SLOTS: int = 6
+"""Decoded views held for or in x264 at once (six: one denoising group)."""
 
 _TINY_DECODERS: dict[tuple[str, str], TAEHV] = {}
 
@@ -243,9 +251,10 @@ class VaeExecutor:
             )
         num_views = int(latents.shape[0])
         worker_count = self._worker_count(num_views, len(self.devices))
-        # One slot more than decode workers: a worker decodes its next view on the GPU while the previous view is
-        # still in x264 on the CPU (one slot per worker serialized decode and encode).
-        slots = BoundedSemaphore(worker_count + 1)
+        # Decoding a view takes ~1 s and its x264 encode ~6 s: up to PUBLISH_SLOTS views are encoded at once (one view's
+        # frames are ~330 MB of host memory), and a worker decodes its next view while earlier ones are in x264.
+        encode_slots = max(worker_count + 1, PUBLISH_SLOTS)
+        slots = BoundedSemaphore(encode_slots)
         sink_futures: list[Future[Output] | None] = [None] * num_views
         stopped = Event()
 
@@ -262,7 +271,7 @@ class VaeExecutor:
         if tiny_decoder is None:
             self._ensure_models(worker_count)
 
-        with ThreadPoolExecutor(max_workers=worker_count + 1, thread_name_prefix="video-codec") as codec_pool:
+        with ThreadPoolExecutor(max_workers=encode_slots, thread_name_prefix="video-codec") as codec_pool:
 
             def release_slot(future: Future[Output]) -> None:
                 if future.exception() is not None:

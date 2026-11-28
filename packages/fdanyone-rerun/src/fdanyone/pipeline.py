@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 from threading import Event
 
@@ -25,7 +26,7 @@ from fdanyone.assets import (
     resolve_turbo_lora,
 )
 from fdanyone.config import BASE24, INFERENCE, RANK64_DELTA4
-from fdanyone.device import CUDA_ALLOCATOR_CONF, select_cuda_devices
+from fdanyone.device import CUDA_ALLOCATOR_CONF, WAIT_FOR_REQUEST, select_cuda_devices
 from fdanyone.download import create_classic_gvhmr_links
 from fdanyone.errors import ConfigurationError, RunCancelled
 from fdanyone.io import remove_tree, resolve_output_path, write_json
@@ -109,20 +110,71 @@ def _inline_workers() -> bool:
     return os.environ.get("FDANYONE_INLINE_WORKERS") == "1"
 
 
-def _run_worker(module: str, request_path: Path, worker_python: str, cancel: Event | None) -> None:
+def _start_worker(module: str, worker_python: str, *preload: str) -> subprocess.Popen | None:
+    """Start a worker ahead of its request so its interpreter and imports overlap this process's work (None inline).
+
+    ``preload`` is passed to the worker's import step. The worker blocks on stdin until ``_run_worker`` sends the
+    request; ``_discard_worker`` ends one that was never used.
+    """
+
+    if _inline_workers():
+        return None
+    return subprocess.Popen(
+        [worker_python, "-m", module, WAIT_FOR_REQUEST, *preload],
+        env=_worker_environment(),
+        stdin=subprocess.PIPE,
+        text=True,
+    )
+
+
+def _discard_worker(child: subprocess.Popen | None) -> None:
+    """End a started worker that never received a request (closing stdin makes it exit); reap it either way."""
+
+    if child is None or child.poll() is not None:
+        return
+    try:
+        if child.stdin is not None and not child.stdin.closed:
+            child.stdin.close()
+        child.wait(timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        child.kill()
+        child.wait()
+
+
+def _run_worker(
+    module: str,
+    request_path: Path,
+    worker_python: str,
+    cancel: Event | None,
+    started: subprocess.Popen | None = None,
+    while_running: Callable[[], None] | None = None,
+) -> None:
     """Run one worker entry point, as a subprocess or (inline) in this process.
 
-    The subprocess is this call's own: when ``cancel`` is set (or this thread raises), it gets SIGTERM, then SIGKILL
-    after 10 s, and it is reaped before the error propagates (RunCancelled on cancel). It stays in this process group,
-    so a Ctrl-C in the terminal reaches it too. An inline worker
-    cannot be interrupted; it runs to its end.
+    ``while_running`` is called once the worker has its request (inline: before it runs), in this thread.
+
+    The subprocess is this call's own (``started``, from ``_start_worker``, or a new one): when ``cancel`` is set (or
+    this thread raises), it gets SIGTERM, then SIGKILL after 10 s, and it is reaped before the error propagates
+    (RunCancelled on cancel). It stays in this process group, so a Ctrl-C in the terminal reaches it too. An inline
+    worker cannot be interrupted; it runs to its end.
     """
 
     if not _inline_workers():
-        command = [worker_python, "-m", module, str(request_path)]
         stop = Event() if cancel is None else cancel
-        child = subprocess.Popen(command, env=_worker_environment())
+        if started is None:
+            command = [worker_python, "-m", module, str(request_path)]
+            child = subprocess.Popen(command, env=_worker_environment())
+        else:
+            command, child = list(started.args), started
         try:
+            if started is not None and child.stdin is not None:
+                try:
+                    child.stdin.write(f"{request_path}\n")
+                    child.stdin.close()
+                except BrokenPipeError:
+                    pass  # the worker already exited: its return code below is the error
+            if while_running is not None:
+                while_running()
             while child.poll() is None:
                 if stop.wait(0.25):
                     raise RunCancelled(f"stopped during {module}")
@@ -142,6 +194,8 @@ def _run_worker(module: str, request_path: Path, worker_python: str, cancel: Eve
 
     import torch
 
+    if while_running is not None:
+        while_running()
     importlib.import_module(module).main(str(request_path))
     gc.collect()
     if torch.cuda.is_available():
@@ -157,6 +211,7 @@ def _run_motion(
     worker_python: str,
     clip_metadata: Path,
     cancel: Event | None,
+    started: subprocess.Popen | None = None,
 ):
     output_dir.mkdir(parents=True, exist_ok=True)
     request_path = output_dir / ".motion-worker-request.json"
@@ -173,7 +228,7 @@ def _run_motion(
         },
     )
     try:
-        _run_worker("fdanyone.motion.worker", request_path, worker_python, cancel)
+        _run_worker("fdanyone.motion.worker", request_path, worker_python, cancel, started)
     finally:
         request_path.unlink(missing_ok=True)
     return MotionResult.load(result_dir)
@@ -192,6 +247,8 @@ def _build_conditioning(
     device: str,
     worker_python: str,
     cancel: Event | None,
+    started: subprocess.Popen | None = None,
+    while_running: Callable[[], None] | None = None,
 ):
     from fdanyone.skeleton.pipeline import Conditioning
 
@@ -211,7 +268,7 @@ def _build_conditioning(
         },
     )
     try:
-        _run_worker("fdanyone.skeleton.worker", request_path, worker_python, cancel)
+        _run_worker("fdanyone.skeleton.worker", request_path, worker_python, cancel, started, while_running)
     finally:
         request_path.unlink(missing_ok=True)
     return Conditioning.load(output_dir)
@@ -293,16 +350,22 @@ def run_pipeline(
     regressor = resolve_regressor(mhr70_regressor_path, model_dir=model_dir)
     foreground_model = resolve_foreground_model(model_dir)
     PROGRESS.info("Preparing the 121-frame clip", extra={"fraction": 0.10})
-    clip = decode_canonical_clip(
-        video_path,
-        num_frames=INFERENCE.num_frames,
-        start_time=start_time,
-        fps=canonical_fps,
+    # Both workers start now: their interpreters and imports (~4 s each) overlap the clip preparation and GVHMR.
+    motion_worker = (
+        None if output.motion_dir.exists() else _start_worker("fdanyone.motion.worker", worker_python, str(gvhmr_root))
     )
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    scratch = Path(tempfile.mkdtemp(prefix=f".{clip_name}.scratch-", dir=destination.parent))
+    skeleton_worker = _start_worker("fdanyone.skeleton.worker", worker_python)
     prefetch = None
+    scratch = None
     try:
+        clip = decode_canonical_clip(
+            video_path,
+            num_frames=INFERENCE.num_frames,
+            start_time=start_time,
+            fps=canonical_fps,
+        )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        scratch = Path(tempfile.mkdtemp(prefix=f".{clip_name}.scratch-", dir=destination.parent))
         clip_metadata = scratch / "canonical_clip.json"
         clip.write_metadata(clip_metadata)
         working_video = write_gvhmr_video(clip, scratch / "canonical_clip.mp4")
@@ -323,6 +386,7 @@ def run_pipeline(
                     worker_python=worker_python,
                     clip_metadata=clip_metadata,
                     cancel=cancel,
+                    started=motion_worker,
                 )
             if motion.gvhmr_revision != gvhmr_revision:
                 raise ConfigurationError(
@@ -353,7 +417,6 @@ def run_pipeline(
             from fdanyone.model.inference import generate_views
             from fdanyone.output_writer import write_output
 
-            PROGRESS.info("Building foreground masks and skeletons", extra={"fraction": 0.30})
             if len(devices) == 1:
                 # Conditioning runs in a worker process; load the DiT and VAE here meanwhile.
                 from fdanyone.model.loader import GenerationPrefetch
@@ -377,6 +440,9 @@ def run_pipeline(
                 device=device,
                 worker_python=worker_python,
                 cancel=cancel,
+                started=skeleton_worker,
+                # The stage's observers (the body rebuild and its Rerun log, ~2 s) run while the worker works.
+                while_running=lambda: PROGRESS.info("Building foreground masks and skeletons", extra={"fraction": 0.30}),
             )
             if conditioning.num_frames != len(clip.frames) or (
                 conditioning.fps_num,
@@ -416,9 +482,12 @@ def run_pipeline(
                 pipeline_started=pipeline_started,
             )
     finally:
+        _discard_worker(motion_worker)
+        _discard_worker(skeleton_worker)
         if prefetch is not None:
             prefetch.close()
-        _discard_scratch(scratch)
+        if scratch is not None:
+            _discard_scratch(scratch)
     summary["output_dir"] = str(destination)
     PROGRESS.info("Inference complete", extra={"fraction": 1.0})
     return summary
