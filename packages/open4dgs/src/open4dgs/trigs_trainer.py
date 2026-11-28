@@ -50,6 +50,7 @@ from trigs.core.camera import CameraConfig
 from trigs.core.trainer import TrigsTrainer, TrigsTrainingConfig, TrigsTrainingResult
 from trigs.strategy.motion_guided_relocation import MotionGuidedRelocationStrategy
 
+from open4dgs.fused_deform import DEFORM_KEYS, compiled_gather_deform, mark_rows_dynamic
 from open4dgs.fused_loss import masked_composite_terms, masked_composite_terms_batch
 from open4dgs.strided import COARSE_STRIDE, GSPLAT_EPS2D, STRIDE, StrideState, stride_offsets, strided_intrinsics, strided_pixels
 
@@ -372,6 +373,7 @@ class Open4dgsTrainer(TrigsTrainer):
         coarse_stride_steps: int = 0,
         adam_moments: Literal["fp32", "bf16"] = "fp32",
         fused_loss: bool = False,
+        fused_deform: bool = False,
         **kwargs: object,
     ) -> None:
         self._camera_loss_hook: Any = None
@@ -383,6 +385,7 @@ class Open4dgsTrainer(TrigsTrainer):
         if coarse_stride_steps < 0 or (coarse_stride_steps > 0 and pixel_stride == 1):
             raise ValueError(f"coarse_stride_steps ({coarse_stride_steps}) needs pixel_stride {STRIDE} and must be >= 0")
         self.coarse_stride_steps: int = coarse_stride_steps
+        self.fused_deform: bool = fused_deform
         self.adam_moments: Literal["fp32", "bf16"] = adam_moments
         # Lever 6, None when off. dynamic=True: one compile for every image size (ROI cameras each have their own size;
         # per-size compiles hit dynamo's recompile limit and fall back to eager).
@@ -460,6 +463,47 @@ class Open4dgsTrainer(TrigsTrainer):
             fused_step(opts)  # pyrefly: ignore[bad-argument-type]  # checked above
             return
         super()._optimizer_step(optimizers)  # pyrefly: ignore[missing-attribute]  # recipe patch 0012
+
+    def _render_inputs(  # pyrefly: ignore[bad-override]
+        self,
+        params: nn.ParameterDict | dict,
+        cameras: CameraConfig | None,
+        cam_idx: int,
+        t: float | Tensor,
+        sh_degree: int,
+        config: TrigsTrainingConfig,
+        step: int | None = None,
+    ) -> dict:
+        """With ``fused_deform``: TRiGS's gather + deform + rasterizer-input prep as one (compiled) ``gather_deform`` call on
+        the global-shutter path; TRiGS's own ``_render_inputs`` otherwise (rolling shutter, no active rows, other params)."""
+        if not self.fused_deform or config.rs_enabled() or any(k not in params for k in DEFORM_KEYS):
+            return super()._render_inputs(params, cameras, cam_idx, t, sh_degree, config, step=step)
+        active_idx: Tensor = self._active_idx_for_time(params, t, config, step=step)
+        if active_idx.numel() == 0:  # TRiGS raises with the temporal context
+            return super()._render_inputs(params, cameras, cam_idx, t, sh_degree, config, step=step)
+        device: torch.device = params["means"].device
+        t_dev: Tensor = t if isinstance(t, Tensor) else self._const_tensor(float(t), device, params["times"].dtype)
+        threshold: float = min(max(float(getattr(config, "temporal_active_threshold", 0.05)), 0.0), 0.999)
+        smooth: bool = bool(getattr(config, "temporal_gamma_smooth_cull", False)) and bool(getattr(config, "temporal_active_cull", False))
+        shN: Tensor | None = params.get("shN")
+        with_shN: bool = sh_degree > 0 and shN is not None
+        mark_rows_dynamic(active_idx)
+        means_t, quats_t, gamma, scales, opacities, colors = compiled_gather_deform(device)(
+            tuple(params[k] for k in DEFORM_KEYS),
+            shN,
+            params.get("is_static"),
+            active_idx,
+            t_dev,
+            with_shN,
+            bool(getattr(config, "bezier_window_detach", True)),
+            float(config.gauge_eps),
+            float(config.gauge_denom_clamp),
+            threshold if smooth else 0.0,
+        )
+        return {
+            "active_idx": active_idx, "gamma": gamma, "sh_degree": sh_degree if with_shN else 0,
+            "means": means_t, "quats": quats_t, "scales": scales, "opacities": opacities, "colors": colors,
+        }
 
     def stride_for_step(self, step: int) -> int:
         """Lever 4's stride at ``step``: ``COARSE_STRIDE`` for the first ``coarse_stride_steps`` steps, then ``STRIDE``."""
