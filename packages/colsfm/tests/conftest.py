@@ -121,17 +121,17 @@ def repo_root() -> Path:
 @pytest.fixture(scope="session")
 def galileo_input_dir() -> Path:
     """The r2b_galileo input directory: `frames_meta.json` plus `ground_truth.txt`."""
-    path = REPO_ROOT / "data" / "r2b_galileo"
-    if not path.is_dir():
-        pytest.skip(f"r2b_galileo asset absent: {path} (pixi run -e colsfm colsfm-download-galileo)")
-    return path
+    return REPO_ROOT / "data" / "r2b_galileo"
 
 
 @pytest.fixture(scope="session")
 def galileo_input_meta(galileo_input_dir: Path) -> Path:
     """The 226-keyframe input metadata shipped with r2b_galileo."""
     from colsfm.frames_meta import FRAMES_META_NAME
-    return galileo_input_dir / FRAMES_META_NAME
+    path = galileo_input_dir / FRAMES_META_NAME
+    if not path.is_file():
+        pytest.skip(f"r2b_galileo asset absent: {path} (pixi run -e colsfm colsfm-download-galileo)")
+    return path
 
 
 @pytest.fixture(scope="session")
