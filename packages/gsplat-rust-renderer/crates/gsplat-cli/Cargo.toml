@@ -7,18 +7,9 @@ edition = "2024"
 name = "gsplat"
 path = "src/main.rs"
 
-[features]
-probe = ["dep:gsplat-viewer", "dep:re_viewer", "dep:egui_kittest", "dep:re_grpc_server", "dep:re_viewer_context", "dep:re_log"]
-
 [dependencies]
 tempfile = "3"
-gsplat-viewer = { path = "../gsplat-viewer", optional = true }
-re_viewer = { workspace = true, features = ["default"], optional = true }
-egui_kittest = { workspace = true, optional = true }
-re_grpc_server = { workspace = true, optional = true }
-re_viewer_context = { workspace = true, optional = true }
-re_log = { workspace = true, features = ["setup"], optional = true }
-gsplat-core = { path = "../gsplat-core", features = ["serde"] }
+gsplat-core = { path = "../gsplat-core", features = ["serde", "provenance"] }
 brush-serde.workspace = true
 brush-render.workspace = true
 colmap-reader.workspace = true
@@ -46,7 +37,6 @@ re_math = "0.33"
 brush-dataset.workspace = true
 brush-loss.workspace = true
 lpips.workspace = true
-sha2 = "0.10"
 
 [dev-dependencies]
 brush-train.workspace = true

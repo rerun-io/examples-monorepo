@@ -122,9 +122,8 @@ class PoseHeatmapHead(nn.Module):
                     nn.init.ones_(module.weight)
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
-            elif isinstance(module, nn.RMSNorm):
-                if hasattr(module, "weight"):
-                    nn.init.ones_(module.weight)
+            elif isinstance(module, nn.RMSNorm) and hasattr(module, "weight"):
+                nn.init.ones_(module.weight)
 
     def _make_conv_layers(
         self,

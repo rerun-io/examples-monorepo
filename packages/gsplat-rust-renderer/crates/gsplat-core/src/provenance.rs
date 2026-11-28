@@ -1,4 +1,5 @@
-//! Runtime source identity and dependency fingerprint shared by metric reports.
+//! Runtime source identity and dependency fingerprint shared by metric reports (gsplat-cli, the canonical viewer's
+//! viewer-probe).
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 use std::{path::Path, process::Command};
@@ -12,14 +13,16 @@ pub struct Provenance {
 }
 
 impl Provenance {
-    pub fn capture() -> Self {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    /// The identity of the Cargo workspace at `root`: its git commit (or `GSPLAT_SOURCE_SHA`) and its Cargo.lock, and
+    /// the Brush revision and patch named by `brush_recipe` (the text of `recipes/brush-src/recipe.yaml`, which the
+    /// calling binary embeds).
+    pub fn capture(root: &Path, brush_recipe: &str) -> Self {
         let source_sha = std::env::var("GSPLAT_SOURCE_SHA")
             .ok()
             .filter(|value| !value.trim().is_empty())
             .or_else(|| {
                 let output = Command::new("git")
-                    .current_dir(&root)
+                    .current_dir(root)
                     .args(["rev-parse", "HEAD"])
                     .output()
                     .ok()?;
@@ -28,12 +31,11 @@ impl Provenance {
                     .success()
                     .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
             });
-        let recipe = include_str!("../../../../../recipes/brush-src/recipe.yaml");
-        let revision = recipe
+        let revision = brush_recipe
             .lines()
             .find_map(|line| line.trim().strip_prefix("rev: "))
             .expect("Brush recipe revision");
-        let patch = recipe
+        let patch = brush_recipe
             .lines()
             .find_map(|line| line.trim().strip_prefix("- patches/"))
             .expect("Brush observer patch");

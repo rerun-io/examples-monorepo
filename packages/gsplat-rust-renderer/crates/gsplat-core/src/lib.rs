@@ -6,6 +6,8 @@
 //! On the web the subgroup modules get `enable subgroups;` prepended (naga 30 rejects it natively).
 
 mod camera;
+#[cfg(feature = "serde")]
+pub mod camera_spec;
 mod device_caps;
 pub use device_caps::{
     NO_SUBGROUPS_ENV, check_adapter, compute_limits, required_features, subgroups_allowed,
@@ -19,6 +21,8 @@ mod motion_gpu;
 pub mod native;
 mod output;
 mod primitives;
+#[cfg(feature = "provenance")]
+pub mod provenance;
 mod renderer;
 mod scene;
 mod shader;
