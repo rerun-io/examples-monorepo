@@ -388,6 +388,11 @@ class Open4dgsTrainer(TrigsTrainer):
         self.fused_deform: bool = fused_deform
         self.fused_regularisers: bool = fused_regularisers
         self.adam_moments: Literal["fp32", "bf16"] = adam_moments
+        # Keep Inductor's compile-worker pool up between compiles. PyTorch 2.12 stops the idle pool 60 s after a compile
+        # and forks a second one for the next compile (the prior's contradiction gate compiles its branch at 75 % of the
+        # schedule); that second pool's workers never exit, so the interpreter then waits 300 s in the pool's atexit
+        # shutdown. Measured: 16,000 steps of a 20,000-step schedule, exit 300 s -> 2 s.
+        torch._inductor.config.quiesce_async_compile_pool = False
         # Lever 6, None when off. dynamic=True: one compile for every image size (ROI cameras each have their own size;
         # per-size compiles hit dynamo's recompile limit and fall back to eager).
         self._compiled_terms = torch.compile(masked_composite_terms, dynamic=True) if fused_loss else None
