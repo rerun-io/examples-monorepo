@@ -39,14 +39,6 @@ from numpy import ndarray
 CAMERA_MODEL_BY_NAME: Final[dict[str, CameraModel]] = {model.name: model for model in CameraModel}
 """COLMAP's model name to the contract's enum; the four models CASPAR projects."""
 
-PRINCIPAL_POINT_COLUMNS: Final[dict[CameraModel, tuple[int, ...]]] = {
-    CameraModel.PINHOLE: (2, 3),
-    CameraModel.SIMPLE_RADIAL: (1, 2),
-    CameraModel.OPENCV_FISHEYE: (2, 3),
-    CameraModel.FULL_OPENCV: (2, 3),
-}
-"""Columns of an intrinsics row that stay as they are on write-back: the principal point is never refined."""
-
 RAM_DISK: Final[Path] = Path("/dev/shm")
 
 _POINT2D_RECORD: Final[np.dtype] = np.dtype([("xy", "<f8", 2), ("point3D_id", "<u8")])
@@ -320,7 +312,8 @@ def apply_result(reconstruction: pycolmap.Reconstruction, bridged: BridgedProble
         camera: pycolmap.Camera = reconstruction.camera(int(ids.camera_ids[row]))
         params: Float64[ndarray, " k"] = np.asarray(camera.params).copy()
         refined: Float64[ndarray, " k"] = result.intrinsics[row, : len(params)].copy()
-        keep = list(PRINCIPAL_POINT_COLUMNS[CameraModel(int(problem.camera_model[row]))])
+        # The principal point is never refined, so write-back keeps it as stored.
+        keep: list[int] = list(camera.principal_point_idxs())
         refined[keep] = params[keep]
         camera.params = refined.tolist()
 
@@ -365,10 +358,24 @@ def mojo_options(ba_options: pycolmap.BundleAdjustmentOptions) -> BaOptions:
         ba_options: Options whose `caspar` block holds the solver parameters.
 
     Returns:
-        The same parameters for the Mojo solver.
+        The same parameters for the Mojo solver; a field the Mojo solver adds keeps its own default.
     """
     caspar: pycolmap.CasparBundleAdjustmentOptions = ba_options.caspar
-    return BaOptions(**{field: type(getattr(BaOptions(), field))(getattr(caspar, field)) for field in BaOptions.__dataclass_fields__})
+    return BaOptions(
+        solver_iter_max=int(caspar.solver_iter_max),
+        diag_init=float(caspar.diag_init),
+        diag_min=float(caspar.diag_min),
+        diag_scaling_up=float(caspar.diag_scaling_up),
+        diag_scaling_down=float(caspar.diag_scaling_down),
+        diag_exit_value=float(caspar.diag_exit_value),
+        score_exit_value=float(caspar.score_exit_value),
+        solver_rel_decrease_min=float(caspar.solver_rel_decrease_min),
+        reduced_camera_system=bool(caspar.reduced_camera_system),
+        reduced_pcg_iter_max=int(caspar.reduced_pcg_iter_max),
+        reduced_pcg_eta=float(caspar.reduced_pcg_eta),
+        pcg_iter_max=int(caspar.pcg_iter_max),
+        pcg_rel_error_exit=float(caspar.pcg_rel_error_exit),
+    )
 
 
 def solve_with_mojo(

@@ -21,11 +21,9 @@ def _matrix(pose: pycolmap.Rigid3d | None) -> Float64[ndarray, "3 4"]:
 
 
 def _config(reconstruction: pycolmap.Reconstruction) -> pycolmap.BundleAdjustmentConfig:
-    config = pycolmap.BundleAdjustmentConfig()
-    for image_id in sorted(reconstruction.reg_image_ids()):
-        config.add_image(image_id)
-    config.set_constant_rig_from_world_pose(min(reconstruction.reg_frame_ids()))
-    return config
+    from colsfm.apis.caspar_baseline import gauge_config
+
+    return gauge_config(reconstruction)
 
 
 def _options(refine_intrinsics: bool = False, refine_rig: bool = False) -> pycolmap.BundleAdjustmentOptions:
@@ -238,22 +236,21 @@ def test_mojo_options_carry_caspars_parameters() -> None:
 
 @pytest.mark.integration
 def test_solve_with_mojo_matches_caspar_on_a_tiny_pinhole_model() -> None:
-    solver = pytest.importorskip("caspar_mojo.solver", reason="caspar_mojo.solver is not on this branch yet")
-    if not hasattr(solver, "solve"):
-        pytest.skip("caspar_mojo.solver.solve is not written yet")
-    from colsfm.apis.caspar_baseline import caspar_options
+    from colsfm.apis.caspar_baseline import caspar_options, gauge_config
+    from colsfm.ba_capability import detect_caspar_capability, detect_mojo_capability
     from colsfm.ba_compare import compare_solutions
     from colsfm.ba_mojo import problem_from_reconstruction, solve_with_mojo
 
+    # Only a missing build skips; with both solvers present a refusal or a solve error is the regression this catches.
+    for name, capability in (("CASPAR", detect_caspar_capability()), ("caspar_mojo", detect_mojo_capability())):
+        if capability.availability == "unavailable":
+            pytest.skip(f"{name} is not built here: {capability.probe_errors}")
     start = _tiny()
     caspar, mojo = pycolmap.Reconstruction(start), pycolmap.Reconstruction(start)
     options = caspar_options()
-    try:
-        pycolmap.create_default_bundle_adjuster(options, _config(caspar), caspar).solve()
-        summary = solve_with_mojo(mojo, _config(mojo), options)
-    except (RuntimeError, ValueError) as error:
-        pytest.skip(f"no GPU answered: {error}")
-    comparison = compare_solutions(caspar, mojo, problem_from_reconstruction(start, _config(start), options))
+    pycolmap.create_default_bundle_adjuster(options, gauge_config(caspar), caspar).solve()
+    summary = solve_with_mojo(mojo, gauge_config(mojo), options)
+    comparison = compare_solutions(caspar, mojo, problem_from_reconstruction(start, gauge_config(start), options))
     assert summary.num_residuals > 0
     assert comparison.reprojection_relative_difference is not None and comparison.cost_relative_difference is not None
     assert abs(comparison.reprojection_relative_difference) < 0.02 and abs(comparison.cost_relative_difference) < 0.02

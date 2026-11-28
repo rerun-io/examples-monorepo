@@ -116,9 +116,8 @@ def synthetic_reconstruction(
         if len(elements) < 2:
             continue
         track = pycolmap.Track([pycolmap.TrackElement(a, b) for a, b in elements])
-        point3D_id: int = reconstruction.add_point3D(points[i] + rng.normal(0, 0.05, 3), track, np.zeros(3, np.uint8))
-        for a, b in elements:
-            reconstruction.image(a).set_point3D_for_point2D(b, point3D_id)
+        # `add_point3D` links every element of the track to the new point.
+        reconstruction.add_point3D(points[i] + rng.normal(0, 0.05, 3), track, np.zeros(3, np.uint8))
     for frame_id in list(reconstruction.frames)[1:]:
         frame = reconstruction.frame(frame_id)
         pose: pycolmap.Rigid3d | None = frame.rig_from_world

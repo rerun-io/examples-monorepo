@@ -237,8 +237,10 @@ def test_the_mapper_on_mojo_matches_the_mapper_on_caspar(
     if not caspar_enabled:
         pytest.skip("this pycolmap has no CASPAR to compare with")
     mojo_plan: BaExecutionPlan = resolve_ba_plan("mojo", (), ceres_polish=False, optimize_extrinsics=False)
-    if mojo_plan.backend != "mojo":
-        pytest.skip(f"the Mojo solver cannot solve here: {mojo_plan.fallback_reason} {mojo_plan.capability.probe_errors}")
+    # Only a missing extension skips; a probe that ran and refused the PINHOLE rig is the regression this test is for.
+    if mojo_plan.capability.availability == "unavailable":
+        pytest.skip(f"the caspar_mojo extension is not built here: {mojo_plan.capability.probe_errors}")
+    assert mojo_plan.backend == "mojo", f"{mojo_plan.fallback_reason} {mojo_plan.capability.probe_errors}"
     caspar_plan: BaExecutionPlan = resolve_ba_plan("caspar", (), ceres_polish=False, optimize_extrinsics=False)
     mapping_config = isaac_config.vision_mapping
     caspar: MappingResult = run_mapping(
