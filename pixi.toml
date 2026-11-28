@@ -4246,7 +4246,7 @@ description = "Download every weight and example clip 4DAnyone needs"
 
 [feature.fdanyone-rerun.tasks.fdanyone-run]
 cmd = "python tools/run.py"
-depends-on = ["fdanyone-download", "open4dgs-ssim-mojo-build"]
+depends-on = ["fdanyone-download"]
 cwd = "packages/fdanyone-rerun"
 description = "Generate novel views of the person in a video and log the run to Rerun (needs the GPU); see --help"
 
@@ -4283,7 +4283,6 @@ description = "Move a finished run recording into the shared rig layout and regi
 
 [feature.fdanyone-rerun.tasks.fdanyone-log-run]
 cmd = "python tools/log_run.py"
-depends-on = ["open4dgs-ssim-mojo-build"]
 cwd = "packages/fdanyone-rerun"
 description = "Log a finished 4DAnyone output directory (ours or upstream's) to Rerun with the default layout (no GPU); --train also trains its 4D person"
 
