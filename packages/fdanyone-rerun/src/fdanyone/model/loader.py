@@ -113,6 +113,7 @@ def read_safetensors(
     """
 
     import json
+    import math
     import os
     import struct
 
@@ -133,6 +134,14 @@ def read_safetensors(
         unknown = {entry["dtype"] for entry in header.values()} - _SAFETENSORS_DTYPES.keys()
         if unknown:
             raise AssetError(f"{path} has tensor dtypes this reader does not map: {sorted(unknown)}.")
+        # The format's layout rule, as safetensors checks it: the tensors tile the data section with no gap or overlap.
+        end = 0
+        for key, entry in sorted(header.items(), key=lambda item: item[1]["data_offsets"][0]):
+            start, stop = (int(offset) for offset in entry["data_offsets"])
+            itemsize = getattr(torch, _SAFETENSORS_DTYPES[entry["dtype"]]).itemsize
+            if start != end or stop - start != math.prod(entry["shape"]) * itemsize:
+                raise AssetError(f"{path} has an invalid layout at tensor {key!r}: offsets {entry['data_offsets']}.")
+            end = stop
 
         buffer = torch.empty(data_size, dtype=torch.uint8)
         view = memoryview(buffer.numpy())

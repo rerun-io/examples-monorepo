@@ -1,5 +1,7 @@
 """The DiT checkpoint is read into memory by the prefetch, not left as lazy file-backed pages (CPU)."""
 
+import json
+import struct
 from pathlib import Path
 
 import pytest
@@ -65,4 +67,18 @@ def test_read_safetensors_names_a_dtype_it_does_not_map(tmp_path: Path) -> None:
     path = tmp_path / "model.safetensors"
     save_file({"blocks.0.int16": torch.arange(6, dtype=torch.int16)}, str(path))
     with pytest.raises(AssetError, match="I16"):
+        read_safetensors(path)
+
+
+def test_read_safetensors_rejects_overlapping_tensors(tmp_path: Path) -> None:
+    path = tmp_path / "model.safetensors"
+    save_file({"a": torch.zeros(4), "b": torch.ones(4)}, str(path))
+    raw = path.read_bytes()
+    (header_size,) = struct.unpack("<Q", raw[:8])
+    header = json.loads(raw[8 : 8 + header_size])
+    header["b"]["data_offsets"] = header["a"]["data_offsets"]  # b now aliases a's bytes
+    encoded = json.dumps(header, separators=(",", ":")).encode().ljust(header_size)
+    assert len(encoded) == header_size
+    path.write_bytes(raw[:8] + encoded + raw[8 + header_size :])
+    with pytest.raises(AssetError, match="invalid layout"):
         read_safetensors(path)
