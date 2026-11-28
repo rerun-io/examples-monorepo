@@ -379,9 +379,9 @@ fn shaped(
     Ok(values)
 }
 
-/// i32 codes per row of the motion streams in [`AsogParts::motion_codes`].
+/// 32-bit words per row of the motion streams in [`AsogParts::motion_codes`].
 ///
-/// Order: opacity, mu, logsigma, anchor (3), omega (9: O0, O1, O2), g (5), flags (static | clip << 1).
+/// Order: opacity, mu, logsigma, anchor (3), omega (9: O0, O1, O2), g (5, f32 bits), flags (static | clip << 1).
 /// `asog_motion.wgsl` reads the same layout.
 pub const MOTION_CODES: usize = 21;
 
@@ -497,7 +497,8 @@ impl AsogParts {
             out.anchors.push(a.map(|v| v as f32));
             out.omega.push(o_life.map(|o| o.map(|v| (v / life) as f32)));
             out.g.push(std::array::from_fn(|j| {
-                (code(15 + j) * mref * w_g[j] / (life * life)) as f32
+                let g = f64::from(f32::from_bits(row[15 + j].cast_unsigned()));
+                (g * mref * w_g[j] / (life * life)) as f32
             }));
             out.is_static.push(row[20] & 1 == 1);
             out.clip.push((row[20] >> 1) as u32);
@@ -524,7 +525,7 @@ pub fn decode(bytes: &[u8], active_threshold: f32) -> Result<Asog, Error> {
 /// Entropy decode only (zlib streams, un-delta / un-zigzag).
 ///
 /// Static integers packed as SOG v2 texels, motion
-/// integers as [`MOTION_CODES`] i32 per row. No de-quantisation: [`decode`] (CPU) or `sog_dequant.wgsl` +
+/// codes as [`MOTION_CODES`] 32-bit words per row. No de-quantisation: [`decode`] (CPU) or `sog_dequant.wgsl` +
 /// `asog_motion.wgsl` do that. Native builds inflate the streams in parallel (one thread each); the web build, which
 /// has no threads, inflates them in order.
 pub fn decode_parts(bytes: &[u8], active_threshold: f32) -> Result<AsogParts, Error> {
@@ -638,7 +639,7 @@ fn decode_parts_with(
     })
 }
 
-/// The motion streams as [`MOTION_CODES`] i32 per row, with the clip index of every row checked.
+/// Pack the motion streams and check the clip index of every row.
 fn motion_codes(
     m: &Manifest,
     opacity: Vec<i64>,
@@ -660,7 +661,14 @@ fn motion_codes(
     let mut out = Vec::with_capacity(n * MOTION_CODES);
     for i in 0..n {
         for (name, values, width) in &columns {
-            for &v in &values[i * width..(i + 1) * width] {
+            let row = &values[i * width..(i + 1) * width];
+            if *name == "g" {
+                // The ASOG stream can exceed i32 when rotation nearly cancels.
+                // The shader already de-quantises these coefficients in f32.
+                out.extend(row.iter().map(|&v| (v as f32).to_bits().cast_signed()));
+                continue;
+            }
+            for &v in row {
                 out.push(i32::try_from(v).map_err(|_range| Error::Stream {
                     name: (*name).into(),
                     problem: format!("value {v} does not fit 32 bits"),
