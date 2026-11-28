@@ -22,13 +22,14 @@ from __future__ import annotations
 
 import struct
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
 import numpy as np
 import pycolmap
-from caspar_mojo.problem import MAX_INTRINSICS, BaProblem, BaResult, CameraModel
+from caspar_mojo.problem import MAX_INTRINSICS, BaOptions, BaProblem, BaResult, CameraModel
 from jaxtyping import Bool, Float64, Int32, Int64
 from numpy import ndarray
 
@@ -317,3 +318,59 @@ def apply_result(reconstruction: pycolmap.Reconstruction, bridged: BridgedProble
         keep = list(PRINCIPAL_POINT_COLUMNS[CameraModel(int(problem.camera_model[row]))])
         refined[keep] = params[keep]
         camera.params = refined
+
+
+@dataclass(frozen=True, slots=True)
+class MojoSolveSummary:
+    """One `solve_with_mojo` call: the solver's result and where the wall time went."""
+
+    result: BaResult
+    num_residuals: int
+    """Two per observation, as pycolmap's summary counts them."""
+    extract_seconds: float
+    solve_seconds: float
+    """The `caspar_mojo.solver.solve` call: host arrays in, host arrays out."""
+    apply_seconds: float
+
+
+def mojo_options(ba_options: pycolmap.BundleAdjustmentOptions) -> BaOptions:
+    """CASPAR's solver parameters from pycolmap's options, under the contract's (CASPAR's) names.
+
+    Args:
+        ba_options: Options whose `caspar` block holds the solver parameters.
+
+    Returns:
+        The same parameters for the Mojo solver.
+    """
+    caspar: pycolmap.CasparBundleAdjustmentOptions = ba_options.caspar
+    return BaOptions(**{field: type(getattr(BaOptions(), field))(getattr(caspar, field)) for field in BaOptions.__dataclass_fields__})
+
+
+def solve_with_mojo(
+    reconstruction: pycolmap.Reconstruction, config: pycolmap.BundleAdjustmentConfig, ba_options: pycolmap.BundleAdjustmentOptions
+) -> MojoSolveSummary:
+    """CASPAR's bundle adjustment on the Mojo solver: bridge, solve, write back.
+
+    Args:
+        reconstruction: The model, adjusted in place.
+        config: As for `pycolmap.create_default_bundle_adjuster`.
+        ba_options: As for `pycolmap.create_default_bundle_adjuster`, CASPAR block included.
+
+    Returns:
+        The summary.
+    """
+    from caspar_mojo.solver import solve
+
+    started: float = time.perf_counter()
+    bridged: BridgedProblem = problem_from_reconstruction(reconstruction, config, ba_options)
+    extracted: float = time.perf_counter()
+    result: BaResult = solve(bridged.problem, mojo_options(ba_options))
+    solved: float = time.perf_counter()
+    apply_result(reconstruction, bridged, result)
+    return MojoSolveSummary(
+        result=result,
+        num_residuals=2 * len(bridged.problem.pixels),
+        extract_seconds=extracted - started,
+        solve_seconds=solved - extracted,
+        apply_seconds=time.perf_counter() - solved,
+    )

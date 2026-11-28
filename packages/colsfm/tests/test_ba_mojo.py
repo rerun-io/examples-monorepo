@@ -213,3 +213,36 @@ def test_compare_solutions_of_identical_and_moved_models() -> None:
     moved = compare_solutions(a, b, _config(a), _options())
     assert np.isclose(moved.rotation_difference_max_deg, 1.0, atol=1e-6) and moved.rotation_difference_median_deg < 1e-6
     assert moved.cost_b > moved.cost_a and moved.reprojection_relative_difference > 0
+
+
+def test_mojo_options_carry_caspars_parameters() -> None:
+    from colsfm.apis.caspar_baseline import caspar_options
+    from colsfm.ba_mojo import mojo_options
+
+    options = caspar_options()
+    options.caspar.reduced_pcg_eta = 0.25
+    options.caspar.solver_iter_max = 17
+    mojo = mojo_options(options)
+    assert mojo.reduced_pcg_eta == 0.25 and mojo.solver_iter_max == 17 and mojo.reduced_camera_system
+
+
+@pytest.mark.integration
+def test_solve_with_mojo_matches_caspar_on_a_tiny_pinhole_model() -> None:
+    solver = pytest.importorskip("caspar_mojo.solver", reason="caspar_mojo.solver is not on this branch yet")
+    if not hasattr(solver, "solve"):
+        pytest.skip("caspar_mojo.solver.solve is not written yet")
+    from colsfm.apis.caspar_baseline import caspar_options
+    from colsfm.ba_compare import compare_solutions
+    from colsfm.ba_mojo import solve_with_mojo
+
+    start = _tiny()
+    caspar, mojo = pycolmap.Reconstruction(start), pycolmap.Reconstruction(start)
+    options = caspar_options()
+    try:
+        pycolmap.create_default_bundle_adjuster(options, _config(caspar), caspar).solve()
+        summary = solve_with_mojo(mojo, _config(mojo), options)
+    except (RuntimeError, ValueError) as error:
+        pytest.skip(f"no GPU answered: {error}")
+    comparison = compare_solutions(caspar, mojo, _config(start), options)
+    assert summary.num_residuals > 0
+    assert abs(comparison.reprojection_relative_difference) < 0.02 and abs(comparison.cost_relative_difference) < 0.02
