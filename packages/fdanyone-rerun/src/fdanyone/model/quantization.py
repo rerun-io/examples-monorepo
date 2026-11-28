@@ -16,6 +16,9 @@ _DIT_PROJECTION_PATTERN: re.Pattern[str] = re.compile(
 QUANTIZED_BLOCK_RANGE: tuple[int, int] = (3, 26)
 """Inclusive interior DiT block range quantized to FP8; the first and last blocks stay BF16."""
 
+NVFP4_KINDS: tuple[str, ...] = ("ffn", "self_attn", "self_attn_mvs", "cross_attn")
+"""Projection groups that can run NVFP4 W4A4 instead of FP8 (``InferenceConfig.dit_nvfp4_projections``)."""
+
 FP8_DTYPE: torch.dtype = torch.float8_e4m3fn
 FP8_MAX: float = float(torch.finfo(torch.float8_e4m3fn).max)
 """448: the largest finite e4m3fn value."""
@@ -25,6 +28,15 @@ FP8_ROW_CHUNK_BUDGET_BYTES: int = 1024**3
 
 _TINY_AMAX: float = 2.0**-100
 """Floor of a row maximum, so an all-zero row gets a finite scale."""
+
+
+def projection_kind(fqn: str) -> tuple[int, str] | None:
+    """Block index and group (``ffn``, ``self_attn``, ``self_attn_mvs``, ``cross_attn``) of a DiT projection FQN."""
+
+    match: re.Match[str] | None = _DIT_PROJECTION_PATTERN.fullmatch(fqn)
+    if match is None:
+        return None
+    return int(match.group("block")), fqn.split(".")[2]
 
 
 def is_quantizable_dit_projection(fqn: str) -> bool:
@@ -44,6 +56,8 @@ class FP8W8A8Report:
 
     module_count: int
     """Number of Linear modules replaced by FP8 linears."""
+    nvfp4_count: int = 0
+    """Number of Linear modules replaced by NVFP4 linears instead."""
 
 
 class Fp8RowwiseLinear(torch.nn.Module):
@@ -132,16 +146,32 @@ def project_fp8_shared(
     return [out.view(*x.shape[:-1], linear.out_features) for linear, out in zip(linears, outs, strict=True)]
 
 
-def quantize_dit_fp8_w8a8(dit: torch.nn.Module) -> FP8W8A8Report:
-    """Replace the approved projections with chunked row-wise FP8 W8A8 linears."""
+def quantize_dit_fp8_w8a8(
+    dit: torch.nn.Module, *, nvfp4_projections: tuple[str, ...] = (), nvfp4_blocks: tuple[int, int] = QUANTIZED_BLOCK_RANGE
+) -> FP8W8A8Report:
+    """Replace the approved projections with chunked row-wise FP8 W8A8 linears; groups in ``nvfp4_projections``
+    inside the inclusive ``nvfp4_blocks`` range get NVFP4 W4A4 linears instead."""
+
+    unknown = set(nvfp4_projections) - set(NVFP4_KINDS)
+    if unknown:
+        raise ValueError(f"Unknown NVFP4 projection groups {sorted(unknown)}; choose from {NVFP4_KINDS}.")
 
     selected: list[str] = [
         fqn
         for fqn, module in dit.named_modules()
         if isinstance(module, torch.nn.Linear) and is_quantizable_dit_projection(fqn)
     ]
+    nvfp4_count = 0
     for fqn in selected:
         parent_name, _, child_name = fqn.rpartition(".")
         parent = dit.get_submodule(parent_name)
-        setattr(parent, child_name, Fp8RowwiseLinear(parent.get_submodule(child_name)))
-    return FP8W8A8Report(module_count=len(selected))
+        linear = parent.get_submodule(child_name)
+        block, kind = projection_kind(fqn) or (-1, "")
+        if kind in nvfp4_projections and nvfp4_blocks[0] <= block <= nvfp4_blocks[1]:
+            from fdanyone.model.nvfp4 import Nvfp4Linear
+
+            setattr(parent, child_name, Nvfp4Linear(linear))
+            nvfp4_count += 1
+        else:
+            setattr(parent, child_name, Fp8RowwiseLinear(linear))
+    return FP8W8A8Report(module_count=len(selected) - nvfp4_count, nvfp4_count=nvfp4_count)

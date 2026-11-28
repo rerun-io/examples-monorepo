@@ -341,8 +341,9 @@ class DiTBlock(nn.Module):
         # token slab for the equally shaped second-projection output.
         if not torch.is_grad_enabled():
             del x
-            if isinstance(self.ffn[2], Fp8RowwiseLinear):
-                return self.ffn[2].forward_gelu(hidden)
+            project_gelu = getattr(self.ffn[2], "forward_gelu", None)
+            if project_gelu is not None:  # FP8 and NVFP4 fold the GELU into their activation quantization
+                return project_gelu(hidden)
         hidden = gelu_tanh(hidden)
         return self.ffn[2](hidden)
 

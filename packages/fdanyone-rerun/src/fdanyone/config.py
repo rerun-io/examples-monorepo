@@ -39,6 +39,12 @@ class InferenceConfig:
     modulation (written frame-major for the multiview attention), gated residuals, and one FP8 row quantization per
     projection input (GELU folded into the FFN's). Same BF16 rounding points as the eager code; the FP8 path is
     bit-exact. RTX 5090, six-view group: one forward 20 -> 11.6 s. ``FDANYONE_DIT_FUSED=0`` runs the eager code."""
+    dit_nvfp4_projections: tuple[str, ...] = tuple(filter(None, os.environ.get("FDANYONE_DIT_NVFP4", "").split(",")))
+    """Projection groups of the FP8 blocks that run NVFP4 W4A4 instead (cuBLASLt block-scaled FP4 GEMM, Triton
+    activation quantization): any of ``ffn``, ``self_attn``, ``self_attn_mvs``, ``cross_attn``. Off by default;
+    ``FDANYONE_DIT_NVFP4=ffn`` turns it on for the FFNs."""
+    dit_nvfp4_blocks: tuple[int, int] = tuple(int(b) for b in os.environ.get("FDANYONE_DIT_NVFP4_BLOCKS", "3-26").split("-"))  # type: ignore[assignment]
+    """Inclusive block range of ``dit_nvfp4_projections`` (inside the FP8 range, blocks 3-26)."""
     dit_regional_compile: bool = False
     """``torch.compile`` each DiT block in place (static shapes). Off by default: on an RTX 5090 a cold
     max-autotune compile took ~690 s, and with upstream's six-view groups the compiled blocks ran out of the 32 GB
