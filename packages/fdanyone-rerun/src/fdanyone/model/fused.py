@@ -14,6 +14,17 @@ from jaxtyping import BFloat16, Float32, Shaped
 from torch import Tensor
 from triton.language.extra import libdevice
 
+from fdanyone.config import INFERENCE
+
+ENABLED: bool = INFERENCE.dit_fused_glue
+"""Module-level so one process can time both paths (``fdanyone.config.InferenceConfig.dit_fused_glue``)."""
+
+
+def active(x: Tensor) -> bool:
+    """Whether inference on ``x`` takes the fused kernels (CUDA, no autograd)."""
+
+    return ENABLED and x.is_cuda and not torch.is_grad_enabled()
+
 
 @triton.jit
 def _bf16(x):

@@ -7,10 +7,6 @@ from dataclasses import dataclass
 
 import torch
 
-FUSED: set[str] = {"quant", "gelu", "shared"}
-"""Fused Triton paths in use (experiment switch): ``quant`` row quantization, ``gelu`` GELU into the FFN-out
-quantization, ``shared`` one quantization of the input shared by the q, k and v projections."""
-
 _DIT_PROJECTION_PATTERN: re.Pattern[str] = re.compile(
     r"blocks\.(?P<block>\d+)\."
     r"(?:(?:self_attn|self_attn_mvs|cross_attn)\.(?:q|k|v|o)|"
@@ -113,9 +109,10 @@ def project_fp8_shared(
     first = linears[0]
     rows = x.reshape(-1, first.in_features)
     outs = [torch.empty((rows.shape[0], linear.out_features), dtype=torch.bfloat16, device=x.device) for linear in linears]
-    fused = x.is_cuda and "quant" in FUSED
-    fuse_gelu = gelu and fused and "gelu" in FUSED
-    if gelu and not fuse_gelu:
+    from fdanyone.model import fused as fused_kernels
+
+    fused = fused_kernels.active(x)
+    if gelu and not fused:
         from fdanyone.vendor.diffsynth.models.wan_video_dit import gelu_tanh
 
         rows = gelu_tanh(rows)
@@ -126,9 +123,7 @@ def project_fp8_shared(
         for start in range(0, rows.shape[0], rows_per_chunk):
             chunk = rows[start : start + rows_per_chunk]
             if fused:
-                from fdanyone.model.fused import quantize_rows_fp8
-
-                quantized, scale_a = quantize_rows_fp8(chunk.to(torch.bfloat16), gelu=fuse_gelu)
+                quantized, scale_a = fused_kernels.quantize_rows_fp8(chunk.to(torch.bfloat16), gelu=gelu)
             for linear, out in zip(linears, outs, strict=True):
                 if fused:
                     linear._gemm(quantized, scale_a, out[start : start + rows_per_chunk])
