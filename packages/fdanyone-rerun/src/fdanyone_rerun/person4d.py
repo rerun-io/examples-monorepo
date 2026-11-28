@@ -60,9 +60,12 @@ Report = Callable[[str], None]
 class PersonConfig:
     """Train the 4D person of a 4DAnyone run (Open4DGS / TRiGS) and log it as Animated SOG."""
 
-    train: TrainConfig = field(default_factory=lambda: TrainConfig(steps=25_000, cameras_per_step=8))
-    """Trainer settings: those of the measured runs on the 18-view example (12 train + 4 held out, prior off): 25,000 steps
-    23.07 dB held out (539 s on the 5090), 5,000 steps 22.44 dB. ``log_every`` is :attr:`report_every`'s."""
+    train: TrainConfig = field(default_factory=lambda: TrainConfig(steps=20_000, schedule_steps=25_000, cameras_per_step=8))
+    """Trainer settings: 20,000 steps of the 25,000-step schedule (``TrainConfig.schedule_steps``). Run C (18-view example,
+    12 train + 4 held out, prior on, stride 2; Spark 2026-11-27): the full 25,000 steps 23.38 dB / LPIPS 0.137 held out,
+    stopped at 20,000 -0.1 % PSNR / -1.6 % LPIPS / geometry within 0.3 % for 20 % fewer steps; a schedule compressed to
+    18,000 steps loses 4.8 % LPIPS. Set ``--person.train.schedule-steps`` with ``--person.train.steps`` (None = the
+    schedule spans the steps). ``log_every`` is :attr:`report_every`'s."""
     max_side: int | None = None
     """Longer side of the training frames; None keeps the generated 704x1280 (as the measured runs)."""
     prior: bool = True
@@ -85,8 +88,8 @@ class PersonConfig:
             raise ValueError(f"report_every must be at least 1 (it is also the trainer's log_every), got {self.report_every}")
 
     def with_steps(self, steps: int) -> "PersonConfig":
-        """This config with ``train.steps`` replaced."""
-        return dataclasses.replace(self, train=dataclasses.replace(self.train, steps=steps))
+        """This config with ``train.steps`` replaced and the schedule spanning them (the app's step presets)."""
+        return dataclasses.replace(self, train=dataclasses.replace(self.train, steps=steps, schedule_steps=None))
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,7 +204,7 @@ def _prior_loss(clip: MultiViewClip, masks: tuple[Tensor, ...], config: PersonCo
     del predictor, trt
     free_gpu()
     positions: tuple[int, ...] = tuple(range(len(clip.camera_names)))
-    return MonoPriorLoss(config.prior_config.at_steps(config.train.steps), priors, masks, positions, clip.K)
+    return MonoPriorLoss(config.prior_config.at_steps(config.train.horizon), priors, masks, positions, clip.K)
 
 
 def train_person(
