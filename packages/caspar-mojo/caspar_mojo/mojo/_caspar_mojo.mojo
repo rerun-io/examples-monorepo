@@ -12,7 +12,7 @@ from std.python.bindings import PythonModuleBuilder
 
 from max.gpu.host import DeviceContext
 
-from solver import F32HostIn, F32HostOut, HostProblem, HostState, I32HostIn, LinearizeOut, Options, Stats, U8HostIn, linearize_model, solve_model
+from solver import F32HostIn, F32HostOut, HostProblem, HostState, I32HostIn, LinearizeOut, Options, Stats, U8HostIn, linearize_model, packed_groups, solve_model
 
 
 def _address(array: PythonObject) raises -> Int:
@@ -88,6 +88,14 @@ def py_linearize(packet: PythonObject, gradient: PythonObject, hblk: PythonObjec
     return PythonObject(Float64(linearize_model(DeviceContext(), Int(py=packet.camera_model), _problem(packet), hook)))
 
 
+def py_packed_groups(packet: PythonObject) raises -> PythonObject:
+    """`packed_groups(packet) -> [(blocks, width), ...]`: the linearize outputs' groups, in their packed order."""
+    var groups = Python.list()
+    for group in packed_groups(Int(py=packet.camera_model), _problem(packet)):
+        groups.append(Python.tuple(group[0], group[1]))
+    return groups
+
+
 def py_device_count() raises -> PythonObject:
     """`device_count() -> int`: GPUs the runtime sees; the integration tests skip on 0 instead of guessing from errors."""
     return PythonObject(DeviceContext.number_of_devices())
@@ -99,6 +107,7 @@ def PyInit__caspar_mojo() abi("C") -> PythonObject:
         var m = PythonModuleBuilder("_caspar_mojo")
         m.def_function[py_solve]("solve")
         m.def_function[py_linearize]("linearize")
+        m.def_function[py_packed_groups]("packed_groups")
         m.def_function[py_device_count]("device_count")
         return m.finalize()
     except e:

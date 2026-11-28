@@ -15,7 +15,7 @@ over a point-sorted copy of the observations and need no atomics.
 
 from std.atomic import Atomic, Ordering
 from std.bit import log2_floor
-from std.math import ceildiv, sqrt
+from std.math import ceildiv
 from max.gpu import WARP_SIZE, block_idx, global_idx, lane_id, thread_idx
 from max.gpu.memory import AddressSpace
 from max.gpu.sync import barrier
@@ -24,10 +24,10 @@ from max.gpu.primitives import warp
 
 from layout import ImmTileTensor, MutTileTensor, row_major
 
+from blocks import L1, Packed, VecIn, damped_solve, tri, tri_index
 from camera_models import CameraModel, MAX_PARAMS, Params
 from geometry import Pose, Vec3, apply, cross, rotation, translation
 
-comptime L1 = type_of(row_major((0,)))
 comptime L2 = type_of(row_major((0, 0)))
 comptime F32Ptr = MutPointer[Float32, MutUntrackedOrigin]
 comptime F64Ptr = MutPointer[Float64, MutUntrackedOrigin]
@@ -37,53 +37,6 @@ comptime I32In = ImmTileTensor[DType.int32, L1, ImmUntrackedOrigin]
 comptime TilesIn = ImmTileTensor[DType.int32, L2, ImmUntrackedOrigin]
 comptime I32Out = MutTileTensor[DType.int32, L1, MutUntrackedOrigin]
 comptime F32Out = MutTileTensor[DType.float32, L2, MutUntrackedOrigin]
-comptime VecIn = ImmTileTensor[DType.float32, L1, ImmUntrackedOrigin]
-
-def tri(d: Int) -> Int:
-    """Packed upper-triangle size of a d x d block."""
-    return d * (d + 1) // 2
-
-
-def tri_index[D: Int](i: Int, j: Int) -> Int:
-    return i * D - i * (i - 1) // 2 + (j - i)
-
-
-@always_inline
-def damped_solve[D: Int](hblk: VecIn, h: Int, rhs: Array[Float32, D], lam: Float32) -> Array[Float32, D]:
-    comptime assert hblk.flat_rank == 1
-    var a = Array[Float32, D * D](fill=0.0)
-    comptime for i in range(D):
-        comptime for j in range(i, D):
-            var hij = hblk[h + tri_index[D](i, j)][0]
-            a[i * D + j] = hij
-            a[j * D + i] = hij
-        a[i * D + i] = a[i * D + i] * (1.0 + lam) + lam * 1e-6
-    # In-place Cholesky, lower triangle.
-    comptime for j in range(D):
-        var d = a[j * D + j]
-        comptime for k in range(j):
-            d -= a[j * D + k] * a[j * D + k]
-        var l = sqrt(d)
-        a[j * D + j] = l
-        comptime for i in range(j + 1, D):
-            var s = a[i * D + j]
-            comptime for k in range(j):
-                s -= a[i * D + k] * a[j * D + k]
-            a[i * D + j] = s / l
-    var y = Array[Float32, D](fill=0.0)
-    comptime for i in range(D):
-        var s = rhs[i]
-        comptime for k in range(i):
-            s -= a[i * D + k] * y[k]
-        y[i] = s / a[i * D + i]
-    comptime for ii in range(D):
-        comptime i = D - 1 - ii
-        var s = y[i]
-        comptime for k in range(i + 1, D):
-            s -= a[k * D + i] * y[k]
-        y[i] = s / a[i * D + i]
-    return y^
-
 
 @always_inline
 def atomic_add(p: F32Ptr, offset: Int, value: Float32):
@@ -282,18 +235,6 @@ def warp_slot(warp_tiles: TilesIn, tile: Int) -> WarpSlot:
     return WarpSlot(Int(warp_tiles[row, 0][0]) + min(lane_id(), count - 1), live and lane_id() < count, live)
 
 
-@always_inline
-def h_offset[K: Int](v: Int, n6: Int, n_calib: Int) -> Int:
-    """Packed block-diagonal offset of the block whose tangent slice starts at `v` (same block order)."""
-    var calib_v = 6 * n6
-    var point_v = calib_v + K * n_calib
-    if v < calib_v:
-        return tri(6) * (v // 6)
-    if v < point_v:
-        return tri(6) * n6 + tri(K) * ((v - calib_v) // K)
-    return tri(6) * n6 + tri(K) * n_calib + tri(3) * ((v - point_v) // 3)
-
-
 def linearize_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
     poses: F32In,
     rigs: F32In,
@@ -324,8 +265,7 @@ def linearize_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bo
     comptime assert point_off.flat_rank == 1 and pixels.flat_rank == 2
     comptime K = Model.NUM_CALIB
     var n_block_tiles = ceildiv(Int(warp_tiles.dim[0]()), WARPS)
-    var nn6 = Int(n6)
-    var nc = Int(n_calib)
+    var lay = Packed[K](Int(n6), Int(n_calib))
     var first = block_idx.x * Int(tiles)
     var cost: Float32 = 0.0
     var pose_g = Running.empty()
@@ -345,13 +285,13 @@ def linearize_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bo
         if slot.valid:
             cost += 0.5 * (e0 * e0 + e1 * e1)
         var po = Int(pose_off[frame][0]) if slot.live else -1
-        accumulate_block[6](o.pose, slot.valid, e0, e1, po, h_offset[K](po, nn6, nc), g, hblk, pose_g, pose_h)
+        accumulate_block[6](o.pose, slot.valid, e0, e1, po, lay.h6(po), g, hblk, pose_g, pose_h)
         comptime if REFINE_RIG:
             var ro = Int(rig_off[camera][0]) if slot.live else -1
-            accumulate_block[6](o.rig, slot.valid, e0, e1, ro, h_offset[K](ro, nn6, nc), g, hblk, rig_g, rig_h)
+            accumulate_block[6](o.rig, slot.valid, e0, e1, ro, lay.h6(ro), g, hblk, rig_g, rig_h)
         comptime if REFINE_INTRINSICS:
             var co = Int(calib_off[camera][0]) if slot.live else -1
-            accumulate_block[K](o.calib, slot.valid, e0, e1, co, h_offset[K](co, nn6, nc), g, hblk, calib_g, calib_h)
+            accumulate_block[K](o.calib, slot.valid, e0, e1, co, lay.h_calib(co), g, hblk, calib_g, calib_h)
     pose_g.flush[6](g)
     pose_h.flush[tri(6)](hblk)
     rig_g.flush[6](g)
@@ -389,8 +329,8 @@ def point_linearize_kernel[Model: CameraModel](
     by_point_pixels: F32In,
     g: Vec,
     hblk: Vec,
-    point_v: Int32,
-    point_h: Int32,
+    n6: Int32,
+    n_calib: Int32,
 ):
     """The point blocks of -J^T e and of the block diagonal, POINT_LANES lanes per point over its observations (no atomics)."""
     comptime assert point_off.flat_rank == 1 and point_start.flat_rank == 1 and by_point_pixels.flat_rank == 2
@@ -418,7 +358,7 @@ def point_linearize_kernel[Model: CameraModel](
         hess[t] = lane_group_sum(hess[t])
     if lane != 0 or v < 0:
         return
-    var h = Int(point_h) + tri(3) * ((v - Int(point_v)) // 3)
+    var h = Packed[Model.NUM_CALIB](Int(n6), Int(n_calib)).h_point(v)
     comptime for a in range(3):
         g[v + a] = grad[a]
     comptime for t in range(tri(3)):
@@ -516,8 +456,8 @@ def point_gather_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG:
     g: VecIn,
     dst: Vec,
     hblk: VecIn,
-    point_v: Int32,
-    point_h: Int32,
+    n6: Int32,
+    n_calib: Int32,
     lam: Float32,
 ):
     """POINT_LANES lanes per point gather its observations (point-sorted copies of frame and camera): H_pc x_cam
@@ -571,7 +511,7 @@ def point_gather_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG:
             rhs[k] = g[v + k][0] - w[k]
         else:
             rhs[k] = -w[k]
-    var sol = damped_solve[3](hblk, Int(point_h) + tri(3) * ((v - Int(point_v)) // 3), rhs, lam)
+    var sol = damped_solve[3](hblk, Packed[K](Int(n6), Int(n_calib)).h_point(v), rhs, lam)
     comptime for k in range(3):
         dst[v + k] = sol[k]
 

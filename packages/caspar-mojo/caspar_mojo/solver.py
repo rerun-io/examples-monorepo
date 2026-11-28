@@ -201,13 +201,7 @@ def solve(problem: BaProblem, options: BaOptions = DEFAULT_OPTIONS) -> BaResult:
 def linearize(problem: BaProblem) -> Linearization:
     """Test hook: CASPAR's `res_jac_first` at the problem's state, computed on the GPU."""
     packet: _Packet = _packet(problem)
-    k: int = len(FOCAL_AND_EXTRA_COLUMNS[CameraModel(packet.camera_model)])
-    groups: list[tuple[int, int]] = [
-        (int(packet.pose_free.sum()), 6),
-        (int(packet.sensor_free.sum()), 6),
-        (int(packet.intrinsics_free.sum()), k),
-        (int(packet.point_free.sum()), 3),
-    ]
+    groups: list[tuple[int, int]] = _extension().packed_groups(packet)
     n_tangent: int = sum(n * d for n, d in groups)
     n_packed: int = sum(n * d * (d + 1) // 2 for n, d in groups)
     gradient: Float32[ndarray, " n_tangent"] = np.zeros(max(n_tangent, 1), dtype=np.float32)

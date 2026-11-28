@@ -13,6 +13,7 @@ from max.gpu import WARP_SIZE
 from max.gpu.host import DeviceAttribute, DeviceBuffer, DeviceContext, HostBuffer
 from layout import TileTensor, row_major
 
+from blocks import FRAME_WIDTH, POINT_WIDTH, Packed, tri
 from camera_models import CameraModel, FullOpenCV, MAX_PARAMS, OpenCVFisheye, Pinhole, SimpleRadial
 from factor_kernels import (
     BLOCK,
@@ -24,7 +25,6 @@ from factor_kernels import (
     point_gather_kernel,
     point_linearize_kernel,
     score_kernel,
-    tri,
 )
 from node_kernels import (
     axpy_kernel,
@@ -117,9 +117,9 @@ struct LinearizeOut(ImplicitlyCopyable):
     var hblk: F32HostOut
     var hblk_capacity: Int
 
-    def check(self, lay: TangentLayout) raises:
-        if self.gradient_capacity < lay.n_tan or self.hblk_capacity < lay.n_h:
-            raise Error(t"linearize outputs hold {self.gradient_capacity} and {self.hblk_capacity} floats, need {lay.n_tan} and {lay.n_h}")
+    def check(self, n_tan: Int, n_h: Int) raises:
+        if self.gradient_capacity < n_tan or self.hblk_capacity < n_h:
+            raise Error(t"linearize outputs hold {self.gradient_capacity} and {self.hblk_capacity} floats, need {n_tan} and {n_h}")
 
 
 @fieldwise_init
@@ -145,33 +145,31 @@ struct Stats(Movable):
     var trace: List[Trial]
 
 
+def _count(mask: U8HostIn, n: Int) -> Int:
+    var count = 0
+    for i in range(n):
+        count += Int(mask[unsafe_offset=i] != 0)
+    return count
+
+
 @fieldwise_init
-struct TangentLayout(ImplicitlyCopyable):
-    """Sizes of the flat tangent vector `[poses 6 | rigs 6 | calib K | points 3]` and of the packed block diagonal."""
+struct GroupCounts(ImplicitlyCopyable):
+    """Free blocks per group, in the packed order (`blocks.mojo`)."""
 
-    var n6: Int
-    var n_calib: Int
-    var n_free_points: Int
-    var n_cam: Int
-    var n_tan: Int
-    var n_h_cam: Int
-    var n_h: Int
+    var poses: Int
+    var sensors: Int
+    var calibs: Int
+    var points: Int
 
+    def __init__(out self, problem: HostProblem):
+        self.poses = _count(problem.pose_free, problem.n_frames)
+        self.sensors = _count(problem.sensor_free, problem.n_cameras)
+        self.calibs = _count(problem.intrinsics_free, problem.n_cameras)
+        self.points = _count(problem.point_free, problem.n_points)
 
-def tangent_layout[K: Int](problem: HostProblem) -> TangentLayout:
-    var n6 = 0
-    for i in range(problem.n_frames):
-        n6 += Int(problem.pose_free[unsafe_offset=i] != 0)
-    var n_calib = 0
-    for c in range(problem.n_cameras):
-        n6 += Int(problem.sensor_free[unsafe_offset=c] != 0)
-        n_calib += Int(problem.intrinsics_free[unsafe_offset=c] != 0)
-    var n_points = 0
-    for j in range(problem.n_points):
-        n_points += Int(problem.point_free[unsafe_offset=j] != 0)
-    var n_cam = 6 * n6 + K * n_calib
-    var n_h_cam = tri(6) * n6 + tri(K) * n_calib
-    return TangentLayout(n6, n_calib, n_points, n_cam, n_cam + 3 * n_points, n_h_cam, n_h_cam + tri(3) * n_points)
+    def packed[K: Int](self) -> Packed[K]:
+        # Poses then sensors share the frame group.
+        return Packed[K](self.poses + self.sensors, self.calibs)
 
 
 def _offsets(free: U8HostIn, n: Int, start: Int, width: Int, mut next: Int) -> List[Int32]:
@@ -386,10 +384,11 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
     if problem.n_obs == 0:
         # No residual: cost 0, nothing moves (CASPAR ends such a solve on its score exit).
         if case .Some(hook) = linearize_hook:
-            var lay = tangent_layout[K](problem)
-            hook.check(lay)
-            _zero(hook.gradient, lay.n_tan)
-            _zero(hook.hblk, lay.n_h)
+            var counts = GroupCounts(problem)
+            var lay = counts.packed[K]()
+            hook.check(lay.n_tan(counts.points), lay.n_h(counts.points))
+            _zero(hook.gradient, lay.n_tan(counts.points))
+            _zero(hook.hblk, lay.n_h(counts.points))
         else:
             _copy(result.intrinsics, problem.intrinsics, problem.n_cameras * MAX_PARAMS)
             _copy(result.sensor_from_rig, problem.sensor_from_rig, problem.n_cameras * 7)
@@ -408,16 +407,21 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
     var nc = problem.n_cameras
     var np = problem.n_points
     var no = problem.n_obs
-    var lay = tangent_layout[K](problem)
+    var counts = GroupCounts(problem)
+    var lay = counts.packed[K]()
+    var n_free_points = counts.points
+    var n_cam = lay.point_start()
+    var n_tan = lay.n_tan(n_free_points)
+    var n_h = lay.n_h(n_free_points)
     if case .Some(hook) = linearize_hook:
-        hook.check(lay)
+        hook.check(n_tan, n_h)
     var next = 0
     var pose_off = _offsets(problem.pose_free, nf, 0, 6, next)
     var rig_off = _offsets(problem.sensor_free, nc, 0, 6, next)
     next = 0
-    var calib_off = _offsets(problem.intrinsics_free, nc, 6 * lay.n6, K, next)
+    var calib_off = _offsets(problem.intrinsics_free, nc, lay.calib_start(), K, next)
     next = 0
-    var point_off = _offsets(problem.point_free, np, lay.n_cam, 3, next)
+    var point_off = _offsets(problem.point_free, np, lay.point_start(), 3, next)
 
     var d_intr = _upload[DType.float32](ctx, problem.intrinsics, nc * MAX_PARAMS)
     var d_rigs = _upload[DType.float32](ctx, problem.sensor_from_rig, nc * 7)
@@ -445,7 +449,7 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
     var tile_rows = _warp_tiles(problem)
     var n_warp_tiles = len(tile_rows) // 2
     var d_warp_tiles = _upload_list(ctx, tile_rows)
-    var nt = max(lay.n_tan, 1)
+    var nt = max(n_tan, 1)
     var d_g = ctx.enqueue_create_buffer[DType.float32](nt)
     var d_r = ctx.enqueue_create_buffer[DType.float32](nt)
     var d_z = ctx.enqueue_create_buffer[DType.float32](nt)
@@ -453,7 +457,7 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
     var d_w = ctx.enqueue_create_buffer[DType.float32](nt)
     var d_mp = ctx.enqueue_create_buffer[DType.float32](nt)
     var d_s = ctx.enqueue_create_buffer[DType.float32](nt)
-    var d_h = ctx.enqueue_create_buffer[DType.float32](max(lay.n_h, 1))
+    var d_h = ctx.enqueue_create_buffer[DType.float32](max(n_h, 1))
     var n_scalars = SLOT_PCG + 2 * (options.reduced_pcg_iter_max + 1)
     var d_scalars = ctx.enqueue_create_buffer[DType.float64](n_scalars)
     var host2 = ctx.enqueue_create_host_buffer[DType.float64](2)
@@ -488,13 +492,10 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
     var w = TileTensor(d_w, row_major((nt,)))
     var mp = TileTensor(d_mp, row_major((nt,)))
     var s = TileTensor(d_s, row_major((nt,)))
-    var hblk = TileTensor(d_h, row_major((max(lay.n_h, 1),))).as_imm()
+    var hblk = TileTensor(d_h, row_major((max(n_h, 1),))).as_imm()
     var scalars = d_scalars.unsafe_ptr()
     var n6 = Int32(lay.n6)
     var ncal = Int32(lay.n_calib)
-    var point_v = Int32(lay.n_cam)
-    var point_h = Int32(lay.n_h_cam)
-    var n_free_points = Int32(lay.n_free_points)
 
     comptime linearize = linearize_kernel[Model, REFINE_INTRINSICS, REFINE_RIG]
     comptime score = score_kernel[Model]
@@ -552,8 +553,8 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
             ctx.enqueue_function[point_linearize](
                 TileTensor(d_poses, row_major((nf, 7))).as_imm(), TileTensor(d_rigs, row_major((nc, 7))).as_imm(),
                 TileTensor(d_intr, row_major((nc, MAX_PARAMS))).as_imm(), TileTensor(d_points, row_major((np, 3))).as_imm(),
-                t_point_off, point_start, by_point_frame, by_point_camera, by_point_pixels, g, TileTensor(d_h, row_major((max(lay.n_h, 1),))),
-                point_v, point_h, grid_dim=_grid(np * POINT_LANES), block_dim=BLOCK,
+                t_point_off, point_start, by_point_frame, by_point_camera, by_point_pixels, g, TileTensor(d_h, row_major((max(n_h, 1),))),
+                n6, ncal, grid_dim=_grid(np * POINT_LANES), block_dim=BLOCK,
             )
             clock.tick(ctx, "point_linearize")
             launches += 2
@@ -563,8 +564,8 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
                 score_best = Float32(host2[0])
                 initial_cost = score_best
                 if case .Some(hook) = linearize_hook:
-                    _download(ctx, hook.gradient, d_g, lay.n_tan)
-                    _download(ctx, hook.hblk, d_h, lay.n_h)
+                    _download(ctx, hook.gradient, d_g, n_tan)
+                    _download(ctx, hook.hblk, d_h, n_h)
                     ctx.synchronize()
                     return Stats(initial_cost, initial_cost, 0, 0, EXIT_MAX_ITERATIONS, 0.0, launches, List[Trial]())
         var lin_poses = TileTensor(t_poses if lin_in_trial else d_poses, row_major((nf, 7))).as_imm()
@@ -574,8 +575,8 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
         ctx.enqueue_memset(d_scalars, 0.0)
         # RcsReduceRhs: r_cam = g_cam - H_cp H_pp^-1 g_p.
         ctx.enqueue_copy(dst_buf=d_r, src_buf=d_g)
-        ctx.enqueue_function[point_solve_kernel](
-            g.as_imm(), z, hblk, point_v, point_h, n_free_points, diag, grid_dim=_grid(lay.n_free_points), block_dim=BLOCK
+        ctx.enqueue_function[point_solve_kernel[K]](
+            g.as_imm(), z, hblk, n6, ncal, Int32(n_free_points), diag, grid_dim=_grid(n_free_points), block_dim=BLOCK
         )
         clock.tick(ctx, "point_solve")
         ctx.enqueue_function[cross_points](
@@ -599,13 +600,13 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
             clock.tick(ctx, "precond")
             pending = False
             ctx.enqueue_function[pcg_direction_kernel](
-                r.as_imm(), z.as_imm(), p, mp, w, Int32(lay.n_cam), first, scalars, rho_slot, grid_dim=_grid(lay.n_tan), block_dim=BLOCK
+                r.as_imm(), z.as_imm(), p, mp, w, Int32(n_cam), first, scalars, rho_slot, grid_dim=_grid(n_tan), block_dim=BLOCK
             )
             clock.tick(ctx, "pcg_direction")
             # RcsMatvec: w_cam = M_cc p + H_cc' p - H_cp H_pp^-1 H_pc p (w enters holding M p).
             ctx.enqueue_function[gather_negate](
                 lin_poses, lin_rigs, lin_intr, lin_points, t_pose_off, t_rig_off, t_calib_off, t_point_off, point_start, by_point_frame,
-                by_point_camera, p.as_imm(), g.as_imm(), z, hblk, point_v, point_h, diag, grid_dim=_grid(np * POINT_LANES), block_dim=BLOCK,
+                by_point_camera, p.as_imm(), g.as_imm(), z, hblk, n6, ncal, diag, grid_dim=_grid(np * POINT_LANES), block_dim=BLOCK,
             )
             clock.tick(ctx, "point_gather")
             ctx.enqueue_function[cross_all](
@@ -614,7 +615,7 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
             )
             clock.tick(ctx, "cross_points")
             ctx.enqueue_function[dot_kernel](
-                p.as_imm(), w.as_imm(), Int32(lay.n_cam), scalars, rho_slot + 1, grid_dim=_grid(lay.n_cam), block_dim=BLOCK
+                p.as_imm(), w.as_imm(), Int32(n_cam), scalars, rho_slot + 1, grid_dim=_grid(n_cam), block_dim=BLOCK
             )
             clock.tick(ctx, "dot")
             launches += 5
@@ -633,14 +634,14 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
                 break
         pcg_total += k
         if pending:
-            ctx.enqueue_function[axpy_kernel](s, p.as_imm(), alpha, Int32(lay.n_cam), grid_dim=_grid(lay.n_cam), block_dim=BLOCK)
+            ctx.enqueue_function[axpy_kernel](s, p.as_imm(), alpha, Int32(n_cam), grid_dim=_grid(n_cam), block_dim=BLOCK)
             clock.tick(ctx, "axpy")
             launches += 1
         # RcsBackSubstitute: s_p = H_pp^-1 (g_p - H_pc s_cam), reading s_cam from a copy (w is free now).
         ctx.enqueue_copy(dst_buf=d_w, src_buf=d_s)
         ctx.enqueue_function[gather_backsubstitute](
             lin_poses, lin_rigs, lin_intr, lin_points, t_pose_off, t_rig_off, t_calib_off, t_point_off, point_start, by_point_frame,
-            by_point_camera, w.as_imm(), g.as_imm(), s, hblk, point_v, point_h, diag, grid_dim=_grid(np * POINT_LANES), block_dim=BLOCK,
+            by_point_camera, w.as_imm(), g.as_imm(), s, hblk, n6, ncal, diag, grid_dim=_grid(np * POINT_LANES), block_dim=BLOCK,
         )
         clock.tick(ctx, "point_backsubstitute")
         # Retract into the trial state (with s.(g + lambda D s) fused), then score it.
@@ -757,6 +758,27 @@ def _dispatch(
             return _solve_flags[FullOpenCV](ctx, problem, options, result, collect_trace, linearize_hook)
         case _:
             raise Error(t"unknown camera model {model}")
+
+
+def calib_width(model: Int) raises -> Int:
+    """Tangent width of a calibration block (`CameraModel.NUM_CALIB`), through the same arms as `_dispatch`."""
+    match model:
+        case 0:
+            return Pinhole.NUM_CALIB
+        case 1:
+            return SimpleRadial.NUM_CALIB
+        case 2:
+            return OpenCVFisheye.NUM_CALIB
+        case 3:
+            return FullOpenCV.NUM_CALIB
+        case _:
+            raise Error(t"unknown camera model {model}")
+
+
+def packed_groups(model: Int, problem: HostProblem) raises -> List[Tuple[Int, Int]]:
+    """(free blocks, block width) per group in the packed order of `blocks.mojo`: poses, sensors, calibrations, points."""
+    var counts = GroupCounts(problem)
+    return [(counts.poses, FRAME_WIDTH), (counts.sensors, FRAME_WIDTH), (counts.calibs, calib_width(model)), (counts.points, POINT_WIDTH)]
 
 
 def solve_model(ctx: DeviceContext, model: Int, problem: HostProblem, options: Options, result: HostState, collect_trace: Bool) raises -> Stats:

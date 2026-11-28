@@ -7,11 +7,10 @@ M = B + lambda diag(B) + lambda 1e-6 I, solved exactly (dense Cholesky, unrolled
 
 from max.gpu import global_idx
 
-from factor_kernels import F32In, F32Out, F64Ptr, I32In, Vec, VecIn, damped_solve, reduce_add, tri, tri_index
+from blocks import Packed, VecIn, damped_solve, predicted_decrease
 from camera_models import CameraModel, MAX_PARAMS
-from geometry import Pose, retract
-
-
+from factor_kernels import F32In, F32Out, F64Ptr, I32In, Vec, load_pose, reduce_add
+from geometry import retract
 
 
 @always_inline
@@ -54,13 +53,14 @@ def pcg_precond_kernel[K: Int](
 ):
     """Camera blocks: (k > 0) r -= alpha w, s += alpha p; z = M^-1 r; rho += r.z. (k = 0) s = 0."""
     var b = global_idx.x
-    var nn6 = Int(n6)
+    var lay = Packed[K](Int(n6), Int(n_calib))
     var rho: Float32 = 0.0
-    if b < nn6:
-        rho = precond_block[6](r, z, s, p, w, hblk, 6 * b, tri(6) * b, lam, alpha, first != 0)
-    elif b < nn6 + Int(n_calib):
-        var c = b - nn6
-        rho = precond_block[K](r, z, s, p, w, hblk, 6 * nn6 + K * c, tri(6) * nn6 + tri(K) * c, lam, alpha, first != 0)
+    if b < lay.n6:
+        var v = 6 * b
+        rho = precond_block[6](r, z, s, p, w, hblk, v, lay.h6(v), lam, alpha, first != 0)
+    elif b < lay.n6 + lay.n_calib:
+        var v = lay.calib_start() + K * (b - lay.n6)
+        rho = precond_block[K](r, z, s, p, w, hblk, v, lay.h_calib(v), lam, alpha, first != 0)
     reduce_add(scalars, Int(rho_slot), rho)
 
 
@@ -112,40 +112,26 @@ def axpy_kernel(y: Vec, x: VecIn, alpha: Float32, n: Int32):
         y[i] = y[i][0] + alpha * x[i][0]
 
 
-def point_solve_kernel(g: VecIn, dst: Vec, hblk: VecIn, point_v: Int32, point_h: Int32, n_points: Int32, lam: Float32):
+def point_solve_kernel[K: Int](g: VecIn, dst: Vec, hblk: VecIn, n6: Int32, n_calib: Int32, n_points: Int32, lam: Float32):
     """dst_p = -M_pp^-1 g_p per free point, with the damped point block M_pp (the Schur H_pp)."""
     comptime assert g.flat_rank == 1 and dst.flat_rank == 1
     var j = global_idx.x
     if j >= Int(n_points):
         return
-    var v = Int(point_v) + 3 * j
+    var lay = Packed[K](Int(n6), Int(n_calib))
+    var v = lay.point_start() + 3 * j
     var rhs = Array[Float32, 3](fill=0.0)
     comptime for i in range(3):
         rhs[i] = -g[v + i][0]
-    var sol = damped_solve[3](hblk, Int(point_h) + tri(3) * j, rhs, lam)
+    var sol = damped_solve[3](hblk, lay.h_point(v), rhs, lam)
     comptime for i in range(3):
         dst[v + i] = sol[i]
 
 
 @always_inline
-def retract_vector[D: Int](
-    src: F32In, dst: F32Out, row: Int, col0: Int, v: Int, s: VecIn, g: VecIn, hblk: VecIn, h: Int, lam: Float32
-) -> Float32:
-    """dst[row, col0:col0+D] = src + s[v:v+D]; returns s.(g + lambda diag(B) s) over the block."""
-    comptime assert src.flat_rank == 2 and dst.flat_rank == 2 and s.flat_rank == 1 and g.flat_rank == 1
-    var pred: Float32 = 0.0
-    comptime for i in range(D):
-        var si = s[v + i][0]
-        dst[row, col0 + i] = src[row, col0 + i][0] + si
-        pred += si * (g[v + i][0] + lam * hblk[h + tri_index[D](i, i)][0] * si)
-    return pred
-
-
-@always_inline
-def retract_pose(src: F32In, dst: F32Out, row: Int, v: Int, s: VecIn, g: VecIn, hblk: VecIn, h: Int, lam: Float32) -> Float32:
-    comptime assert src.flat_rank == 2 and dst.flat_rank == 2 and s.flat_rank == 1 and g.flat_rank == 1
-    var pose = Pose(src[row, 0][0], src[row, 1][0], src[row, 2][0], src[row, 3][0], src[row, 4][0], src[row, 5][0], src[row, 6][0])
-    var out = retract(pose, s[v][0], s[v + 1][0], s[v + 2][0], s[v + 3][0], s[v + 4][0], s[v + 5][0])
+def retract_pose(src: F32In, dst: F32Out, row: Int, v: Int, s: VecIn):
+    comptime assert src.flat_rank == 2 and dst.flat_rank == 2 and s.flat_rank == 1
+    var out = retract(load_pose(src, row), s[v][0], s[v + 1][0], s[v + 2][0], s[v + 3][0], s[v + 4][0], s[v + 5][0])
     dst[row, 0] = out.qx
     dst[row, 1] = out.qy
     dst[row, 2] = out.qz
@@ -153,11 +139,6 @@ def retract_pose(src: F32In, dst: F32Out, row: Int, v: Int, s: VecIn, g: VecIn, 
     dst[row, 4] = out.tx
     dst[row, 5] = out.ty
     dst[row, 6] = out.tz
-    var pred: Float32 = 0.0
-    comptime for i in range(6):
-        var si = s[v + i][0]
-        pred += si * (g[v + i][0] + lam * hblk[h + tri_index[6](i, i)][0] * si)
-    return pred
 
 
 @always_inline
@@ -197,39 +178,37 @@ def retract_kernel[Model: CameraModel](
     var n_frames = Int(pose_off.dim[0]())
     var n_cameras = Int(rig_off.dim[0]())
     var n_points = Int(point_off.dim[0]())
-    var nn6 = Int(n6)
-    var calib_v = 6 * nn6
-    var calib_h = tri(6) * nn6
-    var point_v = calib_v + K * Int(n_calib)
-    var point_h = calib_h + tri(K) * Int(n_calib)
+    var lay = Packed[K](Int(n6), Int(n_calib))
     var pred: Float32 = 0.0
     if i < n_frames:
         var v = Int(pose_off[i][0])
         if v >= 0:
-            pred = retract_pose(poses, new_poses, i, v, s, g, hblk, tri(6) * (v // 6), lam)
+            retract_pose(poses, new_poses, i, v, s)
+            pred = predicted_decrease[6](s, g, hblk, v, lay.h6(v), lam)
         else:
             copy_row[7](poses, new_poses, i)
     elif i < n_frames + n_cameras:
         var c = i - n_frames
         var v = Int(rig_off[c][0])
         if v >= 0:
-            pred = retract_pose(rigs, new_rigs, c, v, s, g, hblk, tri(6) * (v // 6), lam)
+            retract_pose(rigs, new_rigs, c, v, s)
+            pred = predicted_decrease[6](s, g, hblk, v, lay.h6(v), lam)
         else:
             copy_row[7](rigs, new_rigs, c)
         copy_row[MAX_PARAMS](intrinsics, new_intrinsics, c)
         var vc = Int(calib_off[c][0])
         if vc >= 0:
-            var h = calib_h + tri(K) * ((vc - calib_v) // K)
             comptime for k in range(K):
                 comptime col = Model.calib_column(k)
-                var sk = s[vc + k][0]
-                new_intrinsics[c, col] = intrinsics[c, col][0] + sk
-                pred += sk * (g[vc + k][0] + lam * hblk[h + tri_index[K](k, k)][0] * sk)
+                new_intrinsics[c, col] = intrinsics[c, col][0] + s[vc + k][0]
+            pred += predicted_decrease[K](s, g, hblk, vc, lay.h_calib(vc), lam)
     elif i < n_frames + n_cameras + n_points:
         var j = i - n_frames - n_cameras
         var v = Int(point_off[j][0])
         if v >= 0:
-            pred = retract_vector[3](points, new_points, j, 0, v, s, g, hblk, point_h + tri(3) * ((v - point_v) // 3), lam)
+            comptime for k in range(3):
+                new_points[j, k] = points[j, k][0] + s[v + k][0]
+            pred = predicted_decrease[3](s, g, hblk, v, lay.h_point(v), lam)
         else:
             copy_row[3](points, new_points, j)
     reduce_add(scalars, Int(pred_slot), pred)
