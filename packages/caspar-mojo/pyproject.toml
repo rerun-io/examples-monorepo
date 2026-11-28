@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=70.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+authors = [{ name = "pablo vela", email = "pablovela5620@gmail.com" }]
+name = "caspar-mojo"
+version = "0.0.1"
+description = "COLMAP's CASPAR GPU bundle adjustment on generic Mojo kernels"
+requires-python = ">= 3.12"
+dependencies = ["numpy", "jaxtyping"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["caspar_mojo", "caspar_mojo.*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+caspar_mojo = ["*.so", "mojo/*.mojo"]
+
+[tool.pytest.ini_options]
+# pytest-beartype: beartype checks caspar_mojo only while pytest runs (AGENTS.md, Beartype).
+beartype_packages = ["caspar_mojo"]
+# A package imported before pytest-beartype's hook (e.g. by tests/conftest.py) would go unchecked: fail instead.
+filterwarnings = ["error::pytest_beartype.roar.PytestBeartypeOptionPackagesWarning"]
+markers = [
+    "integration: needs a GPU",
+    "golden: reference comparison against stored ground truth",
+]
+addopts = "-m 'not integration and not golden'"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 150
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "B", "SIM", "I"]
+ignore = ["E501", "F722", "F821", "UP037", "UP040"]
+
+[tool.vulture]
+paths = ["caspar_mojo", "tests"]
+exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*"]
+ignore_names = ["pytestmark"]
+sort_by_size = true
+min_confidence = 60
