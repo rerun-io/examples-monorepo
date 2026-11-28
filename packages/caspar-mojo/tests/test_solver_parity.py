@@ -21,10 +21,10 @@ from functools import cache
 
 import numpy as np
 import pytest
-from reference.solver import State, make_groups, reference_linearize, reference_solve, residuals_and_jacobians
-from reference.synthetic import make_problem
 
 from caspar_mojo.problem import BaIteration, BaOptions, BaProblem, BaResult, CameraModel
+from caspar_mojo.reference.solver import State, make_groups, reference_linearize, reference_solve, residuals_and_jacobians
+from caspar_mojo.reference.synthetic import make_problem
 
 pytestmark = pytest.mark.integration
 
