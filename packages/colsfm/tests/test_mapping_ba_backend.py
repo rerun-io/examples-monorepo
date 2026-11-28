@@ -29,19 +29,16 @@ from mapping_helpers import (
     write_database,
 )
 
-from colsfm import ba_backend
+from colsfm import ba_capability
 from colsfm.ba_backend import (
     CASPAR_BUILD_FALLBACK_REASON,
-    CASPAR_PROBE_CAMERA_MODELS,
-    CASPAR_STOCK_CAMERA_MODELS,
     MIXED_MODEL_RIG_FALLBACK_REASON,
     BaExecutionPlan,
     apply_caspar_options,
     backend_name,
-    caspar_supported_camera_models,
-    detect_caspar_capability,
     resolve_ba_plan,
 )
+from colsfm.ba_capability import CASPAR_PROBE_CAMERA_MODELS, CASPAR_STOCK_CAMERA_MODELS, caspar_supported_camera_models, detect_caspar_capability
 from colsfm.config import BundleAdjustmentConfig, CusfmConfig, VisionMappingConfig
 from colsfm.mapping import MappingOptions, MappingResult, bundle_adjustment_options, ceres_polish_options, rig_camera_models, run_mapping
 from colsfm.reconstruction import PosedModel, build_reconstruction
@@ -346,7 +343,7 @@ def test_the_probe_solves_once_however_often_it_is_asked(monkeypatch: pytest.Mon
         summary.termination_type = pycolmap.BundleAdjustmentTerminationType.CONVERGENCE
         return summary
 
-    monkeypatch.setattr(ba_backend, "_caspar_probe_solve", counting_solve)
+    monkeypatch.setattr(ba_capability, "_caspar_probe_solve", counting_solve)
     # The real answer is memoised for the life of the process, so the cache has
     # to be empty going in and empty again coming out — otherwise this test
     # either reads a real probe or leaves the stand-in's answer behind.

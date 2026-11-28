@@ -37,10 +37,6 @@ def _exactly_zero(reconstruction: pycolmap.Reconstruction) -> pycolmap.Reconstru
 def _row() -> AccuracyRow:
     from colsfm.apis.ba_accuracy import AccuracyRow
 
-    relative = {"reprojection_relative_difference", "cost_relative_difference"}
-    numbers = {f.name: 0.5 for f in dataclasses.fields(AccuracyRow) if f.type in ("float", float) and f.name not in relative}
-    lists = {"caspar_lm_trials": [3], "caspar_pcg_iterations": [9], "mojo_lm_trials": [3], "mojo_pcg_iterations": [9]}
-    seconds = {"caspar_solver_seconds": [0.1], "caspar_solve_call_seconds": [0.2], "mojo_solve_seconds": [0.1], "mojo_call_seconds": [0.2]}
     return AccuracyRow(
         row="p1",
         gpu="RTX 3060",
@@ -53,9 +49,26 @@ def _row() -> AccuracyRow:
         registered_images_mojo=2,
         caspar_exit="CONVERGED_DIAG_EXIT",
         mojo_exit="CONVERGED_DIAG_EXIT",
-        **numbers,
-        **lists,
-        **seconds,
+        reprojection_before_px=0.5,
+        reprojection_caspar_px=0.5,
+        reprojection_mojo_px=0.5,
+        cost_before=0.5,
+        cost_caspar=0.5,
+        cost_mojo=0.5,
+        rotation_difference_max_deg=0.5,
+        rotation_difference_median_deg=0.5,
+        center_difference_max=0.5,
+        center_difference_median=0.5,
+        point_difference_median=0.5,
+        point_difference_max=0.5,
+        caspar_lm_trials=[3],
+        caspar_pcg_iterations=[9],
+        mojo_lm_trials=[3],
+        mojo_pcg_iterations=[9],
+        caspar_solver_seconds=[0.1],
+        caspar_solve_call_seconds=[0.2],
+        mojo_solve_seconds=[0.1],
+        mojo_call_seconds=[0.2],
     )
 
 

@@ -94,7 +94,7 @@ def test_the_full_system_pcg_is_refused_for_mojo(items: tuple[str, ...]) -> None
 
 
 def test_the_mojo_probe_reads_which_models_solve(monkeypatch: pytest.MonkeyPatch) -> None:
-    from colsfm import ba_backend
+    from colsfm import ba_capability
 
     def probe(model_name: str, *, num_sensors: int = 1, refine_intrinsics: bool = False, **_: bool) -> pycolmap.BundleAdjustmentSummary:
         if model_name != "PINHOLE":
@@ -105,16 +105,80 @@ def test_the_mojo_probe_reads_which_models_solve(monkeypatch: pytest.MonkeyPatch
         return summary
 
     monkeypatch.setitem(sys.modules, "caspar_mojo._caspar_mojo", types.ModuleType("caspar_mojo._caspar_mojo"))
-    monkeypatch.setattr(ba_backend, "_mojo_probe_solve", probe)
-    ba_backend.detect_mojo_capability.cache_clear()
+    monkeypatch.setattr(ba_capability, "_mojo_probe_solve", probe)
+    ba_capability.detect_mojo_capability.cache_clear()
     try:
-        capability: CasparCapability = ba_backend.detect_mojo_capability()
+        capability: CasparCapability = ba_capability.detect_mojo_capability()
     finally:
-        ba_backend.detect_mojo_capability.cache_clear()
+        ba_capability.detect_mojo_capability.cache_clear()
     assert capability.availability == "available"
     assert capability.supported_camera_models == frozenset({"PINHOLE"})
     assert capability.refines_sensor_from_rig and capability.intrinsics_refinable_camera_models == frozenset({"PINHOLE"})
-    assert len(capability.probe_errors) == len(ba_backend.CASPAR_PROBE_CAMERA_MODELS) - 1
+    assert len(capability.probe_errors) == len(ba_capability.CASPAR_PROBE_CAMERA_MODELS) - 1
+
+
+def _summary(num_residuals: int, termination: str) -> pycolmap.BundleAdjustmentSummary:
+    summary = pycolmap.BundleAdjustmentSummary()
+    summary.num_residuals = num_residuals
+    summary.termination_type = getattr(pycolmap.BundleAdjustmentTerminationType, termination)
+    return summary
+
+
+def test_a_mojo_probe_whose_solves_all_fail_is_a_probe_failure_with_the_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    from colsfm import ba_capability
+
+    def probe(model_name: str, **_: object) -> pycolmap.BundleAdjustmentSummary:
+        return _summary(64, "FAILURE")
+
+    monkeypatch.setitem(sys.modules, "caspar_mojo._caspar_mojo", types.ModuleType("caspar_mojo._caspar_mojo"))
+    monkeypatch.setattr(ba_capability, "_mojo_probe_solve", probe)
+    ba_capability.detect_mojo_capability.cache_clear()
+    try:
+        capability: CasparCapability = ba_capability.detect_mojo_capability()
+    finally:
+        ba_capability.detect_mojo_capability.cache_clear()
+    assert capability.availability == "probe_failed"
+    assert len(capability.probe_errors) == len(ba_capability.CASPAR_PROBE_CAMERA_MODELS)
+    assert all("FAILURE" in error for error in capability.probe_errors)
+
+
+def test_a_failed_refinement_probe_says_why(monkeypatch: pytest.MonkeyPatch) -> None:
+    from colsfm import ba_capability
+
+    def probe(model_name: str, *, num_sensors: int = 1, refine_intrinsics: bool = False, **_: object) -> pycolmap.BundleAdjustmentSummary:
+        if model_name != "PINHOLE":
+            raise RuntimeError(f"{model_name} is not ported yet")
+        if num_sensors > 1:
+            raise RuntimeError("rig factor missing")
+        return _summary(64, "FAILURE" if refine_intrinsics else "CONVERGENCE")
+
+    monkeypatch.setitem(sys.modules, "caspar_mojo._caspar_mojo", types.ModuleType("caspar_mojo._caspar_mojo"))
+    monkeypatch.setattr(ba_capability, "_mojo_probe_solve", probe)
+    ba_capability.detect_mojo_capability.cache_clear()
+    try:
+        capability: CasparCapability = ba_capability.detect_mojo_capability()
+    finally:
+        ba_capability.detect_mojo_capability.cache_clear()
+    assert capability.availability == "available" and not capability.refines_sensor_from_rig
+    assert not capability.intrinsics_refinable_camera_models
+    assert any("rig factor missing" in error for error in capability.probe_errors)
+    assert any("PINHOLE" in error and "intrinsics" in error and "FAILURE" in error for error in capability.probe_errors)
+
+
+def test_resolve_backend_and_the_plan_agree_on_a_two_model_reconstruction() -> None:
+    from colsfm.ba_backend import MOJO_MIXED_MODELS_FALLBACK_REASON, CasparCapability, resolve_ba_plan, resolve_backend
+
+    both = CasparCapability(
+        availability="available",
+        supported_camera_models=frozenset({"PINHOLE", "SIMPLE_RADIAL"}),
+        probe_errors=(),
+        refines_sensor_from_rig=True,
+        intrinsics_refinable_camera_models=frozenset({"PINHOLE", "SIMPLE_RADIAL"}),
+    )
+    models: tuple[str, ...] = ("PINHOLE", "SIMPLE_RADIAL")
+    plan: BaExecutionPlan = resolve_ba_plan("mojo", (), ceres_polish=False, optimize_extrinsics=False, capability=both).for_camera_models(models)
+    assert (plan.backend, plan.fallback_reason) == ("ceres", MOJO_MIXED_MODELS_FALLBACK_REASON)
+    assert resolve_backend("mojo", optimize_extrinsics=False, camera_model_names=models, capability=both) == ("ceres", MOJO_MIXED_MODELS_FALLBACK_REASON)
 
 
 @pytest.mark.parametrize(

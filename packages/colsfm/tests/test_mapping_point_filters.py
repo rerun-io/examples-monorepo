@@ -24,6 +24,7 @@ from mapping_helpers import SyntheticRig, synthetic_matches, write_database
 from numpy import ndarray
 
 from colsfm import point_filters
+from colsfm.ba_backend import PreparedSolve
 from colsfm.config import CusfmConfig
 from colsfm.mapping import (
     BundleAdjustmentSolve,
@@ -292,7 +293,12 @@ def test_projection_failure_guard_is_a_no_op_on_a_healthy_model(
 def _solve(reconstruction: pycolmap.Reconstruction, correspondences: Correspondences, depth_threshold: float) -> BundleAdjustmentSolve:
     gauge_frame_id: int = reconstruction.image(min(reconstruction.reg_image_ids())).frame_id
     return solve_bundle_adjustment(
-        reconstruction, pycolmap.BundleAdjustmentOptions(), gauge_frame_id, None, correspondences.observation_manager, depth_threshold
+        reconstruction,
+        PreparedSolve(backend="ceres", options=pycolmap.BundleAdjustmentOptions()),
+        gauge_frame_id,
+        None,
+        correspondences.observation_manager,
+        depth_threshold,
     )
 
 

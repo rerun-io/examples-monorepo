@@ -175,8 +175,8 @@ from colsfm.ba_backend import (
     BaBackend,
     BaExecutionPlan,
     CasparOptions,
+    PreparedSolve,
     apply_caspar_options,
-    backend_name,
 )
 from colsfm.ceres_pose import COLMAP_LINEAR_SOLVER, LinearSolver
 from colsfm.config import BundleAdjustmentConfig, LossFunctionType, VisionMappingConfig
@@ -208,6 +208,7 @@ __all__ = [
     "RoundCallback",
     "RoundStats",
     "bundle_adjustment_options",
+    "bundle_adjustment_solve",
     "ceres_polish_options",
     "default_gauge_frame_id",
     "filter_degenerate_points",
@@ -401,6 +402,19 @@ def bundle_adjustment_options(ba_config: BundleAdjustmentConfig, options: Mappin
     return ba_options
 
 
+def bundle_adjustment_solve(ba_config: BundleAdjustmentConfig, options: MappingOptions) -> PreparedSolve:
+    """The rounds' solve: `bundle_adjustment_options` on the plan's backend, which `mojo` needs said.
+
+    Args:
+        ba_config: The Ceres settings from `vision_mapping_config.pb.txt`.
+        options: Command-line style knobs, carrying the plan to execute.
+
+    Returns:
+        The prepared solve.
+    """
+    return PreparedSolve(backend=options.ba_plan.backend, options=bundle_adjustment_options(ba_config, options))
+
+
 def refinement_options(refine_intrinsics: bool, refine_sensor_from_rig: bool) -> pycolmap.BundleAdjustmentOptions:
     """Which parameter blocks every colsfm bundle adjustment frees, on pycolmap's defaults otherwise.
 
@@ -571,12 +585,11 @@ def global_ba_config(
 
 def solve_bundle_adjustment(
     reconstruction: pycolmap.Reconstruction,
-    ba_options: pycolmap.BundleAdjustmentOptions,
+    prepared: PreparedSolve,
     gauge_frame_id: int,
     fixed_camera_params_id: int | None,
     observation_manager: pycolmap.ObservationManager,
     depth_threshold: float,
-    backend: BaBackend | None = None,
 ) -> BundleAdjustmentSolve:
     """Run one global bundle adjustment over every registered image, accept it and guard its points.
 
@@ -601,7 +614,7 @@ def solve_bundle_adjustment(
 
     Args:
         reconstruction: The model to adjust, in place.
-        ba_options: Solver and refinement options.
+        prepared: The solver and its options (`bundle_adjustment_solve`, `ceres_polish_options`).
         gauge_frame_id: Frame whose `rig_from_world` stays constant.
         fixed_camera_params_id: Camera whose `sensor_from_rig` stays constant while
             the others are refined, or None to leave every extrinsic as the options
@@ -609,8 +622,6 @@ def solve_bundle_adjustment(
             already fixes to identity.
         observation_manager: Bookkeeping bound to the reconstruction, for the guards.
         depth_threshold: `filter_degenerate_points`' bound.
-        backend: The plan's backend; None takes the one `ba_options` selects. Only `mojo` needs saying: its options
-            select CASPAR, whose block carries its parameters, and the solve goes through `colsfm.ba_mojo` instead.
 
     Returns:
         The summary, the solve's seconds and what the guards removed.
@@ -622,21 +633,7 @@ def solve_bundle_adjustment(
     # infinite there or within a finite-difference step of it.
     num_past_pole_before: int = filter_past_rational_pole(observation_manager, reconstruction)
     config: pycolmap.BundleAdjustmentConfig = global_ba_config(reconstruction, gauge_frame_id, fixed_camera_params_id)
-    summary: pycolmap.BundleAdjustmentSummary
-    seconds: float
-    if (backend or backend_name(ba_options)) == "mojo":
-        from colsfm.ba_mojo import MojoSolveSummary, solve_with_mojo
-
-        # Bridge, solve and write-back together: that is what the run pays for this backend.
-        started: float = time.perf_counter()
-        mojo: MojoSolveSummary = solve_with_mojo(reconstruction, config, ba_options)
-        seconds = time.perf_counter() - started
-        summary = mojo.bundle_adjustment_summary()
-    else:
-        adjuster: pycolmap.BundleAdjuster = pycolmap.create_default_bundle_adjuster(ba_options, config, reconstruction)
-        started = time.perf_counter()
-        summary = adjuster.solve()
-        seconds = time.perf_counter() - started
+    summary, seconds = prepared.solve(reconstruction, config)
     if not summary.is_solution_usable():
         raise SolverFailure(f"bundle adjustment ended {summary.termination_type.name} without a usable solution")
     num_diverged: int = filter_degenerate_points(observation_manager, reconstruction, depth_threshold) + filter_projection_failures(
@@ -735,10 +732,10 @@ def _polish_with_ceres(
     Returns:
         What the solve cost and how far it moved the reprojection error.
     """
-    polish_options: pycolmap.BundleAdjustmentOptions = ceres_polish_options(ba_config, options)
+    polish: PreparedSolve = PreparedSolve(backend="ceres", options=ceres_polish_options(ba_config, options))
     before_px: float = reconstruction.compute_mean_reprojection_error()
     solve: BundleAdjustmentSolve = solve_bundle_adjustment(
-        reconstruction, polish_options, gauge_frame_id, fixed_camera_params_id, observation_manager, depth_threshold
+        reconstruction, polish, gauge_frame_id, fixed_camera_params_id, observation_manager, depth_threshold
     )
     report: SolverReport = parse_brief_report(solve.summary.brief_report())
     stats: PolishStats = PolishStats(
@@ -881,7 +878,7 @@ def run_mapping(
             f"mean length {reconstruction.compute_mean_track_length():.4f}"
         )
 
-    ba_options: pycolmap.BundleAdjustmentOptions = bundle_adjustment_options(ba_config, resolved_options)
+    prepared: PreparedSolve = bundle_adjustment_solve(ba_config, resolved_options)
     rounds: list[RoundStats] = []
     bundle_adjustment_seconds: float = 0.0
     for round_index, max_pixel_error in enumerate(schedule):
@@ -895,12 +892,11 @@ def run_mapping(
         # inherits no point the solve walked out of the world.
         solve: BundleAdjustmentSolve = solve_bundle_adjustment(
             reconstruction,
-            ba_options,
+            prepared,
             resolved_gauge_frame_id,
             fixed_camera_params_id,
             correspondences.observation_manager,
             mapping_config.depth_threshold,
-            backend=resolved_options.ba_plan.backend,
         )
         # What the solve was handed: the model after every pre-solve removal, the pole guard's included.
         num_observations: int = reconstruction.compute_num_observations() + solve.num_diverged + solve.num_past_pole_after

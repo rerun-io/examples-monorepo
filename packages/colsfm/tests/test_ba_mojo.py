@@ -221,6 +221,7 @@ def test_compare_solutions_of_identical_and_moved_models() -> None:
     frame.rig_from_world = pycolmap.Rigid3d(pycolmap.Rotation3d(np.deg2rad([0.0, 1.0, 0.0])) * pose.rotation, np.asarray(pose.translation))
     moved = compare_solutions(a, b, bridged)
     assert np.isclose(moved.rotation_difference_max_deg, 1.0, atol=1e-6) and moved.rotation_difference_median_deg < 1e-6
+    assert moved.reprojection_relative_difference is not None
     assert moved.cost_b > moved.cost_a and moved.reprojection_relative_difference > 0
 
 
@@ -254,4 +255,5 @@ def test_solve_with_mojo_matches_caspar_on_a_tiny_pinhole_model() -> None:
         pytest.skip(f"no GPU answered: {error}")
     comparison = compare_solutions(caspar, mojo, problem_from_reconstruction(start, _config(start), options))
     assert summary.num_residuals > 0
+    assert comparison.reprojection_relative_difference is not None and comparison.cost_relative_difference is not None
     assert abs(comparison.reprojection_relative_difference) < 0.02 and abs(comparison.cost_relative_difference) < 0.02
