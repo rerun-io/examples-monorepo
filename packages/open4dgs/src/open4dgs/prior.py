@@ -21,6 +21,7 @@ Prior maps and their catalog layer ``moge2_prior``: ``open4dgs.prior_layer``.
 
 import dataclasses
 import math
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Literal
@@ -224,6 +225,20 @@ def prior_terms(
     return PriorTerms(depth=l_depth * keep, normal=l_normal * keep, valid_fraction=fraction * keep)
 
 
+_COMPILED_TERMS: list = []
+
+
+def _batch_terms(depth: Tensor):  # noqa: ANN202  # prior_terms or its compiled graph
+    """``prior_terms`` for a camera batch: compiled on CUDA (one graph per batch shape and gate branch; ~0.35 ms of
+    launches instead of ~1 ms eager for six 352x640 cameras, forward + backward), eager elsewhere and while beartype
+    checks the process (``PIXI_DEV_MODE``: it cannot check dynamo's fake tensors against jaxtyping hints)."""
+    if not depth.is_cuda or os.environ.get("PIXI_DEV_MODE") == "1":
+        return prior_terms
+    if not _COMPILED_TERMS:
+        _COMPILED_TERMS.append(torch.compile(prior_terms, dynamic=False))
+    return _COMPILED_TERMS[0]
+
+
 @dataclass
 class MonoPriorLoss:
     """TRiGS ``camera_loss_hook``: the MoGe-2 prior terms of the training cameras that have maps.
@@ -346,7 +361,7 @@ class MonoPriorLoss:
         normals, static, prior_depth = (torch.stack(parts) for parts in zip(*maps, strict=True))
         prior_normals, _ = decode_normals(normals)
         K: Tensor = torch.stack([Ks[c] for c in cams])
-        terms: PriorTerms = prior_terms(depth, alphas, static, prior_depth.float(), prior_normals, K, step, self.config)
+        terms: PriorTerms = _batch_terms(depth)(depth, alphas, static, prior_depth.float(), prior_normals, K, step, self.config)
         if logged:
             kept: Tensor = (terms.valid_fraction > 0).float()
             row: Tensor = torch.stack([terms.depth.detach(), terms.normal.detach(), terms.valid_fraction, kept]).sum(dim=1)
