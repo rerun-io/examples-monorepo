@@ -34,6 +34,7 @@ paths = ["pipelines", "tests", "tools"]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
 sort_by_size = true
 min_confidence = 60
+ignore_names = ["pytestmark"]  # pytest reads it.
 
 [tool.pytest.ini_options]
 # pytest-beartype: beartype checks pipelines only while pytest runs (AGENTS.md, Beartype).
