@@ -12,7 +12,7 @@ pytestmark = [
     pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA GPU (Triton kernels)"),
 ]
 
-DEVICE = "cuda"
+DEVICE = torch.device("cuda")
 
 
 def _bf16_flip_fraction(a: torch.Tensor, b: torch.Tensor) -> float:

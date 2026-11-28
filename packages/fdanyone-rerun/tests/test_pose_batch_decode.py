@@ -4,6 +4,7 @@ import random
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 import torch
@@ -41,11 +42,12 @@ def test_batch_rows_follow_camera_order(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(pose_conditioning, "_encode_pose_batch", lambda _encoder, batch: batch.clone())
     skeletons = tuple(_Skeleton(Path(f"{index}.mp4")) for index in range(5))
     builder = _Builder()
+    # The fakes stand in for the job's collaborators by duck typing; the job only calls the methods they define.
     job = pose_conditioning._PoseEncodingJob(
-        feature_indices=(0, 1, 2, 3, 4), skeletons=skeletons, batch_size=6, packed_views=1, builder=builder
+        feature_indices=(0, 1, 2, 3, 4), skeletons=cast(Any, skeletons), batch_size=6, packed_views=1, builder=cast(Any, builder)
     )
 
-    pose_conditioning._execute_pose_job(job=job, pose_encoder=_Encoder(), conditioning=_Conditioning(), device="cpu")
+    pose_conditioning._execute_pose_job(job=job, pose_encoder=_Encoder(), conditioning=cast(Any, _Conditioning()), device="cpu")
 
     batch = builder.stored
     assert batch is not None and batch.shape == (6, 3, 5, 2, 2) and batch.dtype == torch.bfloat16
