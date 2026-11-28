@@ -81,7 +81,8 @@ def _deform_conv2d_onnx(
         weight,
         offset,
         bias,
-        mask,
+        # Unmasked deformable convolution has no mask input; torchvision's placeholder is 2D, which DeformConv rejects.
+        mask if use_mask else None,
         dilations=[dil_h, dil_w],
         group=n_weight_grps,
         offset_group=n_offset_grps,
