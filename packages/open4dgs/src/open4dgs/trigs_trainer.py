@@ -156,7 +156,7 @@ class SharedTimeGroup:
         self._loss: Tensor | None = None
         self._batches: list[SizeBatch] = []
         self._batch_of: dict[int, tuple[int, int]] = {}
-        self._draws: list[Tensor] = []
+        self._draws: list[tuple[int, ...]] = []
         """Per size batch: how many times the step drew each of its (distinct) cameras."""
         if self._batch_cameras:  # per camera, each draw backpropagates at once: a shared loss would run backward twice
             trainer._step_memo = {}
@@ -174,7 +174,7 @@ class SharedTimeGroup:
                 depth: Tensor | None = info.get("render_depth")
                 depths = depth.unbind(0) if depth is not None else None
                 self._batches.append(SizeBatch(colors.unbind(0), alphas.unbind(0), depths, gamma, info, cams, (colors, alphas, depth)))
-                self._draws.append(torch.tensor([self._cam_group.count(cam) for cam in cams], dtype=torch.float32))
+                self._draws.append(tuple(self._cam_group.count(cam) for cam in cams))
 
     def render(self, group_i: int) -> RenderOut:
         """Camera ``cam_group[group_i]``'s render: its slice of the size batch, or its own rasterize call."""
@@ -277,7 +277,7 @@ class SharedTimeGroup:
             self._loss.backward()
         for batch, draws in zip(self._batches, self._draws, strict=True):
             relocation.accumulate_2d(reloc_state, batch.info, batch_size=n_group)
-            if bool((draws > 1).any()):
+            if max(draws) > 1:
                 add_duplicate_visibility(reloc_state, batch.info, draws)
         outs = [self._outputs[k] for k in RENDER_INPUT_KEYS if self._leaves[k].grad is not None and self._outputs[k].requires_grad]
         grads = [self._leaves[k].grad for k in RENDER_INPUT_KEYS if self._leaves[k].grad is not None and self._outputs[k].requires_grad]
@@ -288,7 +288,7 @@ class SharedTimeGroup:
         self._trainer._step_memo = None
 
 
-def add_duplicate_visibility(reloc_state: dict, info: dict, draws: Float32[Tensor, " c"]) -> None:
+def add_duplicate_visibility(reloc_state: dict, info: dict, draws: tuple[int, ...]) -> None:
     """The relocation's visibility counts of the cameras drawn more than once (``MotionGuidedRelocationStrategy.accumulate_2d``
     counts a row once per rendered camera in which it projects; a camera drawn k times rendered k times before the
     dedupe). Its gradient cue needs no correction: k draws give one render k times the upstream gradient, and the norm of
@@ -300,7 +300,14 @@ def add_duplicate_visibility(reloc_state: dict, info: dict, draws: Float32[Tenso
     vis: Tensor = radii.detach() > 0
     if vis.shape[-1] == 2:
         vis = vis.all(dim=-1)
-    extra: Tensor = ((draws.to(vis.device) - 1.0)[:, None] * vis.to(visible_accum.dtype)).sum(dim=0)
+    # Python-int weights: a host tensor of the draw counts would be a blocking copy (a host sync) every step.
+    extra: Tensor | None = None
+    for j, k in enumerate(draws):
+        if k > 1:
+            term: Tensor = (k - 1) * vis[j].to(visible_accum.dtype)
+            extra = term if extra is None else extra + term
+    if extra is None:
+        return
     active_idx: Tensor | None = info.get("active_idx")
     if extra.shape == visible_accum.shape:
         visible_accum += extra
