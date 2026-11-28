@@ -9,7 +9,6 @@ from std.math import ceildiv, isfinite
 from std.os import getenv
 from std.time import perf_counter_ns
 
-from max.gpu import WARP_SIZE
 from max.gpu.host import DeviceAttribute, DeviceBuffer, DeviceContext
 from layout import TileTensor, row_major
 
@@ -18,6 +17,7 @@ from factor_kernels import (
     BLOCK,
     GATHER_BACKSUBSTITUTE,
     GATHER_NEGATE,
+    POINT_LANES,
     cross_points_kernel,
     linearize_kernel,
     point_gather_kernel,
@@ -45,7 +45,7 @@ comptime SLOT_COST_TRIAL = 1
 comptime SLOT_PRED = 2
 comptime SLOT_PCG = 4
 
-comptime BLOCKS_PER_SM = 4
+comptime BLOCKS_PER_SM = 6
 """Resident blocks per SM the tiled observation kernels aim for; each block then walks consecutive tiles."""
 
 comptime EXIT_MAX_ITERATIONS = 0
@@ -392,7 +392,7 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
         TileTensor(d_poses, row_major((nf, 7))).as_imm(), TileTensor(d_rigs, row_major((nc, 7))).as_imm(),
         TileTensor(d_intr, row_major((nc, MAX_PARAMS))).as_imm(), TileTensor(d_points, row_major((np, 3))).as_imm(),
         t_point_off, point_start, by_point_frame, by_point_camera, by_point_pixels, g, TileTensor(d_h, row_major((max(lay.n_h, 1),))),
-        point_v, point_h, grid_dim=_grid(np * WARP_SIZE), block_dim=BLOCK,
+        point_v, point_h, grid_dim=_grid(np * POINT_LANES), block_dim=BLOCK,
     )
     clock.tick(ctx, "point_linearize")
     launches += 2
@@ -433,7 +433,7 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
                 TileTensor(d_poses, row_major((nf, 7))).as_imm(), TileTensor(d_rigs, row_major((nc, 7))).as_imm(),
                 TileTensor(d_intr, row_major((nc, MAX_PARAMS))).as_imm(), TileTensor(d_points, row_major((np, 3))).as_imm(),
                 t_point_off, point_start, by_point_frame, by_point_camera, by_point_pixels, g, TileTensor(d_h, row_major((max(lay.n_h, 1),))),
-                point_v, point_h, grid_dim=_grid(np * WARP_SIZE), block_dim=BLOCK,
+                point_v, point_h, grid_dim=_grid(np * POINT_LANES), block_dim=BLOCK,
             )
             clock.tick(ctx, "point_linearize")
             launches += 2
@@ -475,7 +475,7 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
             # RcsMatvec: w_cam = M_cc p + H_cc' p - H_cp H_pp^-1 H_pc p (w enters holding M p).
             ctx.enqueue_function[gather_negate](
                 lin_poses, lin_rigs, lin_intr, lin_points, t_pose_off, t_rig_off, t_calib_off, t_point_off, point_start, by_point_frame,
-                by_point_camera, p.as_imm(), g.as_imm(), z, hblk, point_v, point_h, diag, grid_dim=_grid(np * WARP_SIZE), block_dim=BLOCK,
+                by_point_camera, p.as_imm(), g.as_imm(), z, hblk, point_v, point_h, diag, grid_dim=_grid(np * POINT_LANES), block_dim=BLOCK,
             )
             clock.tick(ctx, "point_gather")
             ctx.enqueue_function[cross_all](
@@ -510,7 +510,7 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
         ctx.enqueue_copy(dst_buf=d_w, src_buf=d_s)
         ctx.enqueue_function[gather_backsubstitute](
             lin_poses, lin_rigs, lin_intr, lin_points, t_pose_off, t_rig_off, t_calib_off, t_point_off, point_start, by_point_frame,
-            by_point_camera, w.as_imm(), g.as_imm(), s, hblk, point_v, point_h, diag, grid_dim=_grid(np * WARP_SIZE), block_dim=BLOCK,
+            by_point_camera, w.as_imm(), g.as_imm(), s, hblk, point_v, point_h, diag, grid_dim=_grid(np * POINT_LANES), block_dim=BLOCK,
         )
         clock.tick(ctx, "point_backsubstitute")
         # Retract into the trial state (with s.(g + lambda D s) fused), then score it.

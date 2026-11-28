@@ -277,6 +277,7 @@ def reference_solve(problem: BaProblem, options: BaOptions, dtype: type = np.flo
             r[point_group][:] = 0
             mp = [x.copy() for x in r]
         rho_previous = real(0)
+        r_0_norm2 = real(0)
         pcg_iter = 0
         while pcg_iter < pcg_iter_cap:
             if pcg_iter == 0:
