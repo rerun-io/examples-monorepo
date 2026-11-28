@@ -159,6 +159,8 @@ class RerunTyroConfig:
             # fanning out through explicit sinks. ``spawn``/``save`` each install a
             # single sink that would replace the other, so we spawn the viewer
             # process without auto-connecting and wire both sinks ourselves.
+            # This runs while tyro parses the tool's CLI, before the tool makes any output directory.
+            self.save.parent.mkdir(parents=True, exist_ok=True)
             rr.spawn(
                 port=self.port,
                 connect=False,
@@ -171,6 +173,7 @@ class RerunTyroConfig:
                 rr.FileSink(str(self.save)),
             )
         elif self.save is not None:
+            self.save.parent.mkdir(parents=True, exist_ok=True)  # as above: before the tool makes any output directory
             # This config's stream by name: inside another active recording, a bare rr.save would attach the file to that one.
             rr.save(self.save, recording=self.rec_stream)
         elif not self.headless:

@@ -27,8 +27,7 @@ LAYER_PITCH: int = 15
 NUM_FRAMES: int = 121
 """Frames 4DAnyone generates per view."""
 RUNS_SCRATCH: str = "fdanyone_run"
-"""Under the output root: fdanyone-run's run directories and recordings, scratch of the views step. It must exist before
-the task starts: fdanyone-run opens its recording while it parses its CLI."""
+"""Under the output root: fdanyone-run's run directories and recordings, scratch of the views step."""
 
 
 def views_segment(clip: str, seed: int) -> str:
