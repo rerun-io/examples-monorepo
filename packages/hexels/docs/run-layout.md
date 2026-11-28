@@ -150,8 +150,8 @@ model from the NVS `hexels-v3-30k-pub-*` runs, hence the `surf` methods.
   orbit.json                      # 300 gsplat-cli CameraSpecs, 1920x1080, one closed orbit (gsplat speed --path, gsplat render --camera)
   viewer[/<tag>]/
     <dataset>-<scene>-compare.rrd         # Brush | Hexels side by side + metrics table (custom viewer: compute; stock Rerun: native splats + hexel centres)
-    <dataset>-<scene>-probe-{brush,hexels}.rrd   # one-view recordings for gsplat probe (timeline fps 60: one pose per frame)
-    probe-{brush,hexels}[-r1|-r2].json    # gsplat probe reports (best median of r1/r2 copied to probe-<layout>.json)
+    <dataset>-<scene>-probe-{brush,hexels}.rrd   # one-view recordings for viewer-probe (timeline fps 60: one pose per frame)
+    probe-{brush,hexels}[-r1|-r2].json    # viewer-probe reports (best median of r1/r2 copied to probe-<layout>.json)
     shots/                                # custom-f<frame>.png, stock-f000.png, spin-spin.mp4 (+ frames)
 ```
 

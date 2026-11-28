@@ -1,14 +1,16 @@
-//! Opt-in headless frame timing. Includes UI, compute, composite, and GPU completion;
-//! excludes screenshot readback. The production viewer keeps two hooks for it: process-wide counts of
+//! `viewer-probe`: headless frame timing of the canonical viewer (every extension in `canonical_viewer::EXTENSIONS`),
+//! with the gsplat extension's counters. Includes UI, compute, composite, and GPU completion; excludes screenshot
+//! readback. The production viewer keeps two hooks for it: process-wide counts of
 //! encoded splat frames (`gsplat_viewer::compute_encoded_frames`) and of frames a capacity or capability
 //! fallback drew instead (`gsplat_viewer::fallback_drawn_frames`).
 //! With `--frames-in-flight` the probe queues frames like a swapchain instead of waiting for each one,
 //! so `encoded_frames` shows how many UI frames encoded a new splat image.
 //! Splat frames per second: `encoded_frames / measured_wall_seconds` (both cover the measured frames).
-use gsplat_viewer::application;
-
-use gsplat_cli::camera::CameraSpec;
-use re_viewer::external::{eframe, egui, parking_lot::Mutex};
+use canonical_viewer_extension::wgpu;
+use gsplat_core::{camera_spec::CameraSpec, glam, provenance::Provenance};
+use re_viewer::external::{
+    eframe, egui, parking_lot::Mutex, re_log_channel, re_renderer, re_sdk_types, re_viewer_context,
+};
 use serde::Serialize;
 use std::time::Instant;
 
@@ -57,7 +59,7 @@ impl From<gsplat_viewer::LodSelectionReport> for LodView {
 #[derive(Serialize)]
 struct Report<'a> {
     #[serde(flatten)]
-    provenance: gsplat_cli::Provenance,
+    provenance: Provenance,
     adapter: String,
     boundary: String,
     warmup_frames: usize,
@@ -81,7 +83,7 @@ struct Report<'a> {
     gpu_bytes_views: u64,
     /// 3D views that published an eye in the last frame (the timing camera is the first one).
     views: usize,
-    /// Seconds from the start of `gsplat probe` to the end of the first UI frame that drew splats (encoded or fallback).
+    /// Seconds from the start of `viewer-probe` to the end of the first UI frame that drew splats (encoded or fallback).
     first_splat_frame_seconds: f64,
     /// Peak resident set size of the process (Linux `VmHWM`), at the end of the run.
     peak_rss_bytes: Option<u64>,
@@ -298,7 +300,11 @@ impl FrameProbe {
             )
         };
         let report = Report {
-            provenance: gsplat_cli::Provenance::capture(),
+            // The canonical workspace, whose Cargo.lock built this binary; the gsplat extension links Brush.
+            provenance: Provenance::capture(
+                &Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
+                include_str!("../../../../../../recipes/brush-src/recipe.yaml"),
+            ),
             adapter: self.state.adapter.get_info().name,
             boundary: format!(
                 "headless UI step + compute + Rerun composite + egui paint + GPU completion{completion}; no pixel readback; no idle wait"
@@ -335,16 +341,17 @@ impl FrameProbe {
 use re_sdk_types::View as _;
 use re_viewer_context::{IdentifiedViewSystem, ViewContextSystem};
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, OnceLock},
 };
 
-#[derive(clap::Args)]
-pub struct Args {
+/// Measure headless canonical-viewer frames on a recording and save a JSON report (and the last frame as a PNG).
+#[derive(clap::Parser)]
+struct Args {
     rrd: PathBuf,
     #[arg(long)]
     out: PathBuf,
-    #[arg(long, default_value = "1920x1080", value_parser = application::parse_window_size)]
+    #[arg(long, default_value = "1920x1080", value_parser = parse_window_size)]
     window_size: egui::Vec2,
     #[arg(long, default_value_t = 0)]
     port: u16,
@@ -400,7 +407,12 @@ impl ViewContextSystem for ProbeEye {
         }
     }
 }
-pub fn run(cli: Args) -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    run(<Args as clap::Parser>::parse())
+}
+
+fn run(cli: Args) -> anyhow::Result<()> {
     let process_start = Instant::now();
     anyhow::ensure!(
         cli.rrd.is_file(),
@@ -411,6 +423,7 @@ pub fn run(cli: Args) -> anyhow::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     re_log::setup_logging();
+    canonical_viewer::install_hooks();
     let (rx, _server) = re_grpc_server::spawn_with_recv(
         re_grpc_server::ServerListener::bind(std::net::SocketAddr::from((
             [127, 0, 0, 1],
@@ -422,7 +435,8 @@ pub fn run(cli: Args) -> anyhow::Result<()> {
     let state = Arc::new(OnceLock::new());
     let setup_state = state.clone();
     let token = re_viewer::MainThreadToken::i_promise_i_am_on_the_main_thread();
-    let mut setup = application::compute_wgpu_setup();
+    // The device every canonical viewer requests: Rerun's, with each extension's needs (the patched hook).
+    let mut setup = re_viewer::wgpu_options(None).wgpu_setup;
     if let Some(limit) = cli.storage_binding_limit
         && let eframe::egui_wgpu::WgpuSetup::CreateNew(config) = &mut setup
     {
@@ -442,10 +456,10 @@ pub fn run(cli: Args) -> anyhow::Result<()> {
             setup_state
                 .set(cc.wgpu_render_state.clone().expect("probe device"))
                 .ok();
-            let mut app = application::create_app(
+            let mut app = create_app(
                 cc,
                 token,
-                re_viewer::AppEnvironment::Custom("Gaussian splat frame probe".into()),
+                re_viewer::AppEnvironment::Custom("Canonical viewer frame probe".into()),
                 re_viewer::StartupOptions {
                     persist_state: false,
                     hide_welcome_screen: true,
@@ -511,4 +525,52 @@ pub fn run(cli: Args) -> anyhow::Result<()> {
             return Ok(());
         }
     }
+}
+
+/// The canonical viewer's App: `install_hooks` has registered every extension on each new App.
+fn create_app(
+    cc: &eframe::CreationContext<'_>,
+    main_thread_token: re_viewer::MainThreadToken,
+    app_env: re_viewer::AppEnvironment,
+    startup_options: re_viewer::StartupOptions,
+    grpc_rx: re_log_channel::LogReceiver,
+    rrd_path: Option<PathBuf>,
+) -> anyhow::Result<re_viewer::App> {
+    re_viewer::customize_eframe_and_setup_renderer(cc)?;
+    let mut viewer = re_viewer::App::new(
+        main_thread_token,
+        re_build_info::BuildInfo {
+            version: re_build_info::CrateVersion::LOCAL,
+            ..re_build_info::cargo_build_info!()
+        },
+        app_env,
+        startup_options,
+        cc,
+        None, // No custom connection registry
+        re_viewer::AsyncRuntimeHandle::from_current_tokio_runtime_or_wasmbindgen()?,
+    );
+    viewer.add_log_receiver(grpc_rx);
+    if let Some(rrd_path) = rrd_path {
+        viewer.open_url_or_file(&rrd_path.to_string_lossy());
+    }
+    Ok(viewer)
+}
+
+/// Parse positive logical viewport dimensions as `WIDTHxHEIGHT`.
+fn parse_window_size(value: &str) -> anyhow::Result<egui::Vec2> {
+    let (width, height) = value
+        .split_once(['x', 'X'])
+        .ok_or_else(|| anyhow::anyhow!("invalid window size '{value}': expected WIDTHxHEIGHT"))?;
+    let width: f32 = width
+        .trim()
+        .parse()
+        .map_err(|err| anyhow::anyhow!("invalid window width '{width}': {err}"))?;
+    let height: f32 = height
+        .trim()
+        .parse()
+        .map_err(|err| anyhow::anyhow!("invalid window height '{height}': {err}"))?;
+    if !(width > 0.0 && height > 0.0) {
+        anyhow::bail!("invalid window size '{value}': dimensions must be positive");
+    }
+    Ok(egui::vec2(width, height))
 }

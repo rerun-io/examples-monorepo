@@ -1,5 +1,5 @@
 """Per-scene comparison rows for the side-by-side recording: our numbers and the published ones from the benchmark
-table (`runs/TABLE.json`, written by the hexels package), viewer timing from `gsplat probe` / `gsplat speed`."""
+table (`runs/TABLE.json`, written by the hexels package), viewer timing from `viewer-probe` / `gsplat speed`."""
 
 import json
 from dataclasses import dataclass
@@ -121,7 +121,7 @@ class FpsReport:
 @serde
 @dataclass(frozen=True, slots=True)
 class ProbeFrame:
-    """One measured `gsplat probe` frame (read partially)."""
+    """One measured `viewer-probe` frame (read partially)."""
 
     ms: float
     """Full headless viewer frame, milliseconds."""
@@ -130,7 +130,7 @@ class ProbeFrame:
 @serde
 @dataclass(frozen=True, slots=True)
 class ProbeReport:
-    """`gsplat probe --out` report (read partially)."""
+    """`viewer-probe --out` report (read partially)."""
 
     adapter: str
     """GPU adapter name."""
@@ -189,15 +189,15 @@ class MetricRow:
     primitives: int | None = None
     """Primitive count."""
     viewer_ms_median: float | None = None
-    """`gsplat probe` full viewer frame on the orbit, median ms."""
+    """`viewer-probe` full viewer frame on the orbit, median ms."""
     viewer_ms_p95: float | None = None
-    """`gsplat probe` full viewer frame on the orbit, 95th percentile ms."""
+    """`viewer-probe` full viewer frame on the orbit, 95th percentile ms."""
     viewer_gpu_mb: float | None = None
     """Compute renderer GPU memory in the viewer (scene + view), MB."""
     renderer_ms_median: float | None = None
     """`gsplat speed --impl ours` on the orbit (renderer only), median of repeat medians, ms."""
     viewer_gpu: str | None = None
-    """Adapter of the `gsplat probe` report."""
+    """Adapter of the `viewer-probe` report."""
     renderer_gpu: str | None = None
     """Adapter of the `gsplat speed` report."""
     fps_gpu: str | None = None
@@ -223,7 +223,7 @@ def run_row(table: BenchTable, cells: SceneCells, name: str, primitives: int, pr
         cells: The run's row of `table`.
         name: Display name of the model.
         primitives: Primitive count of the model shown.
-        probe: Optional `gsplat probe` report for this model.
+        probe: Optional `viewer-probe` report for this model.
         speed: Optional `gsplat speed` report for this model.
         runs_root: Run layout root holding `<dataset>/<scene>/<method>/{train.json, fps.json}`.
     """

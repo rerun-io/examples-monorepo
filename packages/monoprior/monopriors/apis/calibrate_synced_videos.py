@@ -157,7 +157,7 @@ def main(config: CalibConfig) -> int:
         cloud = cloud[np.isfinite(cloud).all(1)]
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(cloud)
-        plane, inliers = pcd.segment_plane(distance_threshold=config.ground_dist, ransac_n=3, num_iterations=2000)
+        plane, inliers = pcd.segment_plane(distance_threshold=config.ground_dist, ransac_n=3, num_iterations=2000, probability=0.99999999)
         normal: Float64[ndarray, "3"] = np.array(plane[:3], dtype=np.float64)
         normal /= np.linalg.norm(normal)
         ground_pt: Float64[ndarray, "3"] = cloud[inliers].mean(axis=0)

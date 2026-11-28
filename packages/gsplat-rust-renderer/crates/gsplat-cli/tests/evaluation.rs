@@ -1,4 +1,5 @@
 //! Public evaluator contracts, including optional GPU checks.
+use gsplat_cli::camera::BrushCamera as _;
 use gsplat_cli::published::rgb as published_rgb;
 use gsplat_cli::{Convention, Evaluator, pair_directories};
 use image::{DynamicImage, Rgba, RgbaImage};
