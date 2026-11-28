@@ -83,7 +83,7 @@ struct Report<'a> {
     gpu_bytes_views: u64,
     /// 3D views that published an eye in the last frame (the timing camera is the first one).
     views: usize,
-    /// Seconds from the start of `gsplat probe` to the end of the first UI frame that drew splats (encoded or fallback).
+    /// Seconds from the start of `viewer-probe` to the end of the first UI frame that drew splats (encoded or fallback).
     first_splat_frame_seconds: f64,
     /// Peak resident set size of the process (Linux `VmHWM`), at the end of the run.
     peak_rss_bytes: Option<u64>,

@@ -1,5 +1,4 @@
-//! Registration of the compute splat renderer and visualizers, shared by the canonical viewer ([`EXTENSION`]) and the
-//! gsplat native and web viewers.
+//! Registration of the compute splat renderer and visualizers: the canonical viewer's gsplat extension ([`EXTENSION`]).
 
 use crate::visualizer;
 use canonical_viewer_extension::Extension;
@@ -104,5 +103,49 @@ mod tests {
             .iter()
             .map(|(view, component)| ((*view).to_owned(), (*component).to_owned()));
         assert!(declared.eq(expected));
+    }
+
+    #[test]
+    fn custom_spatial_view_keeps_both_explicit_choices() {
+        use re_viewer::external::{parking_lot, re_view_spatial};
+        use re_viewer_context::{ViewClass as _, ViewClassRegistry};
+        use std::sync::Arc;
+
+        let mut registry = ViewClassRegistry::default();
+        let reflection = Arc::new(parking_lot::RwLock::new(
+            re_sdk_types::reflection::reflection().clone(),
+        ));
+        let options = Default::default();
+        let mut fallbacks = Default::default();
+        registry
+            .add_class::<re_view_spatial::SpatialView3D>(&reflection, &options, &mut fallbacks)
+            .unwrap();
+        registry
+            .extend_class(
+                re_view_spatial::SpatialView3D::identifier(),
+                &reflection,
+                &options,
+                &mut fallbacks,
+                register_splat_system,
+            )
+            .unwrap();
+        let visualizers =
+            registry.new_visualizer_collection(re_view_spatial::SpatialView3D::identifier());
+        let mut splats: Vec<_> = visualizers
+            .iter_with_identifiers()
+            .map(|(id, _)| id.to_string())
+            .filter(|id| id.contains("GaussianSplats3D"))
+            .collect();
+        splats.sort();
+        assert_eq!(splats, ["ComputeGaussianSplats3D", "GaussianSplats3D"]);
+        assert!(
+            visualizers
+                .iter_with_identifiers()
+                .any(|(id, _)| id.as_str() == crate::selection::COMPUTE_HEXELS)
+        );
+        assert!(
+            visualizers.iter_with_identifiers().count() > 10,
+            "Other spatial visualizers remain registered"
+        );
     }
 }
