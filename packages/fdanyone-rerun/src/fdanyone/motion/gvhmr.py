@@ -200,8 +200,14 @@ def _run_preprocess(cfg) -> None:
     need_vitpose = not Path(paths.vitpose).exists()
     need_features = not Path(paths.vit_features).exists()
     # ViTPose-H and HMR2 (~2.6 GB checkpoints each) build and load on threads while YOLO tracks: their constructors
-    # read the checkpoints and copy them to the GPU, independent of the boxes.
-    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="gvhmr-load") as loads:
+    # read the checkpoints and copy them to the GPU, independent of the boxes. CUDA's current device is per thread:
+    # the loads select this thread's device, or they would land on cuda:0.
+    with ThreadPoolExecutor(
+        max_workers=2,
+        thread_name_prefix="gvhmr-load",
+        initializer=torch.cuda.set_device,
+        initargs=(torch.cuda.current_device(),),
+    ) as loads:
         vitpose_model = loads.submit(VitPoseExtractor) if need_vitpose else None
         feature_model = loads.submit(Extractor) if need_features else None
         if not Path(paths.bbx).exists():
