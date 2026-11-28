@@ -269,27 +269,21 @@ class SelfAttention(nn.Module):
 
     def forward(self, x: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
         if fused.active(x):
-            return self._forward_fused(x, freqs)
-        q = self.norm_q.forward_inplace(self.q(x))
-        k = self.norm_k.forward_inplace(self.k(x))
-        v = self.v(x)
-        q = rope_apply(q, freqs, self.num_heads)
-        k = rope_apply(k, freqs, self.num_heads)
-        return self.o(attention(q, k, v, self.num_heads, self.attention_backend))
-
-
-    def _project_qkv(self, x: torch.Tensor) -> list[torch.Tensor]:
-        projections = (self.q, self.k, self.v)
-        if all(isinstance(p, Fp8RowwiseLinear) for p in projections):
-            return project_fp8_shared(projections, x)
-        return [projection(x) for projection in projections]
-
-    def _forward_fused(self, x: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
-        q, k, v = self._project_qkv(x)
-        del x
-        tables = fused.rope_tables(freqs)
-        q = fused.rms_norm_rope_(q, self.norm_q.weight, self.norm_q.eps, tables)
-        k = fused.rms_norm_rope_(k, self.norm_k.weight, self.norm_k.eps, tables)
+            projections = (self.q, self.k, self.v)
+            if all(isinstance(p, Fp8RowwiseLinear) for p in projections):
+                q, k, v = project_fp8_shared(projections, x)
+            else:
+                q, k, v = (projection(x) for projection in projections)
+            del x  # the modulation slab, released before attention
+            tables = fused.rope_tables(freqs)
+            q = fused.rms_norm_rope_(q, self.norm_q.weight, self.norm_q.eps, tables)
+            k = fused.rms_norm_rope_(k, self.norm_k.weight, self.norm_k.eps, tables)
+        else:
+            q = self.norm_q.forward_inplace(self.q(x))
+            k = self.norm_k.forward_inplace(self.k(x))
+            v = self.v(x)
+            q = rope_apply(q, freqs, self.num_heads)
+            k = rope_apply(k, freqs, self.num_heads)
         return self.o(attention(q, k, v, self.num_heads, self.attention_backend))
 
 
