@@ -1,9 +1,14 @@
 """Shared fixtures. No workspace package is imported at module level: pytest-beartype hooks imports after this file loads."""
 
+import os
 import socket
 from urllib.parse import urlparse
 
 import pytest
+
+# beartype runs under pytest only; code that cannot run under it (torch.compile of jaxtyping-annotated functions: the
+# batched prior terms) reads this and stays eager.
+os.environ.setdefault("PIXI_DEV_MODE", "1")
 
 SPARK_CATALOG_URL: str = "rerun+http://dgx-spark:51235"
 """The read-only Spark catalog that holds the MAMMA datasets."""

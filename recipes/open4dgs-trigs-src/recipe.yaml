@@ -54,11 +54,33 @@ source:
     # Fix, maths unchanged: rigid_coherence_loss gathers its neighbours with index_select (backward = one index_add_)
     # instead of advanced indexing (backward = a sort-based index_put_ over every dynamic row x K, each step).
     - patches/0009-rigid-loss-index-select.patch
+    # Hook + host-sync fix, maths unchanged: one camera-losses seam in the train loop (a camera group's
+    # ``camera_losses(...)``, None = the per-camera loop) and no unique() of identical active-row sets (a camera
+    # group's cameras share one; unique only re-sorted them, with a host sync). packages/open4dgs
+    # (open4dgs.trigs_trainer.SharedTimeGroup.camera_losses) owns the batched loss.
+    - patches/0010-camera-losses-seam.patch
+    # Fix, maths unchanged: the train step's remaining host syncs (30 -> 3 per step on the production config): dynamic-row
+    # gathers by index_select on one nonzero per step (boolean indexing read the GPU forward and backward, per tensor),
+    # the rigid rows' index once per kNN refresh, no any() guards in front of masked fills / where (_deform, the
+    # static-row pins and gradient zeroing, the class invariants; the quaternion clamp's guarded fallback could never
+    # fire after its clamp_min and is dropped with its guard), the camera list stacked on the
+    # device, the direct active-row query's time as a cached device scalar, and the demoted-row count read only when
+    # the temporal hierarchy needs it. Also the RGB+ED render split once into colour and depth (its backward one
+    # concatenation) instead of sliced twice (each slice's backward a zero fill of the whole render plus a copy).
+    - patches/0011-train-step-host-syncs-2.patch
+    # Hook only: the train loop's optimizer steps go through TrigsTrainer._optimizer_step (default: each optimizer's
+    # step + zero_grad(set_to_none=True)); packages/open4dgs (open4dgs.adam_bf16.fused_step) runs every AdamBf16 in one launch.
+    - patches/0012-optimizer-step-seam.patch
+    # Hook only: the train loop's motion, rigid, opacity, sigma-floor and scale terms go through
+    # TrigsTrainer._core_regularisers (default None = the loop's own code, unchanged); the rigidity-graph refresh runs just
+    # before them instead of between the motion and rigid terms (it reads none of them). packages/open4dgs
+    # (open4dgs.fused_regularisers) computes them in one compiled pass.
+    - patches/0013-core-regularisers-seam.patch
 
 build:
   # Bump with every patch or build script change: the build string hash does not follow the recipe content, and the
   # shared rattler package cache would otherwise hand an older build to the next install.
-  number: 10
+  number: 13
   noarch: python
   script:
     # pixi-build reuses the host prefix between rebuilds: clear the target first.

@@ -49,7 +49,7 @@ as the person, BiRefNet mattes in a crop around the projected body, a body-surfa
 then TRiGS. The model is encoded as Animated SOG and logged into the run's recording; there is no other output file.
 The custom gsplat viewer (`packages/gsplat-rust-renderer`) plays it on `time`; a stock viewer shows one still pose. The
 app embeds that viewer: its gradio-rerun comes from `recipes/gradio-rerun-src` (the fdanyone envs do not take the PyPI
-wheel). CLI defaults: 25,000 steps, prior on (`--person.no-prior`); the app starts at 5,000 steps with the prior on (about 3 to 3.5 min on an
+wheel). CLI defaults: 20,000 steps of the 25,000-step schedule (`--person.train.schedule-steps`), prior on (`--person.no-prior`); the app starts at 5,000 steps with the prior on (about 3 to 3.5 min on an
 RTX 5090; held-out normal error 30° -> 16°). "Depth + normal prior (MoGe-2)" under Advanced settings turns it off for a faster run.
 MoGe-2 runs through TensorRT when monopriors' engine cache already holds an engine for the frames' size on this machine
 (built by an earlier `MoGeV2TrtPredictor` run), else through torch. BiRefNet follows the same rule with its own engine

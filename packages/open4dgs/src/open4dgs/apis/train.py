@@ -172,7 +172,7 @@ class Config:
             dataset=dataset,
             segment_id=self.segment_id,
             compute_missing=self.prior == "auto",
-            config=self.prior_config.at_steps(self.train.steps),
+            config=self.prior_config.at_steps(self.train.horizon),
             output_dir=self.prior_output_dir,
             batch_size=self.prior_batch_size,
             clip_source=f"{self.catalog_url}/{self.dataset}",
