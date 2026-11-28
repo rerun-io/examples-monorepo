@@ -9,6 +9,7 @@
 """
 
 import threading
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
@@ -64,6 +65,9 @@ class RunStreamer:
         self.stop: threading.Event = threading.Event()
         """Set from another thread to cancel: a worker subprocess is stopped at once, the rest at the next stage or step."""
         self.output_dir: Path = config.output_dir.expanduser().resolve()
+        self._logger: ThreadPoolExecutor = ThreadPoolExecutor(1, thread_name_prefix="fdanyone-log")
+        """Logs what needs seconds of decode and encode (source clip, body, generated videos) beside the pipeline."""
+        self._logging: list[Future[None]] = []
 
     def message(self, text: str, step: int = 0) -> None:
         """One progress line, in the log view and on stdout.
@@ -84,13 +88,14 @@ class RunStreamer:
         """Upstream's stage callback: log the canonical clip once it exists, and switch the layout at phase boundaries."""
         raise_if_stopped(self.stop)
         self.message(f"{fraction:4.0%} {label}")
+        # Upstream starts its next worker when this returns: the clip and the body log beside GVHMR and the skeletons.
         if canonical_clip is not None:
-            log_canonical_clip(canonical_clip, self.recording)
+            self._log_in_background(log_canonical_clip, canonical_clip, self.recording)
         if label == CONDITIONING_STAGE:
-            fps: float = self._motion_fps()
-            log_body(load_body(self.output_dir, model_dir()), fps, self.recording)
+            self._log_in_background(self._log_body)
             self.recording.send_blueprint(body_blueprint())
         elif label == GENERATION_STAGE:
+            self._wait_for_logging()  # the canonical clip lives until the run ends, and the denoiser gets the CPU
             self.recording.send_blueprint(diffusion_blueprint(self.config.layout.num_views))
 
     def on_step(self, step_index: int, view_indices: tuple[int, ...] | None, clean_estimate: torch.Tensor) -> None:
@@ -106,20 +111,30 @@ class RunStreamer:
             self.recording.log(preview_entity(view), rr.Image(image).compress(jpeg_quality=85))
         self.recording.reset_time()
 
-    def _motion_fps(self) -> float:
-        """The canonical clip rate, from GVHMR's saved motion."""
+    def _log_body(self) -> None:
+        """The body and the source camera at the canonical clip rate, from GVHMR's saved motion."""
         from fdanyone.motion.result import MotionResult
 
-        return float(MotionResult.load(self.output_dir / "gvhmr").fps)
+        fps: float = float(MotionResult.load(self.output_dir / "gvhmr").fps)
+        log_body(load_body(self.output_dir, model_dir()), fps, self.recording)
+
+    def _log_in_background(self, log: Callable[..., None], *args: object) -> None:
+        self._logging.append(self._logger.submit(log, *args))
+
+    def _wait_for_logging(self) -> None:
+        """Wait for the background logging so far; its first error is raised here."""
+        pending, self._logging = self._logging, []
+        for logged in pending:
+            logged.result()
 
     def run(self) -> RunMetadata:
         """Run the pipeline and stream every phase; returns upstream's run summary."""
         self.recording.send_blueprint(motion_blueprint())
         self.recording.log("world", rr.ViewCoordinates.RIGHT_HAND_Y_UP, static=True)
-        metadata: RunMetadata = run_views(self.config, on_stage=self.on_stage, on_step=self.on_step, cancel=self.stop)
-        # The views' B-frame mp4s are re-encoded for the recording (NVENC, seconds): that runs beside the person's mattes.
-        with ThreadPoolExecutor(1, thread_name_prefix="fdanyone-log-cameras") as pool:
-            cameras: Future[None] = pool.submit(log_cameras, read_camera_rig(self.output_dir), self.output_dir, self.recording)
+        try:
+            metadata: RunMetadata = run_views(self.config, on_stage=self.on_stage, on_step=self.on_step, cancel=self.stop)
+            # The views' B-frame mp4s are re-encoded for the recording (NVENC, seconds): that runs beside the person's mattes.
+            self._log_in_background(log_cameras, read_camera_rig(self.output_dir), self.output_dir, self.recording)
             self.recording.send_blueprint(result_blueprint(self.config.layout.num_views))
             generation = metadata.generation
             self.message(
@@ -128,5 +143,7 @@ class RunStreamer:
             )
             if self.person is not None:
                 self.person_summary = train_person(self.output_dir, self.person, self.recording, report=self.message, cancel=self.stop)
-            cameras.result()
+            self._wait_for_logging()
+        finally:
+            self._logger.shutdown(wait=True, cancel_futures=True)  # a failed or stopped run leaves no logging behind
         return metadata

@@ -128,3 +128,25 @@ def test_a_camera_logging_error_fails_the_run(tmp_path: Path, monkeypatch: pytes
     streamer, _ = _streamer(tmp_path)
     with pytest.raises(RuntimeError, match="Mp4Reader failed"):
         streamer.run()
+
+
+def test_the_source_clip_logs_beside_gvhmr_and_is_in_before_denoising(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+
+    from fdanyone_rerun import stream
+
+    release = threading.Event()
+    logged: list[Path] = []
+
+    def log_canonical_clip(clip: Path, recording: rr.RecordingStream) -> None:
+        assert release.wait(timeout=10)
+        logged.append(clip)
+
+    monkeypatch.setattr(stream, "log_canonical_clip", log_canonical_clip)
+    streamer, _ = _streamer(tmp_path)
+    clip: Path = tmp_path / "canonical_clip.mp4"
+    streamer.on_stage("Recovering human motion with GVHMR", 0.15, clip)  # returns while the clip is still being logged
+    assert logged == []
+    release.set()
+    streamer.on_stage(GENERATION_STAGE, 0.45, None)  # waits for it: upstream deletes the clip when the run ends
+    assert logged == [clip]
