@@ -381,16 +381,16 @@ platforms = ["linux-64", "linux-aarch64"]
 # Depth PNGs for catalog and Rerun logging (packages/depth-png).
 depth-png = { path = "packages/depth-png" }
 python = "3.12.*"
-icecream = ">=2.1.3,<2.2"
+icecream = ">=2.1.3"
 einops = ">=0.8.0,<0.9"
 omegaconf = "*"
 scipy = "*"
 timm = ">=1.0.15,<2"
-matplotlib = ">=3.8.3,<3.9"
-pandas = ">=2.3.3,<2.4"
-jupyterlab = ">=4.2.0,<4.3"
+matplotlib = ">=3.8.3"
+pandas = ">=2.3.3"
+jupyterlab = ">=4.2.0"
 tyro = ">=0.9.1,<0.10"
-open3d = ">=0.19.0,<0.20"
+open3d = ">=0.19.0"
 imageio = ">=2.37.0,<3"
 # monopriors.gpu_image reproduces cv2.remap's OpenCV 5 rule (exact float coordinates); OpenCV 4 snaps
 # float maps to 1/32 px and rounds half up.
@@ -4421,8 +4421,10 @@ description = "What Animated SOG costs a trained run (--run <run dir>, --setting
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════
 [environments]
-colsfm = { features = ["common", "cuda", "colsfm", "torchcodec", "ffmpeg"], solve-group = "colsfm", no-default-feature = true }
-colsfm-dev = { features = ["common", "cuda", "colsfm", "dev", "torchcodec", "ffmpeg"], solve-group = "colsfm", no-default-feature = true }
+# solve-group "stages": capture_to_splat's stage envs share one version of each package (one family per PR; the pipelines
+# test test_every_step_of_a_profile_runs_in_one_solve_group checks it). Each env keeps its own features.
+colsfm = { features = ["common", "cuda", "colsfm", "torchcodec", "ffmpeg"], solve-group = "stages", no-default-feature = true }
+colsfm-dev = { features = ["common", "cuda", "colsfm", "dev", "torchcodec", "ffmpeg"], solve-group = "stages", no-default-feature = true }
 pipelines = { features = ["common", "pipelines", "ffmpeg"], solve-group = "pipelines", no-default-feature = true }
 pipelines-dev = { features = ["common", "pipelines", "dev", "ffmpeg"], solve-group = "pipelines", no-default-feature = true }
 agent-traces = { features = ["agent-traces", "ffmpeg"], solve-group = "agent-traces", no-default-feature = true }
@@ -4509,14 +4511,14 @@ monoprior = { features = [
     "cuda",
     "monoprior",
     "ffmpeg",
-], solve-group = "monoprior", no-default-feature = true }
+], solve-group = "stages", no-default-feature = true }
 monoprior-dev = { features = [
     "common",
     "cuda",
     "monoprior",
     "dev",
     "ffmpeg",
-], solve-group = "monoprior", no-default-feature = true }
+], solve-group = "stages", no-default-feature = true }
 monoprior-catalog = { features = [
     "common",
     "rerun-prerelease",
@@ -4525,7 +4527,7 @@ monoprior-catalog = { features = [
     "monoprior-catalog",
     "torchcodec",
     "ffmpeg",
-], solve-group = "monoprior-catalog", no-default-feature = true }
+], solve-group = "stages", no-default-feature = true }
 monoprior-catalog-dev = { features = [
     "common",
     "rerun-prerelease",
@@ -4535,7 +4537,7 @@ monoprior-catalog-dev = { features = [
     "dev",
     "torchcodec",
     "ffmpeg",
-], solve-group = "monoprior-catalog", no-default-feature = true }
+], solve-group = "stages", no-default-feature = true }
 prompt-da = { features = [
     "common",
     "cuda",
@@ -4656,7 +4658,7 @@ posekit = { features = [
     "posekit-yolo",
     "torchcodec",
     "ffmpeg",
-], solve-group = "posekit", no-default-feature = true }
+], solve-group = "stages", no-default-feature = true }
 posekit-hands = { features = ["common", "cuda", "posekit-hands", "posekit", "soma-runtime", "posekit-egohand", "posekit-wilor", "posekit-yolo", "torchcodec", "ffmpeg"], solve-group = "posekit-hands", no-default-feature = true }
 posekit-hands-dev = { features = ["common", "cuda", "posekit-hands", "posekit", "soma-runtime", "posekit-egohand", "posekit-wilor", "posekit-yolo", "dev", "torchcodec", "ffmpeg"], solve-group = "posekit-hands", no-default-feature = true }
 posekit-body = { features = ["common", "cuda", "posekit-body", "posekit", "posekit-sam3d-body", "torchcodec", "ffmpeg"], solve-group = "posekit-body", no-default-feature = true }
@@ -4669,7 +4671,7 @@ posekit-dev = { features = [
     "dev",
     "torchcodec",
     "ffmpeg",
-], solve-group = "posekit", no-default-feature = true }
+], solve-group = "stages", no-default-feature = true }
 lamp = { features = [
     "common",
     "cuda",
@@ -4918,7 +4920,7 @@ dataforge-cuda = { features = [
     "dataforge-cuda",
     "ffmpeg",
     "torchcodec",
-], solve-group = "dataforge-cuda", no-default-feature = true }
+], solve-group = "stages", no-default-feature = true }
 dataforge-cuda-dev = { features = [
     "common",
     "dataforge",
@@ -4926,7 +4928,7 @@ dataforge-cuda-dev = { features = [
     "dev",
     "ffmpeg",
     "torchcodec",
-], solve-group = "dataforge-cuda", no-default-feature = true }
+], solve-group = "stages", no-default-feature = true }
 handtrack = { features = [
     "catalog-common",
     "rerun-prerelease",
@@ -5046,9 +5048,9 @@ slam-rs-osx-dev = { features = [
     "dev",
     "ffmpeg",
 ], solve-group = "slam-rs-osx", no-default-feature = true }
-slam-rs-cuda = { features = ["catalog-common", "rerun-prerelease", "cuda", "slam-rs", "slam-rs-nvdec", "torchcodec", "ffmpeg"], solve-group = "slam-rs-cuda", no-default-feature = true }
+slam-rs-cuda = { features = ["catalog-common", "rerun-prerelease", "cuda", "slam-rs", "slam-rs-nvdec", "torchcodec", "ffmpeg"], solve-group = "stages", no-default-feature = true }
 slam-rs-pkg = { features = ["slam-rs-pkg", "ffmpeg"], solve-group = "slam-rs-pkg", no-default-feature = true }
-slam-rs-cuda-dev = { features = ["catalog-common", "rerun-prerelease", "cuda", "slam-rs", "slam-rs-nvdec", "dev", "torchcodec", "ffmpeg"], solve-group = "slam-rs-cuda", no-default-feature = true }
+slam-rs-cuda-dev = { features = ["catalog-common", "rerun-prerelease", "cuda", "slam-rs", "slam-rs-nvdec", "dev", "torchcodec", "ffmpeg"], solve-group = "stages", no-default-feature = true }
 mamma = { features = [
     "common",
     "cuda",
