@@ -1,22 +1,10 @@
-//! Tests of `gsplat_core::camera_spec` (re-exported as `gsplat_cli::camera`) with the CLI's projection helper.
+//! Tests of `gsplat_core::camera_spec` (re-exported as `gsplat_cli::camera`) that need the CLI's projection helper or
+//! Brush; the pure conversion and validation tests sit beside `camera_spec`.
 use crate::camera::*;
 use crate::common::project;
 use glam::Mat4;
 use glam::Vec3;
 use gsplat_core::CameraModel;
-#[test]
-fn nerf_axis_conversion_round_trip() {
-    let pose = Mat4::from_translation(Vec3::new(1.0, 2.0, 3.0));
-    let cv = opengl_to_opencv(pose);
-    assert_eq!(cv.transform_point3(Vec3::Z), Vec3::new(1.0, 2.0, 2.0));
-    assert_eq!(cv.transform_vector3(Vec3::Y), -Vec3::Y);
-    assert!(opengl_to_opencv(cv).abs_diff_eq(pose, 1e-6));
-}
-#[test]
-fn colmap_pose_inverts_world_to_camera() {
-    let world = colmap_to_world([1.0, 0.0, 0.0, 0.0], [-1.0, -2.0, -3.0]);
-    assert_eq!(world.transform_point3(Vec3::ZERO), Vec3::new(1.0, 2.0, 3.0));
-}
 
 #[test]
 fn known_point_projects_to_expected_pixel() {
@@ -36,16 +24,6 @@ fn known_point_projects_to_expected_pixel() {
     );
 }
 
-#[test]
-fn rejects_nonrigid_pose_and_zero_focal_length() {
-    let mut cam = CameraSpec::from_nerf(Mat4::IDENTITY, 1.0, 800, 600);
-    assert!(cam.validate().is_ok());
-    cam.fx = 0.0;
-    assert!(cam.validate().is_err());
-    cam.fx = 200.0;
-    cam.world_from_camera[0][0] = 2.0;
-    assert!(cam.validate().is_err());
-}
 #[test]
 fn resize_preserves_normalized_projection() {
     let cam = CameraSpec::from_nerf(Mat4::IDENTITY, 1.0, 800, 600);
@@ -130,14 +108,6 @@ fn colmap_rotation_round_trip_and_projection() {
         project(&camera, world.transform_point3(glam::Vec3::Z))
             .abs_diff_eq(glam::Vec2::new(320.0, 240.0), 1e-3)
     );
-}
-#[test]
-fn unknown_camera_fields_are_rejected() {
-    let c = CameraSpec::from_nerf(Mat4::IDENTITY, 1.0, 640, 480);
-    let text = serde_json::to_string(&c)
-        .unwrap()
-        .replacen('{', "{\"typo\":1,", 1);
-    assert!(serde_json::from_str::<CameraSpec>(&text).is_err());
 }
 #[test]
 fn orbit_looks_at_center_and_closes() {

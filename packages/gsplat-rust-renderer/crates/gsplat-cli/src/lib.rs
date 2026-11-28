@@ -30,5 +30,8 @@ mod common;
 
 /// The provenance of this workspace (packages/gsplat-rust-renderer) for metric reports.
 pub fn provenance() -> Provenance {
-    Provenance::capture(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+    Provenance::capture(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
+        include_str!("../../../../../recipes/brush-src/recipe.yaml"),
+    )
 }

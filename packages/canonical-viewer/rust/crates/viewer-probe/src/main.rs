@@ -300,7 +300,11 @@ impl FrameProbe {
             )
         };
         let report = Report {
-            provenance: Provenance::capture(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")),
+            // The canonical workspace, whose Cargo.lock built this binary; the gsplat extension links Brush.
+            provenance: Provenance::capture(
+                &Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
+                include_str!("../../../../../../recipes/brush-src/recipe.yaml"),
+            ),
             adapter: self.state.adapter.get_info().name,
             boundary: format!(
                 "headless UI step + compute + Rerun composite + egui paint + GPU completion{completion}; no pixel readback; no idle wait"
@@ -431,7 +435,8 @@ fn run(cli: Args) -> anyhow::Result<()> {
     let state = Arc::new(OnceLock::new());
     let setup_state = state.clone();
     let token = re_viewer::MainThreadToken::i_promise_i_am_on_the_main_thread();
-    let mut setup = wgpu_setup();
+    // The device every canonical viewer requests: Rerun's, with each extension's needs (the patched hook).
+    let mut setup = re_viewer::wgpu_options(None).wgpu_setup;
     if let Some(limit) = cli.storage_binding_limit
         && let eframe::egui_wgpu::WgpuSetup::CreateNew(config) = &mut setup
     {
@@ -520,28 +525,6 @@ fn run(cli: Args) -> anyhow::Result<()> {
             return Ok(());
         }
     }
-}
-
-/// The device the canonical viewer requests (Rerun's descriptor plus every extension's needs), as the patched
-/// `re_viewer::wgpu_options` builds it for `rerun-canonical`; that function is crate-private.
-fn wgpu_setup() -> eframe::egui_wgpu::WgpuSetup {
-    let backends = re_renderer::device_caps::instance_descriptor(None).backends;
-    eframe::egui_wgpu::WgpuSetup::CreateNew(eframe::egui_wgpu::WgpuSetupCreateNew {
-        instance_descriptor: re_renderer::device_caps::instance_descriptor(None),
-        native_adapter_selector: Some(Arc::new(move |adapters, surface| {
-            re_renderer::device_caps::select_adapter(adapters, backends, surface)
-                // egui_wgpu's adapter selector returns `Result<_, String>`.
-                .map_err(|err| err.to_string())
-        })),
-        device_descriptor: Arc::new(|adapter| {
-            canonical_viewer::request_device_needs(
-                adapter,
-                re_renderer::device_caps::DeviceCaps::from_adapter_without_validation(adapter)
-                    .device_descriptor(),
-            )
-        }),
-        ..eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle()
-    })
 }
 
 /// The canonical viewer's App: `install_hooks` has registered every extension on each new App.

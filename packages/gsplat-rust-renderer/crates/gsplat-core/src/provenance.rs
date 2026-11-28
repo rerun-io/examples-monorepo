@@ -13,8 +13,10 @@ pub struct Provenance {
 }
 
 impl Provenance {
-    /// The identity of the Cargo workspace at `root`: its git commit (or `GSPLAT_SOURCE_SHA`) and its Cargo.lock.
-    pub fn capture(root: &Path) -> Self {
+    /// The identity of the Cargo workspace at `root`: its git commit (or `GSPLAT_SOURCE_SHA`) and its Cargo.lock, and
+    /// the Brush revision and patch named by `brush_recipe` (the text of `recipes/brush-src/recipe.yaml`, which the
+    /// calling binary embeds).
+    pub fn capture(root: &Path, brush_recipe: &str) -> Self {
         let source_sha = std::env::var("GSPLAT_SOURCE_SHA")
             .ok()
             .filter(|value| !value.trim().is_empty())
@@ -29,12 +31,11 @@ impl Provenance {
                     .success()
                     .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
             });
-        let recipe = include_str!("../../../../../recipes/brush-src/recipe.yaml");
-        let revision = recipe
+        let revision = brush_recipe
             .lines()
             .find_map(|line| line.trim().strip_prefix("rev: "))
             .expect("Brush recipe revision");
-        let patch = recipe
+        let patch = brush_recipe
             .lines()
             .find_map(|line| line.trim().strip_prefix("- patches/"))
             .expect("Brush observer patch");
