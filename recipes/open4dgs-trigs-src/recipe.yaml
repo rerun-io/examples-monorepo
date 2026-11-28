@@ -64,14 +64,12 @@ source:
     # the rigid rows' index once per kNN refresh, no any() guards in front of masked fills / where (_deform, the
     # quaternion clamp, the static-row pins and gradient zeroing, the class invariants), the camera list stacked on the
     # device, the direct active-row query's time as a cached device scalar, and the demoted-row count read only when
-    # the temporal hierarchy needs it.
+    # the temporal hierarchy needs it. Also the RGB+ED render split once into colour and depth (its backward one
+    # concatenation) instead of sliced twice (each slice's backward a zero fill of the whole render plus a copy).
     - patches/0011-train-step-host-syncs-2.patch
     # Hook only: the train loop's optimizer steps go through TrigsTrainer._optimizer_step (default: each optimizer's
     # step + zero_grad(set_to_none=True)); packages/open4dgs (open4dgs.adam_bf16.fused_step) runs every AdamBf16 in one launch.
     - patches/0012-optimizer-step-seam.patch
-    # Fix, maths unchanged: the RGB+ED render is split once into colour and depth (its backward one concatenation)
-    # instead of sliced twice (each slice's backward a zero fill of the whole render plus a copy, then an add).
-    - patches/0013-rgbd-split.patch
 
 build:
   # Bump with every patch or build script change: the build string hash does not follow the recipe content, and the

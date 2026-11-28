@@ -73,7 +73,19 @@ diff --git a/src/trigs/core/trainer.py b/src/trigs/core/trainer.py
              width=cameras.width_for(cams[0]),
              height=cameras.height_for(cams[0]),
              sh_degree=inputs["sh_degree"],
-@@ -4594,9 +4594,8 @@
+@@ -3380,8 +3380,9 @@
+             **inputs.get("raster_kwargs", {}),
+         )
+         if config.render_depth:
+-            info["render_depth"] = render_colors[..., 3:4]
+-            render_colors = render_colors[..., :3]
++            # One split, not two slices: each slice's backward fills a zero tensor of the whole RGB+ED render and the two
++            # are then added; the split's backward is one concatenation of the two gradients.
++            render_colors, info["render_depth"] = render_colors.split([3, 1], dim=-1)
+ 
+         if info.get("means2d") is not None and info["means2d"].requires_grad:
+             info["means2d"].retain_grad()
+@@ -4594,9 +4595,8 @@
          if "is_static" not in params:
              return
  
@@ -84,7 +96,7 @@ diff --git a/src/trigs/core/trainer.py b/src/trigs/core/trainer.py
  
          t_max = float(max(n_frames - 1, 0)) / max(float(config.fps), 1e-6)
          t_mid = 0.5 * t_max
-@@ -4629,9 +4628,8 @@
+@@ -4629,9 +4629,8 @@
          if "is_static" not in params:
              return
  
@@ -95,7 +107,7 @@ diff --git a/src/trigs/core/trainer.py b/src/trigs/core/trainer.py
  
          for name in (
              "times", "log_durations",
-@@ -4697,9 +4695,10 @@
+@@ -4697,9 +4696,10 @@
              q = params["quats"].data
              q.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
              norms = q.norm(dim=-1, keepdim=True).clamp_min(1e-8)
@@ -109,7 +121,7 @@ diff --git a/src/trigs/core/trainer.py b/src/trigs/core/trainer.py
              params["quats"].data.copy_(q / norms)
  
          if config.clamp_mu_t and "times" in params:
-@@ -5243,6 +5242,7 @@
+@@ -5243,6 +5243,7 @@
              return nn_indices, dyn_rows
  
          nn_indices, rigid_loss_rows = _refresh_rigid_knn_for_current_rows()
@@ -117,7 +129,7 @@ diff --git a/src/trigs/core/trainer.py b/src/trigs/core/trainer.py
  
          if config.diagnostics and nn_indices is not None:
              with torch.no_grad():
-@@ -5507,14 +5507,16 @@
+@@ -5507,14 +5508,16 @@
                  getattr(config, "static_exclude_from_motion_losses", True)
                  or getattr(config, "static_exclude_from_temporal_reg", True)
              ):
@@ -138,7 +150,7 @@ diff --git a/src/trigs/core/trainer.py b/src/trigs/core/trainer.py
                      )
                  else:
                      motion_loss = params["means"].new_zeros(())
-@@ -5545,6 +5547,7 @@
+@@ -5545,6 +5548,7 @@
                          and step % config.knn_recompute_every == 0)
                  ):
                      nn_indices, rigid_loss_rows = _refresh_rigid_knn_for_current_rows()
@@ -146,7 +158,7 @@ diff --git a/src/trigs/core/trainer.py b/src/trigs/core/trainer.py
                      rigid_knn_dirty = False
  
                  zeta_base_full = torch.cat([params["zeta_base_t"], params["zeta_base_r"]], dim=-1)
-@@ -5556,7 +5559,7 @@
+@@ -5556,7 +5560,7 @@
                      rigid_loss = params["means"].new_zeros(())
                  elif getattr(config, "static_exclude_from_motion_losses", True) and "is_static" in params:
                      rigid_loss = rigid_coherence_loss(
@@ -155,7 +167,7 @@ diff --git a/src/trigs/core/trainer.py b/src/trigs/core/trainer.py
                          nn_indices, lambda_c=config.rigid_color_lambda,
                          detach_color_weight=rigid_color_detach,
                      )
-@@ -5573,7 +5576,7 @@
+@@ -5573,7 +5577,7 @@
              if getattr(config, "static_exclude_from_temporal_reg", True) and "is_static" in params:
                  dyn_rows_for_reg = dyn_rows_step
                  if dyn_rows_step_any:
@@ -164,7 +176,7 @@ diff --git a/src/trigs/core/trainer.py b/src/trigs/core/trainer.py
                  else:
                      reg_loss = params["means"].new_zeros(())
              else:
-@@ -5584,7 +5587,7 @@
+@@ -5584,7 +5588,7 @@
                  dyn_rows_for_sigma = dyn_rows_step
                  if dyn_rows_step_any:
                      sigma_floor_loss = torch.clamp(
@@ -173,7 +185,7 @@ diff --git a/src/trigs/core/trainer.py b/src/trigs/core/trainer.py
                      ).pow(2).mean()
                  else:
                      sigma_floor_loss = params["means"].new_zeros(())
-@@ -5961,7 +5964,8 @@
+@@ -5961,7 +5965,8 @@
              # Re-pin static rows and enforce class invariants as a final hard clamp
              # after relocation/static-convert.
              self._pin_static_background_rows(params, config, n_frames)

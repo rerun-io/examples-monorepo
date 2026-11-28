@@ -1,7 +1,7 @@
 diff --git a/src/trigs/core/trainer.py b/src/trigs/core/trainer.py
 --- a/src/trigs/core/trainer.py
 +++ b/src/trigs/core/trainer.py
-@@ -4573,6 +4573,12 @@
+@@ -4574,6 +4574,12 @@
              return max(int(total.reshape(()).item()), 1)
          return max(int(params["means"].shape[0]), 1)
  
@@ -14,7 +14,7 @@ diff --git a/src/trigs/core/trainer.py b/src/trigs/core/trainer.py
      def _const_tensor(self, value, device, dtype) -> Tensor:
          """``torch.tensor(value)`` on ``device``; a seam for a cached version (never modify the result in place)."""
          return torch.tensor(value, device=device, dtype=dtype)
-@@ -5733,9 +5739,7 @@
+@@ -5734,9 +5740,7 @@
                  )
                  opdiag_logit_before = params["opacities"].data.reshape(-1).clone()
  
