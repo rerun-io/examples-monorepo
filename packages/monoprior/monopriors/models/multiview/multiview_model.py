@@ -386,9 +386,9 @@ def generate_multiview_pred(
             width=processed_img.shape[1],
             height=processed_img.shape[0],
         )
-        extri: Extrinsics = Extrinsics(cam_R_world=extri[:, :3], cam_t_world=extri[:, 3])
+        extri_param: Extrinsics = Extrinsics(cam_R_world=extri[:, :3], cam_t_world=extri[:, 3])
 
-        pinhole_param = PinholeParameters(name=cam_name, intrinsics=intri_param, extrinsics=extri)
+        pinhole_param = PinholeParameters(name=cam_name, intrinsics=intri_param, extrinsics=extri_param)
 
         depth_map = depth_map.squeeze()
         processed_min: float = float(processed_img.min())

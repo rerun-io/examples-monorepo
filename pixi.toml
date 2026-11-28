@@ -383,7 +383,8 @@ depth-png = { path = "packages/depth-png" }
 python = "3.12.*"
 icecream = ">=2.1.3"
 einops = ">=0.8.0,<0.9"
-omegaconf = "*"
+# posekit (solve group "stages") runs sam2 on Hydra 1.3, which needs omegaconf <2.4.
+omegaconf = "<2.4"
 scipy = "*"
 timm = ">=1.0.15,<2"
 matplotlib = ">=3.8.3"
@@ -1036,6 +1037,8 @@ scikit-image = "*"
 posekit = { path = "packages/posekit", editable = true }
 trtkit = { path = "packages/trtkit", editable = true }
 sam2 = { path = "packages/sam2-streaming", editable = true }
+# sam2 initializes Hydra with version_base="1.2", which Hydra 1.4 rejects.
+hydra-core = ">=1.3.2,<1.4"
 onnx = "*"
 onnxscript = "*"
 
@@ -1077,8 +1080,8 @@ platforms = ["linux-64", "linux-aarch64"]
 [feature.nvdec444.pypi-dependencies]
 pynvvideocodec = "==2.2.4"
 
-# These four existing Transformers wrappers have decorated .to() stubs that
-# pyrefly misbinds as unbound methods in this isolated dependency solve.
+# Transformers types its wrappers' .to() as a decorated function that pyrefly misbinds as an unbound method,
+# and Sam3Config.vision_config as `dict | PreTrainedConfig | None`; the base posekit lane uses the same baseline.
 [feature.posekit-egohand.activation.env]
 PYREFLY_EXTRA_ARGS = "--baseline ${PIXI_PROJECT_ROOT}/packages/posekit/egohand-pyrefly-baseline.json"
 
@@ -1239,7 +1242,7 @@ PYREFLY_TARGET = "src/posekit tests tools"
 # soma-runtime + posekit-egohand). The base lane excludes all three; posekit-body and posekit-hands come
 # before posekit in their envs (the first feature's value wins) and exclude only what they lack.
 # `--project-excludes=<glob>`: with a space the task shell would expand the glob into files to check.
-PYREFLY_EXTRA_ARGS = "--project-excludes=src/posekit/models/sam3d_body*.py --project-excludes=src/posekit/body_rerun.py --project-excludes=src/posekit/apis/body3d_mv_video.py --project-excludes=tests/test_body_fast_*.py --project-excludes=src/posekit/models/wilor.py --project-excludes=src/posekit/models/wilor_net/*.py --project-excludes=src/posekit/models/egohand_capture.py --project-excludes=src/posekit/models/egohand_cuda_crops.py --project-excludes=src/posekit/models/egohand_mhr.py --project-excludes=src/posekit/models/egohand_soma.py --project-excludes=src/posekit/models/egohand_tensor.py"
+PYREFLY_EXTRA_ARGS = "--baseline ${PIXI_PROJECT_ROOT}/packages/posekit/egohand-pyrefly-baseline.json --project-excludes=src/posekit/models/sam3d_body*.py --project-excludes=src/posekit/body_rerun.py --project-excludes=src/posekit/apis/body3d_mv_video.py --project-excludes=tests/test_body_fast_*.py --project-excludes=src/posekit/models/wilor.py --project-excludes=src/posekit/models/wilor_net/*.py --project-excludes=src/posekit/models/egohand_capture.py --project-excludes=src/posekit/models/egohand_cuda_crops.py --project-excludes=src/posekit/models/egohand_mhr.py --project-excludes=src/posekit/models/egohand_soma.py --project-excludes=src/posekit/models/egohand_tensor.py"
 
 [feature.posekit.tasks.posekit-video-pose]
 cmd = "python tools/demos/video_pose.py"
@@ -2588,12 +2591,14 @@ slam-rs = { path = "packages/slam-rs", editable = true }
 dav1d = "1.2.*"
 # dataforge (below) imports these at module load (transports, gen_humanego_depth, insta360), and slam-rs-register runs its register tool.
 requests = "*"
+httpx = "*"
 depth-png = { path = "packages/depth-png" }
 insta360-io = { path = "packages/insta360-io" }
 
 [feature.slam-rs.target.linux-aarch64.dependencies]
 dav1d = "1.2.*"
 requests = "*"
+httpx = "*"
 depth-png = { path = "packages/depth-png" }
 insta360-io = { path = "packages/insta360-io" }
 
