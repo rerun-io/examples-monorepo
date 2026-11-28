@@ -51,7 +51,10 @@ CASES = {
     "pinhole_rig_sensor_free": (CameraModel.PINHOLE, (("rig_cameras", 3), ("sensor_free", True))),
     "fisheye_rig_sensor_free": (CameraModel.OPENCV_FISHEYE, (("rig_cameras", 2), ("sensor_free", True))),
     "joint_rig_intrinsics_free": (CameraModel.PINHOLE, (("rig_cameras", 2), ("sensor_free", True), ("intrinsics_free", True), ("focal_noise", 0.01))),
-    "mixed_masks": (CameraModel.SIMPLE_RADIAL, (("rig_cameras", 3), ("sensor_free", True), ("intrinsics_free", True), ("focal_noise", 0.01), ("mixed", True))),
+    "mixed_masks": (
+        CameraModel.SIMPLE_RADIAL,
+        (("rig_cameras", 3), ("sensor_free", True), ("intrinsics_free", True), ("focal_noise", 0.01), ("mixed", True)),
+    ),
     "points_fixed": (CameraModel.PINHOLE, (("points_fixed", True),)),
 }
 """Name -> (model, `make_problem` flags). Two flags edit the masks afterwards: `mixed` fixes every fourth point and
