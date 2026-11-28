@@ -6,16 +6,13 @@ there and writes the accepted state back. Quaternions are normalised here, at wr
 """
 
 import time
-from typing import Final, NamedTuple, TypeAlias
+from typing import Final, NamedTuple
 
 import numpy as np
 from jaxtyping import Float32, Float64
 from numpy import ndarray
 
 from caspar_mojo.problem import INTRINSICS_COUNT, BaOptions, BaProblem, BaResult, CameraModel
-
-ArraySpec: TypeAlias = tuple[int, ...]
-"""`(address, *shape)` of a contiguous numpy array, the extension's array argument."""
 
 EXIT_REASONS: Final[tuple[str, ...]] = ("MAX_ITERATIONS", "CONVERGED_DIAG_EXIT", "CONVERGED_SCORE_THRESHOLD")
 """CASPAR's `ExitReason` names, indexed by the extension's exit code."""
@@ -43,7 +40,8 @@ class Linearization(NamedTuple):
     """Dense J^T J blocks per non-empty group, same group order as the gradient."""
 
 
-def _spec(array: ndarray) -> ArraySpec:
+def _spec(array: ndarray) -> tuple[int, ...]:
+    """`(address, *shape)` of a contiguous numpy array, the extension's array argument."""
     return (array.ctypes.data, *array.shape)
 
 
