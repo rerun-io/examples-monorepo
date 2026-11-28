@@ -123,6 +123,22 @@ class BaOptions:
 
 
 @dataclass(frozen=True, slots=True)
+class BaIteration:
+    """One Levenberg-Marquardt trial, the fields of CASPAR's verbose iteration log."""
+
+    cost_tried: float
+    """Cost at the retracted candidate."""
+    cost_best: float
+    """Best cost after the accept or reject."""
+    damping: float
+    """Damping the trial was solved with."""
+    pcg_iterations: int
+    """PCG iterations the trial ran."""
+    accepted: bool
+    """Whether the candidate became the current state."""
+
+
+@dataclass(frozen=True, slots=True)
 class BaResult:
     """The refined state and how the solve went. Fixed nodes come back unchanged."""
 
@@ -148,3 +164,6 @@ class BaResult:
     """Wall time of the solver loop on the GPU, uploads and downloads excluded."""
     total_seconds: float
     """Wall time of the whole call, host arrays in to host arrays out."""
+    trace: tuple[BaIteration, ...] = ()
+    """The trials in order. After convergence float32 summation order decides accept or reject, so the length of the
+    tail varies from run to run (in CASPAR too); compare solvers on the prefix up to convergence."""
