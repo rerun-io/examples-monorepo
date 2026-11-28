@@ -6,8 +6,6 @@ formula on the stored (not renormalised) quaternion, as symforce's Rot3 does, be
 write-back.
 """
 
-from __future__ import annotations
-
 from typing import NamedTuple
 
 import numpy as np

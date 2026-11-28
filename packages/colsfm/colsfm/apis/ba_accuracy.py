@@ -14,6 +14,7 @@ and points off it with a seed, so the two solvers have the same real work.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime
 import statistics
 import subprocess
@@ -22,7 +23,7 @@ from pathlib import Path
 
 import numpy as np
 import pycolmap
-from caspar_mojo.problem import BaResult
+from caspar_mojo.problem import BaOptions, BaResult
 from jaxtyping import Float64
 from numpy import ndarray
 from serde import serde
@@ -41,7 +42,10 @@ PARITY_BAR: float = 0.02
 @serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
 class AccuracyRow:
-    """One model and option set solved by both solvers from the same start."""
+    """One model and option set solved by both solvers from the same start.
+
+    The CASPAR fields and the differences are None on a Mojo-only row (FULL_OPENCV with free intrinsics, which CASPAR
+    cannot refine)."""
 
     row: str
     """Display name: model directory name plus the refinements and the perturbation (`_row_name`)."""
@@ -51,28 +55,28 @@ class AccuracyRow:
     date: str
     observations: int
     reprojection_before_px: float
-    reprojection_caspar_px: float
+    reprojection_caspar_px: float | None
     reprojection_mojo_px: float
     reprojection_relative_difference: float | None
     """(Mojo - CASPAR) / CASPAR: the 2 % bar; None when CASPAR's is zero and Mojo's is not."""
     cost_before: float
-    cost_caspar: float
+    cost_caspar: float | None
     cost_mojo: float
     cost_relative_difference: float | None
-    rotation_difference_max_deg: float
-    rotation_difference_median_deg: float
-    center_difference_max: float
+    rotation_difference_max_deg: float | None
+    rotation_difference_median_deg: float | None
+    center_difference_max: float | None
     """Relative to the scene extent (diagonal of the camera centres' bounding box)."""
-    center_difference_median: float
-    point_difference_median: float
+    center_difference_median: float | None
+    point_difference_median: float | None
     """Relative to the scene extent."""
-    point_difference_max: float
-    registered_images_caspar: int
+    point_difference_max: float | None
+    registered_images_caspar: int | None
     registered_images_mojo: int
     caspar_lm_trials: list[int]
     """Per timed run, in run order; the last run is the solution compared."""
     caspar_pcg_iterations: list[int]
-    caspar_exit: str
+    caspar_exit: str | None
     caspar_solver_seconds: list[float]
     """CASPAR's `dt_tot`: the solver loop alone."""
     caspar_solve_call_seconds: list[float]
@@ -84,6 +88,9 @@ class AccuracyRow:
     """`BaResult.solve_seconds`: the solver loop on the GPU."""
     mojo_call_seconds: list[float]
     """`BaResult.total_seconds`: the `caspar_mojo.solver.solve` call, host arrays in and out."""
+    mojo_solver_rel_decrease_min: float = 1.0
+    """The Mojo side's accept factor; 1 - 1e-6 stands in for the lead's 1e-6 accept floor until the solver has it
+    (NOTES-mojo.md, ruling 22:40), 1.0 is "no floor". CASPAR always runs with its own 1.0."""
     model_dir: str = ""
     """Resolved model directory; empty in rows written before it was recorded, which `case_key` keys by `row`."""
     refine_intrinsics: bool = False
@@ -111,7 +118,18 @@ class AccuracyRow:
             self.perturb_translation,
             self.perturb_rotation_deg,
             self.perturb_point,
+            self.mojo_solver_rel_decrease_min,
+            self.mojo_only,
         )
+
+    @property
+    def mojo_only(self) -> bool:
+        """Whether CASPAR did not run (`Config.mojo_only`).
+
+        Returns:
+            True when the row has no CASPAR exit.
+        """
+        return self.caspar_exit is None
 
     def within_parity(self) -> bool:
         """Whether the row meets the 2 % bar on cost and reprojection and registers the same images (`PARITY_BAR`).
@@ -175,6 +193,8 @@ def _row_name(config: Config) -> str:
         + (" +intrinsics" if config.refine_intrinsics else "")
         + (" +rig" if config.refine_sensor_from_rig else "")
         + perturbation
+        + (" [floor]" if config.mojo_solver_rel_decrease_min != 1.0 else "")
+        + (" [Mojo only]" if config.mojo_only else "")
     )
 
 
@@ -200,6 +220,10 @@ class Config:
     perturb_translation: float = DEFAULT_PERTURBATION[0]
     perturb_rotation_deg: float = DEFAULT_PERTURBATION[1]
     perturb_point: float = DEFAULT_PERTURBATION[2]
+    mojo_solver_rel_decrease_min: float = 1.0
+    """Accept factor of the Mojo side (`AccuracyRow.mojo_solver_rel_decrease_min`)."""
+    mojo_only: bool = False
+    """Solve with Mojo alone: CASPAR cannot refine FULL_OPENCV intrinsics."""
 
     def __post_init__(self) -> None:
         if self.runs < 1:
@@ -228,6 +252,7 @@ def measure(config: Config) -> AccuracyRow:
     mojo = pycolmap.Reconstruction(start)
     bridged: BridgedProblem = problem_from_reconstruction(mojo, ba_config, options)
     cost_before: float = problem_cost(start, bridged)
+    solver_options: BaOptions = dataclasses.replace(mojo_options(options), solver_rel_decrease_min=config.mojo_solver_rel_decrease_min)
     traces: list[CasparTrace] = []
     call_seconds: list[float] = []
     mojo_lm: list[int] = []
@@ -237,18 +262,20 @@ def measure(config: Config) -> AccuracyRow:
     caspar = start
     result: BaResult | None = None
     for _ in range(config.runs):
-        caspar = pycolmap.Reconstruction(start)
-        trace, seconds = traced_solve(caspar, gauge_config(caspar), options)
-        traces.append(trace)
-        call_seconds.append(seconds)
-        result = solve(bridged.problem, mojo_options(options))
+        if not config.mojo_only:
+            caspar = pycolmap.Reconstruction(start)
+            trace, seconds = traced_solve(caspar, gauge_config(caspar), options)
+            traces.append(trace)
+            call_seconds.append(seconds)
+        result = solve(bridged.problem, solver_options)
         mojo_lm.append(result.iterations)
         mojo_pcg.append(result.pcg_iterations)
         mojo_solve.append(result.solve_seconds)
         mojo_call.append(result.total_seconds)
     assert result is not None, "Config refuses runs < 1"
     apply_result(mojo, bridged, result)
-    comparison: SolveComparison = compare_solutions(caspar, mojo, bridged)
+    comparison: SolveComparison | None = None if config.mojo_only else compare_solutions(caspar, mojo, bridged)
+    mojo.update_point_3d_errors()
     head: str = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=PACKAGE_DIR, capture_output=True, text=True, check=True).stdout.strip()
     perturbed: bool = config.perturb_seed is not None
     return AccuracyRow(
@@ -258,24 +285,24 @@ def measure(config: Config) -> AccuracyRow:
         date=datetime.datetime.now().isoformat(timespec="minutes"),
         observations=len(bridged.problem.pixels),
         reprojection_before_px=reprojection_before,
-        reprojection_caspar_px=comparison.reprojection_a_px,
-        reprojection_mojo_px=comparison.reprojection_b_px,
-        reprojection_relative_difference=comparison.reprojection_relative_difference,
+        reprojection_caspar_px=None if comparison is None else comparison.reprojection_a_px,
+        reprojection_mojo_px=mojo.compute_mean_reprojection_error(),
+        reprojection_relative_difference=None if comparison is None else comparison.reprojection_relative_difference,
         cost_before=cost_before,
-        cost_caspar=comparison.cost_a,
-        cost_mojo=comparison.cost_b,
-        cost_relative_difference=comparison.cost_relative_difference,
-        rotation_difference_max_deg=comparison.rotation_difference_max_deg,
-        rotation_difference_median_deg=comparison.rotation_difference_median_deg,
-        center_difference_max=comparison.center_difference_max,
-        center_difference_median=comparison.center_difference_median,
-        point_difference_median=comparison.point_difference_median,
-        point_difference_max=comparison.point_difference_max,
-        registered_images_caspar=comparison.registered_images_a,
-        registered_images_mojo=comparison.registered_images_b,
+        cost_caspar=None if comparison is None else comparison.cost_a,
+        cost_mojo=problem_cost(mojo, bridged) if comparison is None else comparison.cost_b,
+        cost_relative_difference=None if comparison is None else comparison.cost_relative_difference,
+        rotation_difference_max_deg=None if comparison is None else comparison.rotation_difference_max_deg,
+        rotation_difference_median_deg=None if comparison is None else comparison.rotation_difference_median_deg,
+        center_difference_max=None if comparison is None else comparison.center_difference_max,
+        center_difference_median=None if comparison is None else comparison.center_difference_median,
+        point_difference_median=None if comparison is None else comparison.point_difference_median,
+        point_difference_max=None if comparison is None else comparison.point_difference_max,
+        registered_images_caspar=None if comparison is None else comparison.registered_images_a,
+        registered_images_mojo=mojo.num_reg_images(),
         caspar_lm_trials=[t.iterations for t in traces],
         caspar_pcg_iterations=[t.pcg_iterations for t in traces],
-        caspar_exit=traces[-1].exit_reason,
+        caspar_exit=traces[-1].exit_reason if traces else None,
         caspar_solver_seconds=[t.solver_seconds for t in traces],
         caspar_solve_call_seconds=call_seconds,
         mojo_lm_trials=mojo_lm,
@@ -290,6 +317,7 @@ def measure(config: Config) -> AccuracyRow:
         perturb_translation=config.perturb_translation if perturbed else None,
         perturb_rotation_deg=config.perturb_rotation_deg if perturbed else None,
         perturb_point=config.perturb_point if perturbed else None,
+        mojo_solver_rel_decrease_min=config.mojo_solver_rel_decrease_min,
     )
 
 
@@ -321,11 +349,11 @@ def merged(table: AccuracyTable, rows: list[AccuracyRow]) -> AccuracyTable:
 
 
 def _times(seconds: list[float]) -> str:
-    return f"{min(seconds):.3f} / {statistics.median(seconds):.3f}"
+    return f"{min(seconds):.3f} / {statistics.median(seconds):.3f}" if seconds else "n/a"
 
 
-def _relative(value: float | None) -> str:
-    return "undefined" if value is None else f"{value:+.2e}"
+def _number(value: float | int | None, spec: str) -> str:
+    return "n/a" if value is None else format(value, spec)
 
 
 def _counts(lm: list[int], pcg: list[int]) -> str:
@@ -346,17 +374,21 @@ def markdown(table: AccuracyTable) -> str:
         "",
         "rel = (Mojo - CASPAR) / CASPAR. Differences of centres and points are over the scene extent. "
         "Times: best / median of the runs, seconds. LM/PCG per run in run order (the last run is the compared solution). "
-        "A bold >2 % marks a row outside the bar: cost or reprojection more than 2 % apart, or different registered images.",
+        "A bold >2 % marks a row outside the bar: cost or reprojection more than 2 % apart, or different registered images. "
+        "[floor]: the Mojo side ran with solver_rel_decrease_min = 1 - 1e-6 (the lead's accept floor, NOTES-mojo.md 22:40); "
+        "rows without it ran with no floor. [Mojo only]: CASPAR cannot refine these intrinsics; px and cost are Mojo's alone.",
         "",
         "| row | GPU | obs | px before | px CASPAR | px Mojo | px rel | cost rel | rot max / med deg | centre max / med | point med | reg C / M |",
         "|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in table.rows:
-        flag: str = "" if r.within_parity() else " **>2 %**"
+        flag: str = "" if r.mojo_only or r.within_parity() else " **>2 %**"
         lines.append(
-            f"| {r.row} | {r.gpu} | {r.observations:,} | {r.reprojection_before_px:.4f} | {r.reprojection_caspar_px:.6f} | {r.reprojection_mojo_px:.6f} | "
-            f"{_relative(r.reprojection_relative_difference)}{flag} | {_relative(r.cost_relative_difference)} | {r.rotation_difference_max_deg:.2e} / {r.rotation_difference_median_deg:.2e} | "
-            f"{r.center_difference_max:.2e} / {r.center_difference_median:.2e} | {r.point_difference_median:.2e} | {r.registered_images_caspar} / {r.registered_images_mojo} |"
+            f"| {r.row} | {r.gpu} | {r.observations:,} | {r.reprojection_before_px:.4f} | {_number(r.reprojection_caspar_px, '.6f')} | {r.reprojection_mojo_px:.6f} | "
+            f"{_number(r.reprojection_relative_difference, '+.2e')}{flag} | {_number(r.cost_relative_difference, '+.2e')} | "
+            f"{_number(r.rotation_difference_max_deg, '.2e')} / {_number(r.rotation_difference_median_deg, '.2e')} | "
+            f"{_number(r.center_difference_max, '.2e')} / {_number(r.center_difference_median, '.2e')} | {_number(r.point_difference_median, '.2e')} | "
+            f"{_number(r.registered_images_caspar, 'd')} / {r.registered_images_mojo} |"
         )
     lines += [
         "",

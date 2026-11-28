@@ -6,8 +6,6 @@ list with one (n_free, D) array per group. The arithmetic follows the dtype argu
 float32 alone does to the trajectory.
 """
 
-from __future__ import annotations
-
 import time
 from dataclasses import dataclass
 
@@ -16,8 +14,8 @@ from jaxtyping import Float, Int64
 from numpy import ndarray
 
 from caspar_mojo.problem import BaOptions, BaProblem, BaResult, CameraModel
-from reference.cameras import focal_and_extra_columns, project
-from reference.poses import camera_point, normalize_pose, retract_pose
+from caspar_mojo.reference.cameras import focal_and_extra_columns, project
+from caspar_mojo.reference.poses import camera_point, normalize_pose, retract_pose
 
 Vector = list[ndarray]
 """One (n_free, D) array per group; the camera groups come first, the point group last."""
@@ -161,7 +159,7 @@ def cost(problem: BaProblem, state: State, groups: list[Group]) -> float:
     return float(0.5 * np.sum(residual * residual))
 
 
-def damped_solve(block_diagonal: ndarray, damping: ndarray, rhs: ndarray) -> ndarray:
+def damped_solve(block_diagonal: ndarray, damping: np.floating, rhs: ndarray) -> ndarray:
     """M^-1 rhs per block, M = B + lambda diag(B) + lambda 1e-6 I (kernel_*_normalize.cu), off-diagonals kept."""
     size = block_diagonal.shape[-1]
     if len(rhs) == 0:
@@ -184,7 +182,7 @@ def jtj_cross(groups: list[Group], linearization: Linearization, p: Vector, w: V
         w[index] += _scatter(g.observation_slot, np.einsum("nri,nr->ni", jacobian, total - per_block[index]), len(g.nodes))
 
 
-def dot(a: Vector, b: Vector) -> ndarray:
+def dot(a: Vector, b: Vector) -> np.floating:
     """a . b over every group, in the working dtype."""
     return sum((np.sum(x * y) for x, y in zip(a, b, strict=True)), start=a[0].dtype.type(0))
 
@@ -279,6 +277,7 @@ def reference_solve(problem: BaProblem, options: BaOptions, dtype: type = np.flo
             r[point_group][:] = 0
             mp = [x.copy() for x in r]
         rho_previous = real(0)
+        r_0_norm2 = real(0)
         pcg_iter = 0
         while pcg_iter < pcg_iter_cap:
             if pcg_iter == 0:
@@ -378,7 +377,7 @@ def reference_solve(problem: BaProblem, options: BaOptions, dtype: type = np.flo
     return result, trace
 
 
-def _usable(x: ndarray | float) -> bool:
+def _usable(x: np.floating | float) -> bool:
     return bool(np.isfinite(x) and x > 0)
 
 

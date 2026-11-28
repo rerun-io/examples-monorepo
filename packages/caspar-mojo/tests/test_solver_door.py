@@ -4,9 +4,9 @@ import dataclasses
 
 import numpy as np
 import pytest
-from reference.synthetic import make_problem
 
 from caspar_mojo.problem import BaOptions, CameraModel
+from caspar_mojo.reference.synthetic import make_problem
 from caspar_mojo.solver import solve
 
 

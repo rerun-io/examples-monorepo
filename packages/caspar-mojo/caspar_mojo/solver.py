@@ -12,7 +12,7 @@ import numpy as np
 from jaxtyping import Float32, Float64
 from numpy import ndarray
 
-from caspar_mojo.problem import INTRINSICS_COUNT, BaOptions, BaProblem, BaResult, CameraModel
+from caspar_mojo.problem import INTRINSICS_COUNT, BaIteration, BaOptions, BaProblem, BaResult, CameraModel
 
 EXIT_REASONS: Final[tuple[str, ...]] = ("MAX_ITERATIONS", "CONVERGED_DIAG_EXIT", "CONVERGED_SCORE_THRESHOLD")
 """CASPAR's `ExitReason` names, indexed by the extension's exit code."""
@@ -107,7 +107,9 @@ def solve(problem: BaProblem, options: BaOptions = DEFAULT_OPTIONS) -> BaResult:
         options.reduced_pcg_iter_max,
         options.reduced_pcg_eta,
     )
-    stats: tuple[float, float, int, int, int, float, int] = _extension().solve(inputs, scalars, tuple(_spec(a) for a in outputs))
+    stats: tuple[float, float, int, int, int, float, int, list[tuple[float, float, float, int, bool]]] = _extension().solve(
+        inputs, scalars, tuple(_spec(a) for a in outputs)
+    )
     del keep_alive
     model: CameraModel = _model(problem)
     intrinsics: Float64[ndarray, "n_cameras 12"] = outputs[0].astype(np.float64)
@@ -124,6 +126,7 @@ def solve(problem: BaProblem, options: BaOptions = DEFAULT_OPTIONS) -> BaResult:
         exit_reason=EXIT_REASONS[int(stats[4])],
         solve_seconds=float(stats[5]),
         total_seconds=time.perf_counter() - start,
+        trace=tuple(BaIteration(*trial) for trial in stats[7]),
     )
 
 

@@ -6,8 +6,6 @@ FocalAndExtra node: PINHOLE [fx, fy], SIMPLE_RADIAL [f, k], OPENCV_FISHEYE [fx, 
 FULL_OPENCV [fx, fy, k1, k2, p1, p2, k3, k4, k5, k6].
 """
 
-from __future__ import annotations
-
 from typing import NamedTuple
 
 import numpy as np

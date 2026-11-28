@@ -151,8 +151,9 @@ def test_rows_of_the_same_model_with_different_perturbations_are_kept_apart() ->
     row = dataclasses.replace(_row(), model_dir="/models/p1")
     stronger = dataclasses.replace(row, perturb_seed=0, perturb_translation=0.05, perturb_rotation_deg=0.1, perturb_point=0.02)
     weaker = dataclasses.replace(stronger, perturb_translation=0.02)
-    table: AccuracyTable = merged(AccuracyTable(rows=[row]), [stronger, weaker, dataclasses.replace(weaker, commit="def")])
-    assert len(table.rows) == 3 and [r.commit for r in table.rows if r.perturb_translation == 0.02] == ["def"]
+    floored = dataclasses.replace(weaker, mojo_solver_rel_decrease_min=1.0 - 1e-6)
+    table: AccuracyTable = merged(AccuracyTable(rows=[row]), [stronger, weaker, floored, dataclasses.replace(weaker, commit="def")])
+    assert len(table.rows) == 4 and [r.commit for r in table.rows if r.perturb_translation == 0.02 and r.mojo_solver_rel_decrease_min == 1.0] == ["def"]
 
 
 def test_rows_written_before_the_inputs_were_recorded_still_load() -> None:
