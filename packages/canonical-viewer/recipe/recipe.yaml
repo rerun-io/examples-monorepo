@@ -41,6 +41,9 @@ build:
     # re_build_tools treats CONDA_BUILD as Rerun's own packaging and runs `cargo metadata` on the patched crate,
     # which fails outside Rerun's workspace.
     - unset CONDA_BUILD
+    # A rustc wrapper from a ~/.cargo/config.toml above the build directory (kache) remaps crate roots in file!();
+    # the release build stays hermetic without it.
+    - export RUSTC_WRAPPER=""
     - export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
     - cargo build --release --locked --manifest-path rust/Cargo.toml --target-dir target --bin rerun-canonical
     - install -d "$PREFIX/bin"
