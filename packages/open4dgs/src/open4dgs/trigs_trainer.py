@@ -51,6 +51,7 @@ from trigs.core.trainer import TrigsTrainer, TrigsTrainingConfig, TrigsTrainingR
 from trigs.strategy.motion_guided_relocation import MotionGuidedRelocationStrategy
 
 from open4dgs.fused_deform import DEFORM_KEYS, compiled_gather_deform, mark_rows_dynamic
+from open4dgs.fused_regularisers import compiled_core_regularisers
 from open4dgs.fused_loss import masked_composite_terms, masked_composite_terms_batch
 from open4dgs.strided import GSPLAT_EPS2D, STRIDE, STRIDE_OFFSETS, StrideState, strided_intrinsics, strided_pixels
 
@@ -369,6 +370,7 @@ class Open4dgsTrainer(TrigsTrainer):
         adam_moments: Literal["fp32", "bf16"] = "fp32",
         fused_loss: bool = False,
         fused_deform: bool = False,
+        fused_regularisers: bool = False,
         **kwargs: object,
     ) -> None:
         self._camera_loss_hook: Any = None
@@ -378,6 +380,7 @@ class Open4dgsTrainer(TrigsTrainer):
         self.batch_cameras: bool = batch_cameras
         self.pixel_stride: Literal[1, 2] = pixel_stride
         self.fused_deform: bool = fused_deform
+        self.fused_regularisers: bool = fused_regularisers
         self.adam_moments: Literal["fp32", "bf16"] = adam_moments
         # Lever 6, None when off. dynamic=True: one compile for every image size (ROI cameras each have their own size;
         # per-size compiles hit dynamo's recompile limit and fall back to eager).
@@ -496,6 +499,52 @@ class Open4dgsTrainer(TrigsTrainer):
             "active_idx": active_idx, "gamma": gamma, "sh_degree": sh_degree if with_shN else 0,
             "means": means_t, "quats": quats_t, "scales": scales, "opacities": opacities, "colors": colors,
         }
+
+    def _core_regularisers(  # pyrefly: ignore[bad-override]
+        self,
+        params: nn.ParameterDict | dict,
+        config: TrigsTrainingConfig,
+        gamma: Tensor,
+        nn_indices: Tensor | None,
+        rigid_loss_idx: Tensor | None,
+        sigma_floor_target: float,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor] | None:
+        """With ``fused_regularisers`` (recipe patch 0013's seam): the step's motion, rigid, opacity, sigma-floor and scale
+        terms as one (compiled) ``core_regularisers`` call; None (the loop's own terms) outside the configuration it
+        reproduces (static rows excluded, no motion residual, a rigidity graph, no chunked training)."""
+        if not (
+            self.fused_regularisers
+            and nn_indices is not None
+            and rigid_loss_idx is not None
+            and "is_static" in params
+            and "chunk_total_rows" not in params
+            and getattr(config, "static_exclude_from_motion_losses", True)
+            and getattr(config, "static_exclude_from_temporal_reg", True)
+            and float(getattr(config, "lambda_motion_residual", 0.0)) == 0.0
+        ):
+            return None
+        scale_rows: str = (
+            "off" if float(getattr(config, "lambda_scale_reg", 0.0)) <= 0.0
+            else "all" if getattr(config, "scale_reg_include_static", True) else "dynamic"
+        )
+        mark_rows_dynamic(rigid_loss_idx)
+        mark_rows_dynamic(nn_indices)
+        return compiled_core_regularisers(params["means"].device)(
+            tuple(params[k] for k in ("zeta_c0_t", "zeta_c0_r", "zeta_c1_t", "zeta_c1_r", "zeta_c2_t", "zeta_c2_r", "zeta_base_t", "zeta_base_r")),
+            params["sh0"],
+            params["opacities"],
+            params["log_durations"],
+            params["scales"],
+            params["is_static"],
+            gamma,
+            rigid_loss_idx,
+            nn_indices,
+            float(config.rigid_color_lambda),
+            bool(getattr(config, "rigid_color_weight_detach", False)),
+            float(sigma_floor_target),
+            scale_rows,
+            int(params["means"].shape[0]),
+        )
 
     def strided_cameras(self, cameras: CameraConfig, offset: tuple[int, int]) -> CameraConfig:
         """Lever 4: ``strided_camera_config(cameras, offset)``, built once per offset of one ``cameras`` object."""

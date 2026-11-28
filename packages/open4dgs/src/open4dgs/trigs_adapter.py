@@ -87,6 +87,9 @@ class TrainConfig:
     fused_deform: bool = True
     """TRiGS's per-step row gather + Bezier deform + rasterizer-input prep as one ``torch.compile``d function
     (``open4dgs.fused_deform``; same maths, a few fused kernels instead of ~750 launches per step)."""
+    fused_regularisers: bool = True
+    """TRiGS's per-step regularisers (motion, rigid, opacity, sigma floor, scale) as one ``torch.compile``d function
+    (``open4dgs.fused_regularisers``, recipe patch 0013's seam; dynamic rows as a mask, no host sync)."""
     resident_frames: bool = True
     """Keep the training frames and masks on the GPU for the run when they fit (``resident_device``); off = the CPU path
     (the trainer copies each camera's frame and mask every step)."""
@@ -606,6 +609,7 @@ def train_clip(
         adam_moments=config.adam_moments,
         fused_loss=config.fused_loss,
         fused_deform=config.fused_deform,
+        fused_regularisers=config.fused_regularisers,
     )
     trainer.camera_loss_hook = prior
     # The model as it trains: TRiGS updates ``params`` in place; the returned clip replaces them with the result's.
