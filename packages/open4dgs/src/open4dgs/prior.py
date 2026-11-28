@@ -74,6 +74,11 @@ class PriorConfig:
     """``ramp_end_step`` as a fraction of the run."""
     contradiction_start_fraction: float = 0.75
     """``contradiction_start_step`` as a fraction of the run."""
+    every: int = 1
+    """Prior cadence: the terms (and the depth render) on steps with ``step % every == 0`` past ``start_step``; the other
+    steps render RGB only. Keep it co-prime with the 4 stride offsets (``step % 4``), so every offset gets prior steps."""
+    scale_every: bool = False
+    """Multiply the weight by ``every`` on prior steps (the same expected gradient as ``every=1``)."""
 
     def at_steps(self, total_steps: int) -> "PriorConfig":
         """The config for a run of ``total_steps`` steps: the step fields from the fractions (unchanged for ``schedule="steps"``)."""
@@ -93,6 +98,13 @@ class PriorConfig:
         if self.ramp_end_step <= self.start_step:
             return 1.0
         return min(1.0, (step - self.start_step) / (self.ramp_end_step - self.start_step))
+
+    def weight(self, step: int) -> float:
+        """Weight multiplier of the terms at ``step``: the ramp on prior steps (``every``, ``scale_every``), 0 on the others."""
+        ramp: float = self.ramp(step)
+        if ramp == 0.0 or step % self.every != 0:
+            return 0.0
+        return ramp * self.every if self.scale_every else ramp
 
 
 @dataclass(frozen=True, slots=True)
@@ -302,13 +314,19 @@ class MonoPriorLoss:
         self._flush()
         self._step = -1
 
+    def renders_depth(self, step: int) -> bool:
+        """Whether the trainer rasterizes RGB+ED at ``step``: on prior steps and on logged steps (the ``prior/*`` scalars)."""
+        return self.config.weight(step) > 0.0 or step % self.config.log_every == 0
+
     def __call__(self, *, step: int, frame_idx: int, cam_idx: int, colors: Tensor, alphas: Tensor, info: dict, cameras: object) -> Tensor:
         del colors, cameras
         if step != self._step:
             self._flush()
             self._step = step
+        if "render_depth" not in info:  # an RGB-only step (renders_depth)
+            return alphas.new_zeros(())
         depth_rendered: Tensor = info["render_depth"][0, ..., 0]
-        weight: float = self.config.ramp(step)
+        weight: float = self.config.weight(step)
         logged: bool = step % self.config.log_every == 0
         if cam_idx not in self.positions or (weight == 0.0 and not logged):
             return depth_rendered.sum() * 0.0
@@ -352,7 +370,7 @@ class MonoPriorLoss:
         if step != self._step:
             self._flush()
             self._step = step
-        weight: float = self.config.ramp(step)
+        weight: float = self.config.weight(step)
         logged: bool = step % self.config.log_every == 0
         if weight == 0.0 and not logged:
             return depth.sum(dim=(-2, -1)) * 0.0

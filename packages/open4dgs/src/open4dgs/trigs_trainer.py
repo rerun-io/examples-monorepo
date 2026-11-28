@@ -39,7 +39,8 @@ Two exact fixes found by profiling ride along: the batched cameras' render is un
 backpropagates into a zero tensor of the whole batch) and the row gather is ``index_select`` (``_slice_rowwise_params``).
 """
 
-from collections.abc import Mapping, Sequence
+import dataclasses
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, NamedTuple
 
@@ -139,6 +140,7 @@ class SharedTimeGroup:
         config: TrigsTrainingConfig,
         step: int,
     ) -> None:
+        config = trainer.step_config(config, step)
         self._trainer, self._params, self._config = trainer, params, config
         self._cam_group = list(cam_group)
         self._batch_cameras: bool = trainer.batch_cameras
@@ -231,9 +233,9 @@ class SharedTimeGroup:
         if gt.dtype != torch.uint8 or mask.shape != alphas.shape[:3] or gt.shape != colors.shape:
             return None
         hook_loss: Tensor | None = None
-        if hook is not None:
-            if depth is None:
-                return None
+        if hook is not None and depth is None and (trainer.depth_at_step is None or trainer.depth_at_step(step)):
+            return None  # the hook needs a depth this config did not render: the per-camera loop
+        if hook is not None and depth is not None:  # (no depth on an RGB-only step: the hook adds nothing)
             hook_loss = hook.batch(
                 step=step, frame_idx=frame_idx, cams=cams, depth=depth[..., 0], alphas=alphas[..., 0], offset=trainer.stride_state.offset
             )
@@ -392,6 +394,10 @@ class Open4dgsTrainer(TrigsTrainer):
         self._const_cache: dict[tuple[object, str, torch.dtype], Tensor] = {}
         self._step_memo: dict[tuple[str, int, int], Any] | None = None
         """While a ``SharedTimeGroup`` runs: each (term, frame, camera)'s losses, computed once for a camera drawn twice."""
+        self.depth_at_step: Callable[[int], bool] | None = None
+        """With a depth config (``render_depth``): whether a train step rasterizes RGB+ED (the MoGe-2 prior's
+        ``renders_depth``); None = every step. Renders outside the train loop (no step) always keep the depth."""
+        self._rgb_config: tuple[TrigsTrainingConfig, TrigsTrainingConfig] | None = None
 
     @property
     def camera_loss_hook(self) -> Any:  # pyrefly: ignore[bad-override]
@@ -412,6 +418,27 @@ class Open4dgsTrainer(TrigsTrainer):
     @camera_loss_hook.setter
     def camera_loss_hook(self, hook: Any) -> None:
         self._camera_loss_hook = hook
+
+    def step_config(self, config: TrigsTrainingConfig, step: int | None) -> TrigsTrainingConfig:
+        """``config`` without ``render_depth`` on a train step that ``depth_at_step`` leaves RGB-only, else ``config``."""
+        if step is None or not config.render_depth or self.depth_at_step is None or self.depth_at_step(step):
+            return config
+        if self._rgb_config is None or self._rgb_config[0] is not config:
+            self._rgb_config = (config, dataclasses.replace(config, render_depth=False))
+        return self._rgb_config[1]
+
+    def _render(  # pyrefly: ignore[bad-override]  # the recipe's signature, typed
+        self,
+        params: nn.ParameterDict,
+        cameras: CameraConfig,
+        cam_idx: int,
+        t: float | Tensor,
+        sh_degree: int,
+        config: TrigsTrainingConfig,
+        step: int | None = None,
+    ) -> RenderOut:
+        """The per-camera path's render, RGB-only on steps ``depth_at_step`` leaves without depth."""
+        return super()._render(params, cameras, cam_idx, t, sh_degree, self.step_config(config, step), step=step)
 
     def train_from_params(  # pyrefly: ignore[bad-override]  # keyword-only: every caller (TRiGS's train too) passes keywords
         self,

@@ -593,6 +593,7 @@ def train_clip(
         compile_deform=config.compile_deform,
     )
     trainer.camera_loss_hook = prior
+    trainer.depth_at_step = prior.renders_depth if prior is not None else None
     # The model as it trains: TRiGS updates ``params`` in place; the returned clip replaces them with the result's.
     live: TrainedClip = TrainedClip.from_params(params, meta, dev, trainer=trainer, scalars=writer.rows)
     torch.cuda.reset_peak_memory_stats(dev)

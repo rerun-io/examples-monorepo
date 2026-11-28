@@ -502,3 +502,36 @@ def test_hook_batch_equals_per_camera_calls(offset: tuple[int, int] | None) -> N
         assert [s for s, _ in batch.rows[name]] == [s for s, _ in rows], name
         assert [v for _, v in batch.rows[name]] == pytest.approx([v for _, v in rows], rel=1e-5), name
     assert batch.batch(step=5, frame_idx=1, cams=[2, 1], depth=batched, alphas=alphas, offset=offset) is None
+
+
+def test_prior_steps_every_k_balance_the_stride_offsets_and_scale_the_weight() -> None:
+    """``every=3`` puts the prior on one step in three past warm-up; 3 is co-prime with the 4 stride offsets (step % 4), so
+    each offset gets the same share of prior steps. ``scale_every`` multiplies the weight by ``every`` on those steps."""
+    from open4dgs.prior import PriorConfig
+    from open4dgs.strided import STRIDE_OFFSETS
+
+    config = PriorConfig(start_step=10, ramp_end_step=10, every=3, schedule="steps")
+    applied = [s for s in range(0, 1210) if config.weight(s) > 0.0]
+    assert applied[0] == 12 and all(s % 3 == 0 for s in applied)
+    assert len(applied) == 400
+    per_offset = [sum(1 for s in applied if s % len(STRIDE_OFFSETS) == o) for o in range(len(STRIDE_OFFSETS))]
+    assert max(per_offset) - min(per_offset) <= 1
+    assert config.weight(12) == 1.0 and config.weight(13) == 0.0 and config.weight(9) == 0.0
+    scaled = PriorConfig(start_step=10, ramp_end_step=10, every=3, scale_every=True, schedule="steps")
+    assert scaled.weight(12) == 3.0 and scaled.weight(13) == 0.0
+    default = PriorConfig(start_step=10, ramp_end_step=20, schedule="steps")
+    assert [default.weight(s) for s in (9, 10, 15, 20, 21)] == [0.0, 0.0, 0.5, 1.0, 1.0]
+
+
+def test_hook_renders_depth_only_on_prior_and_logged_steps() -> None:
+    """The trainer asks ``renders_depth(step)`` before rasterizing: RGB+ED on prior steps and on logged steps (diagnostics),
+    RGB-only otherwise (warm-up, off-cadence steps); a render without depth gets a zero from the hook."""
+    from open4dgs.prior import ClipPriors, MonoPriorLoss, PriorConfig, encode_normals
+
+    depth, normals, hit = _sphere(torch.tensor([0.0, 0.0, 3.0]), 0.8)
+    priors = ClipPriors(("rig_00/cam_00",), torch.tensor([0]), (depth.half()[None],), (encode_normals(normals, hit)[None],))
+    config = PriorConfig(start_step=100, ramp_end_step=100, every=3, log_every=25, schedule="steps")
+    loss = MonoPriorLoss(config, priors, (hit.float()[None],), (0,), _K()[None])
+    assert [s for s in range(0, 110) if loss.renders_depth(s)] == [0, 25, 50, 75, 100, 102, 105, 108]
+    value = loss(step=7, frame_idx=0, cam_idx=0, colors=torch.zeros(1), alphas=hit.float()[None, ..., None], info={}, cameras=None)
+    assert float(value) == 0.0
