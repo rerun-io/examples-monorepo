@@ -31,7 +31,7 @@ source:
 
 build:
   # Raise for every change to the extensions or patches at the same Rerun tag.
-  number: 2
+  number: 3
   script:
     - mkdir -p gsplat-rust-renderer/target
     - ln -sfn "$BUILD_PREFIX/share/brush-src" gsplat-rust-renderer/target/brush-src
