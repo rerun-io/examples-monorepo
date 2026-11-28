@@ -44,6 +44,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, NamedTuple
 
 import torch
+import torch._inductor.config
 from jaxtyping import Float32, Float64, Int64
 from torch import Tensor, nn
 from trigs.core.camera import CameraConfig
