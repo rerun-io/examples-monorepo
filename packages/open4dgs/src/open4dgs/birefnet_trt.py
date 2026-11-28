@@ -1,12 +1,14 @@
 """BiRefNet mattes through TensorRT: the fp16 snapshot exported once to ONNX and built into a cached, machine-local engine.
 
 The engine takes the exact input of the torch model in ``masks.predict_mattes`` (ImageNet-normalised fp16 crops at
-``MODEL_SIZE``), any batch from 1 to ``MAX_BATCH``, and returns the last decoder logits, so the two are interchangeable
-there. ``load_matte_model`` takes the engine when this machine's cache already holds it and the torch model otherwise:
+``MODEL_SIZE``), batches of up to ``MAX_BATCH`` (a shorter batch is zero-padded: the engine is static), and returns the
+last decoder logits, so the two are interchangeable there. ``load_matte_model`` takes the engine when this machine's cache already holds it and the torch model otherwise:
 a run never waits for an engine build (``build_engine`` / the ``open4dgs-birefnet-engine`` task builds it).
 
 The snapshot's deformable convolutions (``torchvision.ops.deform_conv2d``, with a modulation mask) export as ONNX
-``DeformConv`` (opset 19+), which the TensorRT ONNX parser imports natively.
+``DeformConv`` (opset 19+), which the TensorRT ONNX parser maps onto its ``ModulatedDeformConv2d`` plugin.
+The engine is static in the batch on purpose: an engine built from a dynamic-batch export (profile 1..8) gave the right
+mattes at batch 8 but wrong ones (|p| differences up to 1.0 over ~70 % of pixels) at every other batch size.
 """
 
 import hashlib
@@ -25,7 +27,7 @@ if TYPE_CHECKING:
     from trtkit import TrtBuildConfig
 
 MAX_BATCH: int = 8
-"""Largest (and optimised-for) batch of the engine: ``predict_mattes``' default batch."""
+"""The engine's batch (``predict_mattes``' default batch)."""
 ONNX_OPSET: int = 20
 """ONNX ``DeformConv`` needs opset 19 or later."""
 DEFAULT_CACHE_DIR: Path = Path(os.environ.get("OPEN4DGS_CACHE_DIR", Path.home() / ".cache" / "open4dgs")) / "birefnet"
@@ -50,21 +52,14 @@ def snapshot_digest(model_dir: Path) -> str:
 
 def onnx_path(model_dir: Path, cache_dir: Path = DEFAULT_CACHE_DIR) -> Path:
     """Where the ONNX export of this snapshot lives (with its ``.data`` weights sidecar)."""
-    return cache_dir / f"birefnet-{snapshot_digest(model_dir.expanduser().resolve())[:12]}_fp16_{MODEL_SIZE}_b1-{MAX_BATCH}.onnx"
+    return cache_dir / f"birefnet-{snapshot_digest(model_dir.expanduser().resolve())[:12]}_fp16_{MODEL_SIZE}_b{MAX_BATCH}.onnx"
 
 
 def engine_config() -> "TrtBuildConfig":
-    """The TensorRT build settings (part of the engine cache key): batch 1..MAX_BATCH at the static crop size."""
-    from trtkit import InputShapeProfile, TrtBuildConfig
+    """The TensorRT build settings (part of the engine cache key): the static batch at the static crop size."""
+    from trtkit import TrtBuildConfig
 
-    shape: tuple[int, int, int] = (3, MODEL_SIZE, MODEL_SIZE)
-    return TrtBuildConfig(
-        max_batch_size=MAX_BATCH,
-        opt_batch_size=MAX_BATCH,
-        builder_optimization_level=3,
-        workspace_gib=8.0,
-        shape_profiles=(InputShapeProfile(name="image", min_shape=(1, *shape), opt_shape=(MAX_BATCH, *shape), max_shape=(MAX_BATCH, *shape)),),
-    )
+    return TrtBuildConfig(max_batch_size=MAX_BATCH, opt_batch_size=MAX_BATCH, builder_optimization_level=3, workspace_gib=8.0)
 
 
 def _deform_conv2d_onnx(
@@ -131,7 +126,6 @@ def export_onnx(model_dir: Path, cache_dir: Path = DEFAULT_CACHE_DIR) -> Path:
                     output_names=["logits"],
                     opset_version=ONNX_OPSET,
                     dynamo=True,
-                    dynamic_shapes=({0: torch.export.Dim("batch", min=1, max=MAX_BATCH)},),
                     custom_translation_table={torch.ops.torchvision.deform_conv2d.default: _deform_conv2d_onnx},
                 )
             # The sidecar first: the graph must never be visible while the weights it references are missing.
@@ -182,10 +176,10 @@ class BiRefNetTrt:
     batch's before it sends the next)."""
 
     def __init__(self, engine: Path) -> None:
-        from trtkit import TensorRtDynamicRuntime
+        from trtkit import TensorRtRuntime
 
         register_plugins()
-        self.runtime = TensorRtDynamicRuntime(engine, direct_binding=True)
+        self.runtime = TensorRtRuntime(engine)
 
     def __call__(self, image: Float16[Tensor, "b 3 s s"]) -> list[Tensor]:
         return [self.runtime({"image": image.contiguous()})["logits"]]
