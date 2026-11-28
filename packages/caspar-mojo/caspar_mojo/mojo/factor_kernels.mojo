@@ -118,58 +118,54 @@ def block_uniform(key: Int) -> Bool:
     return uniform
 
 
-struct Running[D: Int](Movable):
-    """A block's running sum for one scatter site, carried over its tiles in registers: each thread adds its own
-    observations' values while the block stays on one node (`key`), and the block reduces and writes once when the
-    node changes or at the end. Observations come sorted by camera then frame, so a block's consecutive tiles mostly
-    share the node: no shuffle per tile, and the same-address atomics (which serialise across blocks; one camera's
-    intrinsics are shared by every observation) fall by the tiles per block."""
+@fieldwise_init
+struct Running(TrivialRegisterPassable):
+    """A block's running sum for one scatter site, carried over its tiles: thread t < D holds component t of the
+    node block at `key`. Observations come sorted by camera then frame, so consecutive tiles of a block mostly share
+    the node: the sum reaches memory once per key change, and the same-address atomics (which serialise across
+    blocks; one camera's intrinsics are shared by every observation) fall by the tiles per block."""
 
     var key: Int
-    var sums: Array[Float32, Self.D]
+    var value: Float32
 
-    def __init__(out self):
-        self.key = -1
-        self.sums = Array[Float32, Self.D](fill=0.0)
-
-    @always_inline
-    def add(mut self, dst: F32Ptr, key: Int, uniform: Bool, values: Array[Float32, Self.D]):
-        """dst[key:key+D] += values; `uniform` is block_uniform(key). Every thread of the block must call it."""
-        if uniform and key == self.key:
-            comptime for i in range(Self.D):
-                self.sums[i] += values[i]
-            return
-        self.flush(dst)
-        if uniform:
-            self.key = key
-            comptime for i in range(Self.D):
-                self.sums[i] = values[i]
-            return
-        var warp_same = warp_uniform(key)
-        comptime for i in range(Self.D):
-            scatter_add(dst, key + i, values[i], warp_same, key >= 0)
+    @staticmethod
+    def empty() -> Self:
+        return Self(-1, 0.0)
 
     @always_inline
-    def flush(mut self, dst: F32Ptr):
-        """Block-reduce the running sums into dst. Block-uniform; every thread must call it."""
-        if self.key >= 0:
-            var shared = stack_allocation[WARPS * Self.D, Float32, address_space=AddressSpace.SHARED]()
-            var warp_index = thread_idx.x // WARP_SIZE
-            comptime for i in range(Self.D):
-                var total = warp.sum(self.sums[i])
-                if lane_id() == 0:
-                    shared[unsafe_offset=warp_index * Self.D + i] = total
-            barrier()
-            var t = thread_idx.x
-            if t < Self.D:
-                var total: Float32 = 0.0
-                comptime for w in range(WARPS):
-                    total += shared[unsafe_offset=w * Self.D + t]
-                atomic_add(dst, self.key + t, total)
-            barrier()
+    def flush[D: Int](mut self, dst: F32Ptr):
+        if thread_idx.x < D and self.key >= 0:
+            atomic_add(dst, self.key + thread_idx.x, self.value)
         self.key = -1
-        comptime for i in range(Self.D):
-            self.sums[i] = 0.0
+        self.value = 0.0
+
+
+@always_inline
+def scatter_values[D: Int](dst: F32Ptr, key: Int, values: Array[Float32, D], mut running: Running):
+    """dst[key:key+D] += values summed over the block when the block shares `key` (into `running`), else over each
+    warp that shares it, else per thread. Every thread must call it."""
+    if block_uniform(key):
+        var sums = stack_allocation[WARPS * D, Float32, address_space=AddressSpace.SHARED]()
+        var warp_index = thread_idx.x // WARP_SIZE
+        comptime for i in range(D):
+            var total = warp.sum(values[i])
+            if lane_id() == 0:
+                sums[unsafe_offset=warp_index * D + i] = total
+        barrier()
+        var t = thread_idx.x
+        if key != running.key:
+            running.flush[D](dst)
+            running.key = key
+        if t < D:
+            var total: Float32 = 0.0
+            comptime for w in range(WARPS):
+                total += sums[unsafe_offset=w * D + t]
+            running.value += total
+        barrier()
+        return
+    var uniform = warp_uniform(key)
+    comptime for i in range(D):
+        scatter_add(dst, key + i, values[i], uniform, key >= 0)
 
 
 @always_inline
@@ -282,21 +278,20 @@ def accumulate_block[D: Int](
     h: Int,
     g: F32Ptr,
     hblk: F32Ptr,
-    mut run_g: Running[D],
-    mut run_h: Running[tri(D)],
+    mut run_g: Running,
+    mut run_h: Running,
 ):
     """For a free node (v >= 0), g[v:v+D] -= J^T e and J^T J into hblk[h:].
     Every lane must call it; `valid` is False past the last observation."""
     var key = v if valid else -1
-    var uniform = block_uniform(key)
     var grad = Array[Float32, D](fill=0.0)
     var hess = Array[Float32, tri(D)](fill=0.0)
     comptime for i in range(D):
         grad[i] = -(j[i] * e0 + j[D + i] * e1)
         comptime for k in range(i, D):
             hess[tri_index[D](i, k)] = j[i] * j[k] + j[D + i] * j[D + k]
-    run_g.add(g, key, uniform, grad)
-    run_h.add(hblk, h if key >= 0 else -1, uniform, hess)
+    scatter_values[D](g, key, grad, run_g)
+    scatter_values[tri(D)](hblk, h if key >= 0 else -1, hess, run_h)
 
 
 @always_inline
@@ -343,12 +338,12 @@ def linearize_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bo
     var nc = Int(n_calib)
     var first = block_idx.x * Int(tiles)
     var cost: Float32 = 0.0
-    var pose_g = Running[6]()
-    var pose_h = Running[tri(6)]()
-    var rig_g = Running[6]()
-    var rig_h = Running[tri(6)]()
-    var calib_g = Running[K]()
-    var calib_h = Running[tri(K)]()
+    var pose_g = Running.empty()
+    var pose_h = Running.empty()
+    var rig_g = Running.empty()
+    var rig_h = Running.empty()
+    var calib_g = Running.empty()
+    var calib_h = Running.empty()
     for tile in range(first, min(first + Int(tiles), ceildiv(n_obs, BLOCK))):
         # Lanes past the end recompute the last observation and add nothing, so every lane reaches the block sums.
         var valid = tile * BLOCK + thread_idx.x < n_obs
@@ -368,12 +363,12 @@ def linearize_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bo
         comptime if REFINE_INTRINSICS:
             var co = Int(calib_off[camera][0])
             accumulate_block[K](o.calib, valid, e0, e1, co, h_offset[K](co, nn6, nc), g, hblk, calib_g, calib_h)
-    pose_g.flush(g)
-    pose_h.flush(hblk)
-    rig_g.flush(g)
-    rig_h.flush(hblk)
-    calib_g.flush(g)
-    calib_h.flush(hblk)
+    pose_g.flush[6](g)
+    pose_h.flush[tri(6)](hblk)
+    rig_g.flush[6](g)
+    rig_h.flush[tri(6)](hblk)
+    calib_g.flush[K](g)
+    calib_h.flush[tri(K)](hblk)
     reduce_add(scalars, Int(cost_slot), cost)
 
 
@@ -485,12 +480,12 @@ def block_times[D: Int](j: Array[Float32, 2 * D], x: VecIn, v: Int) -> Tuple[Flo
 
 
 @always_inline
-def add_block_transpose[D: Int](j: Array[Float32, 2 * D], u0: Float32, u1: Float32, dst: F32Ptr, key: Int, mut running: Running[D]):
+def add_block_transpose[D: Int](j: Array[Float32, 2 * D], u0: Float32, u1: Float32, dst: F32Ptr, key: Int, mut running: Running):
     """dst[key:key+D] += J^T u for one 2xD block; key -1 adds nothing. Every lane must call it."""
     var values = Array[Float32, D](fill=0.0)
     comptime for i in range(D):
         values[i] = j[i] * u0 + j[D + i] * u1
-    running.add(dst, key, block_uniform(key), values)
+    scatter_values[D](dst, key, values, running)
 
 
 comptime GATHER_NEGATE = 0
@@ -600,9 +595,9 @@ def cross_points_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG:
     comptime CROSS = CAMERA_TERMS and (REFINE_RIG or REFINE_INTRINSICS)
     var n_obs = Int(obs_frame.dim[0]())
     var first = block_idx.x * Int(tiles)
-    var pose_sum = Running[6]()
-    var rig_sum = Running[6]()
-    var calib_sum = Running[K]()
+    var pose_sum = Running.empty()
+    var rig_sum = Running.empty()
+    var calib_sum = Running.empty()
     for tile in range(first, min(first + Int(tiles), ceildiv(n_obs, BLOCK))):
         var valid = tile * BLOCK + thread_idx.x < n_obs
         var n = min(tile * BLOCK + thread_idx.x, n_obs - 1)
@@ -639,6 +634,6 @@ def cross_points_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG:
             add_block_transpose[6](o.rig, u0 - ur[0], u1 - ur[1], dst, ro, rig_sum)
         comptime if REFINE_INTRINSICS:
             add_block_transpose[K](o.calib, u0 - uc[0], u1 - uc[1], dst, co, calib_sum)
-    pose_sum.flush(dst)
-    rig_sum.flush(dst)
-    calib_sum.flush(dst)
+    pose_sum.flush[6](dst)
+    rig_sum.flush[6](dst)
+    calib_sum.flush[K](dst)
