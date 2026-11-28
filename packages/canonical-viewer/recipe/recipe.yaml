@@ -31,7 +31,7 @@ source:
 
 build:
   # Raise for every change to the extensions or patches at the same Rerun tag.
-  number: 1
+  number: 2
   script:
     - mkdir -p gsplat-rust-renderer/target
     - ln -sfn "$BUILD_PREFIX/share/brush-src" gsplat-rust-renderer/target/brush-src
@@ -60,6 +60,9 @@ requirements:
   build:
     - ${{ compiler('c') }}
     - ${{ compiler('cxx') }}
+    # The C library floor (variants.yaml: a glibc 2.28 sysroot, macOS 11). Without it the compilers link against the
+    # build host's own glibc, and the binary needs whatever that host has (2.39 on the 5090 box).
+    - ${{ stdlib('c') }}
     - rust 1.98.*
     - brush-src
     - python 3.12.*
