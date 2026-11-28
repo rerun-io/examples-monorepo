@@ -22,7 +22,7 @@ from torch import Tensor
 from open4dgs.masks import MODEL_SIZE, MatteNet, load_birefnet
 
 if TYPE_CHECKING:
-    from trtkit import TrtBuildConfig
+    import trtkit
 
 MAX_BATCH: int = 8
 """The engine's batch (``predict_mattes``' default batch)."""
@@ -49,7 +49,7 @@ def onnx_path(model_dir: Path, cache_dir: Path = DEFAULT_CACHE_DIR) -> Path:
     return cache_dir / f"birefnet-{digest}_fp16_{MODEL_SIZE}_b{MAX_BATCH}_op{ONNX_OPSET}_v{EXPORT_VERSION}.onnx"
 
 
-def engine_config() -> "TrtBuildConfig":
+def engine_config() -> "trtkit.TrtBuildConfig":
     """The TensorRT build settings (part of the engine cache key): the static batch at the static crop size."""
     from trtkit import TrtBuildConfig
 
