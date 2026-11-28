@@ -104,9 +104,9 @@ CONFIGS = [
 @pytest.mark.parametrize(("model", "flags"), CONFIGS)
 def test_reaches_noise_floor(model: CameraModel, flags: dict) -> None:
     problem, _ = make_problem(model, n_frames=13, n_points=1031, seed=int(model), **flags)
-    result, trace = reference_solve(problem, BaOptions(solver_iter_max=25))
+    result = reference_solve(problem, BaOptions(solver_iter_max=25))
     assert result.final_cost < 0.05 * result.initial_cost
-    costs = [record.cost_best for record in trace]
+    costs = [record.cost_best for record in result.trace]
     assert all(b <= a for a, b in zip(costs, costs[1:], strict=False))
     rms = np.sqrt(2 * result.final_cost / (2 * len(problem.pixels)))
     assert rms == pytest.approx(_rms_floor(problem, 0.5), rel=0.05)
@@ -114,22 +114,23 @@ def test_reaches_noise_floor(model: CameraModel, flags: dict) -> None:
 
 def test_reduced_and_full_system_reach_the_same_optimum() -> None:
     problem, _ = make_problem(CameraModel.PINHOLE, n_frames=17, n_points=1021, seed=3)
-    reduced, _ = reference_solve(problem, BaOptions(solver_iter_max=25))
-    full, _ = reference_solve(problem, BaOptions(solver_iter_max=25, reduced_camera_system=False))
+    reduced = reference_solve(problem, BaOptions(solver_iter_max=25))
+    full = reference_solve(problem, BaOptions(solver_iter_max=25, reduced_camera_system=False))
     assert full.final_cost == pytest.approx(reduced.final_cost, rel=1e-3)
 
 
 @pytest.mark.parametrize("model", list(CameraModel))
 def test_noise_free_problem_converges_to_zero(model: CameraModel) -> None:
     problem, _ = make_problem(model, n_frames=11, n_points=1025, seed=5, noise_px=0.0)
-    result, _ = reference_solve(problem, BaOptions(solver_iter_max=40))
+    result = reference_solve(problem, BaOptions(solver_iter_max=40))
     assert result.final_cost < 1e-12 * result.initial_cost
 
 
 def test_float32_run_follows_float64() -> None:
     problem, _ = make_problem(CameraModel.PINHOLE, n_frames=13, n_points=1023, seed=2)
-    result64, _ = reference_solve(problem, BaOptions(solver_iter_max=25))
-    result32, trace32 = reference_solve(problem, BaOptions(solver_iter_max=25), dtype=np.float32)
+    result64 = reference_solve(problem, BaOptions(solver_iter_max=25))
+    result32 = reference_solve(problem, BaOptions(solver_iter_max=25), dtype=np.float32)
+    trace32 = result32.trace
     assert result32.initial_cost == pytest.approx(result64.initial_cost, rel=1e-5)
     assert result32.final_cost == pytest.approx(result64.final_cost, rel=1e-4)
     assert result32.exit_reason == "CONVERGED_DIAG_EXIT"
@@ -138,7 +139,7 @@ def test_float32_run_follows_float64() -> None:
 
 def test_fixed_nodes_come_back_unchanged() -> None:
     problem, _ = make_problem(CameraModel.PINHOLE, n_frames=7, n_points=101, seed=4, rig_cameras=2)
-    result, _ = reference_solve(problem, BaOptions(solver_iter_max=5))
+    result = reference_solve(problem, BaOptions(solver_iter_max=5))
     np.testing.assert_array_equal(result.rig_from_world[0], problem.rig_from_world[0])
     np.testing.assert_array_equal(result.sensor_from_rig, problem.sensor_from_rig)
     np.testing.assert_array_equal(result.intrinsics, problem.intrinsics)

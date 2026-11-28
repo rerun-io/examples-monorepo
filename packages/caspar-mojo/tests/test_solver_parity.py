@@ -25,7 +25,7 @@ import numpy as np
 import pytest
 
 from caspar_mojo.problem import BaIteration, BaOptions, BaProblem, BaResult, CameraModel
-from caspar_mojo.reference.solver import State, make_groups, reference_linearize, reference_solve, residuals_and_jacobians
+from caspar_mojo.reference.solver import COST_DECREASE_FLOOR, State, make_groups, reference_linearize, reference_solve, residuals_and_jacobians
 from caspar_mojo.reference.synthetic import make_problem
 from caspar_mojo.solver import linearize, solve
 
@@ -78,8 +78,8 @@ def _problem(name: str) -> BaProblem:
 
 
 @cache
-def _reference(name: str, dtype: type) -> tuple[BaResult, list]:
-    return reference_solve(_problem(name), OPTIONS, dtype=dtype)
+def _reference(name: str, dtype: type, cost_decrease_floor: float = COST_DECREASE_FLOOR) -> BaResult:
+    return reference_solve(_problem(name), OPTIONS, dtype=dtype, cost_decrease_floor=cost_decrease_floor)
 
 
 def _converged(trace: list) -> int:
@@ -105,8 +105,10 @@ TAIL_PCG_NOISE = pytest.mark.xfail(
 def test_solve_matches_reference(name: str) -> None:
     problem = _problem(name)
     mojo = solve(problem, OPTIONS)
-    reference64, _ = _reference(name, np.float64)
-    reference32, trace32 = _reference(name, np.float32)
+    # The state bound measures the distance to the exact minimum, so the float64 reference polishes without the floor.
+    reference64 = _reference(name, np.float64, 0.0)
+    reference32 = _reference(name, np.float32)
+    trace32 = reference32.trace
 
     converged = _converged(trace32)
     assert len(mojo.trace) >= converged, (len(mojo.trace), converged)
@@ -140,7 +142,7 @@ def test_two_trial_cap_matches_reference() -> None:
     problem = _problem("pinhole")
     options = dataclasses.replace(OPTIONS, solver_iter_max=2)
     mojo = solve(problem, options)
-    _, trace32 = reference_solve(problem, options, dtype=np.float32)
+    trace32 = reference_solve(problem, options, dtype=np.float32).trace
     assert [t.accepted for t in mojo.trace] == [t.accepted for t in trace32]
     for trial, expected in zip(mojo.trace, trace32, strict=True):
         assert trial.cost_best == pytest.approx(expected.cost_best, rel=1e-3), (trial, expected)

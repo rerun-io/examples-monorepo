@@ -13,7 +13,7 @@ import numpy as np
 from jaxtyping import Float, Int64
 from numpy import ndarray
 
-from caspar_mojo.problem import BaOptions, BaProblem, BaResult, CameraModel
+from caspar_mojo.problem import BaIteration, BaOptions, BaProblem, BaResult, CameraModel
 from caspar_mojo.reference.cameras import focal_and_extra_columns, project
 from caspar_mojo.reference.poses import camera_point, normalize_pose, retract_pose
 
@@ -61,22 +61,6 @@ class Linearization:
     """B per group, (n_free, D, D)."""
     jacobians: list[ndarray]
     """J per group, (n_observations, 2, D), zero where the observation's node is not in the group."""
-
-
-@dataclass(frozen=True, slots=True)
-class IterationRecord:
-    """One Levenberg-Marquardt trial, as CASPAR's verbose log has it."""
-
-    cost_tried: float
-    """Cost at the retracted candidate."""
-    cost_best: float
-    """Best cost after the accept or reject."""
-    damping: float
-    """Lambda the trial was solved with."""
-    pcg_iterations: int
-    """PCG iterations entered (CASPAR's pcg_iter_ + 1)."""
-    accepted: bool
-    """Whether the candidate became the current state."""
 
 
 def make_groups(problem: BaProblem) -> list[Group]:
@@ -207,17 +191,19 @@ def retract(problem: BaProblem, state: State, groups: list[Group], step: Vector)
     return State(rig, sensor, intrinsics, points)
 
 
-def reference_solve(problem: BaProblem, options: BaOptions, dtype: type = np.float64) -> tuple[BaResult, list[IterationRecord]]:
+def reference_solve(
+    problem: BaProblem, options: BaOptions, dtype: type = np.float64, cost_decrease_floor: float = COST_DECREASE_FLOOR
+) -> BaResult:
     """Levenberg-Marquardt with CASPAR's PCG, reduced camera system, damping rule and exits.
 
     Args:
         problem: The bundle adjustment.
         options: CASPAR's solver parameters.
         dtype: np.float64 for the oracle, np.float32 to see what float32 alone changes.
+        cost_decrease_floor: The accept test's relative floor; 0 polishes to the exact minimum (a state reference).
 
     Returns:
-        The result (iterations = CASPAR's iteration_count, pcg_iterations = the sum of `IterationRecord.pcg_iterations`)
-        and one record per trial.
+        The result (iterations = CASPAR's iteration_count, pcg_iterations = the sum over its trace).
     """
     t_start = time.perf_counter()
     real = np.dtype(dtype).type
@@ -233,7 +219,7 @@ def reference_solve(problem: BaProblem, options: BaOptions, dtype: type = np.flo
     diag = real(options.diag_init)
     up_scale = real(options.diag_scaling_up)
     exit_reason = "MAX_ITERATIONS"
-    trace: list[IterationRecord] = []
+    trace: list[BaIteration] = []
 
     def zeros() -> Vector:
         return [np.zeros((len(g.nodes), g.size), dtype=dtype) for g in groups]
@@ -289,7 +275,7 @@ def reference_solve(problem: BaProblem, options: BaOptions, dtype: type = np.flo
                 w = [x.copy() for x in r]
                 matvec(p, w)
                 rho = dot(p, r)
-                alpha = rho / dot(p, w)
+                alpha = _ratio(rho, dot(p, w))
                 if reduced and not (_usable(rho) and _usable(alpha)):
                     step = zeros()
                     break
@@ -302,7 +288,7 @@ def reference_solve(problem: BaProblem, options: BaOptions, dtype: type = np.flo
                 z = normalize(r)
                 rho = dot(r, z)
                 # The beta fix: beta = rho_k / rho_{k-1}, and rho_k is kept for the next iteration.
-                beta = rho / rho_previous
+                beta = _ratio(rho, rho_previous)
                 rho_previous = rho
                 if reduced and not _usable(rho):
                     break
@@ -310,7 +296,7 @@ def reference_solve(problem: BaProblem, options: BaOptions, dtype: type = np.flo
                 mp = [x + beta * y for x, y in zip(r, mp, strict=True)]
                 w = [x.copy() for x in mp]
                 matvec(p, w)
-                alpha = rho / dot(p, w)
+                alpha = _ratio(rho, dot(p, w))
                 if reduced and not _usable(alpha):
                     break
                 step = [x + alpha * y for x, y in zip(step, p, strict=True)]
@@ -336,12 +322,12 @@ def reference_solve(problem: BaProblem, options: BaOptions, dtype: type = np.flo
         candidate = retract(problem, state, groups, step)
         score_tried = real(cost(problem, candidate, groups))
         diag_current = diag
-        accepted = bool(np.float64(score_tried) < np.float64(score_best) * options.solver_rel_decrease_min * (1.0 - COST_DECREASE_FLOOR))
+        accepted = bool(np.float64(score_tried) < np.float64(score_best) * options.solver_rel_decrease_min * (1.0 - cost_decrease_floor))
         if accepted:
             predicted = real(0.5) * dot(
                 step, [g + diag * np.einsum("nii->ni", b) * s for g, b, s in zip(lin.gradient, lin.block_diagonal, step, strict=True)]
             )
-            quality = (score_best - score_tried) / predicted
+            quality = _ratio(score_best - score_tried, predicted)
             quality_tmp = 2 * quality - 1
             scale = max(real(options.diag_scaling_down), real(1) - quality_tmp * quality_tmp * quality_tmp)
             diag = max(real(options.diag_min), diag * scale)
@@ -351,7 +337,7 @@ def reference_solve(problem: BaProblem, options: BaOptions, dtype: type = np.flo
         else:
             diag = diag * up_scale
             up_scale = up_scale * 2
-        trace.append(IterationRecord(float(score_tried), float(score_best), float(diag_current), pcg_iter + 1, accepted))
+        trace.append(BaIteration(float(score_tried), float(score_best), float(diag_current), pcg_iter + 1, accepted))
         if not accepted and diag > options.diag_exit_value:
             exit_reason = "CONVERGED_DIAG_EXIT"
             break
@@ -374,11 +360,19 @@ def reference_solve(problem: BaProblem, options: BaOptions, dtype: type = np.flo
         final_cost=float(score_best),
         iterations=solver_iter,
         pcg_iterations=sum(record.pcg_iterations for record in trace),
+        trace=tuple(trace),
         exit_reason=exit_reason,
         solve_seconds=solve_seconds,
         total_seconds=time.perf_counter() - t_start,
     )
-    return result, trace
+    return result
+
+
+def _ratio(numerator: np.floating, denominator: np.floating) -> np.floating:
+    """numerator / denominator without numpy's warning: CASPAR divides first and tests `usable()` after, so a residual
+    that vanishes (a pose-only problem can solve exactly) gives 0/0 there too and ends the PCG."""
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return numerator / denominator
 
 
 def _usable(x: np.floating | float) -> bool:
