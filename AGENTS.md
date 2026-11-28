@@ -299,6 +299,15 @@ chunks, and the 0.42 viewer walks the whole chunk list on every frame, so frame 
 falls with the chunk count, not the data size. Casa Loma 007: 117 k -> 13.5 k chunks,
 7.6-15 -> 45-56 fps on an M5 on every tab. Check the count with `rerun rrd stats`.
 
+### One Rerun viewer
+
+Every viewer change lands in `rerun-canonical` (packages/canonical-viewer), the one build that native, headless and web
+runs, Gradio apps, pages and measurements all open. A package adds viewer behaviour as an **extension**: a library crate
+exporting `pub const EXTENSION`, listed in `canonical_viewer::EXTENSIONS`. Building a `re_viewer::App` or running the
+viewer stays inside packages/canonical-viewer (`rerun-canonical`, `viewer-probe`, the web entry), so every run carries
+every extension and every Rerun patch. Where each kind of change goes: "Kinds of viewer change" in
+`packages/canonical-viewer/README.md`. `ci/tests/test_one_rerun_viewer.py` enforces the rule.
+
 ### Rerun 0.44 names: old -> new
 
 Do not guess Rerun names from memory. Old spellings fail or emit a `DeprecationWarning`;
