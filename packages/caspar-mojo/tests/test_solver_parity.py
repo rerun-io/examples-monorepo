@@ -7,10 +7,11 @@ and the length of that tail varies from run to run. So:
   is within `CONVERGED` of its final cost (same accept flags, best cost within 1e-3, PCG iterations within 1);
 - costs against the float64 reference: initial within 1e-4, final within 1 %;
 - the exit reason equals the float32 reference's, and the trial count is within a factor 2 of it (a gross check);
-- the state is compared through what it predicts, the pixels: each tail accept moves the state along a nearly flat
-  direction (the scale gauge, point depths), which changes no pixel to first order but can move a point by more
-  than float32 moves it elsewhere. The pixels may differ from the float64 reference's by 10x what float32 alone
-  moves them (the float32 reference against the float64 one), plus a floor of `PIXEL_FLOOR`.
+- the state is compared through what it predicts, the pixels, because each tail accept moves it along a nearly flat
+  direction (the scale gauge, point depths) by more than float32 moves it elsewhere. The float64 reference ends at
+  the minimum, where cost(x) - cost_min = |J (x - x_min)|^2 / 2 to second order: a state on the same minimum
+  differs from it in pixels (L2 over every residual) by sqrt(2 (cost - cost_min)) and no more. Both costs are
+  evaluated here in float64. A state on another minimum, or one moved in a direction the cost does not see, fails.
 """
 
 from __future__ import annotations
@@ -29,8 +30,8 @@ pytestmark = pytest.mark.integration
 OPTIONS = BaOptions(solver_iter_max=40)
 CONVERGED = 1e-5
 """Relative distance to the final cost at which a trace counts as converged."""
-PIXEL_FLOOR = 1e-4
-"""Pixels: a few float32 ulps of a 1000-pixel coordinate."""
+QUADRATIC_SLACK = 1.1
+"""Room for the third-order terms of the cost around its minimum (measured: at most 1.01 on 12 cases x 2 GPUs)."""
 
 CASES = {
     "pinhole": (CameraModel.PINHOLE, ()),
@@ -83,7 +84,7 @@ def _converged(trace: list) -> int:
     return next(i for i, trial in enumerate(trace) if trial.cost_best <= final * (1 + CONVERGED)) + 1
 
 
-def _pixels(problem: BaProblem, result: BaResult) -> np.ndarray:
+def _residuals(problem: BaProblem, result: BaResult) -> np.ndarray:
     state = State(result.rig_from_world, result.sensor_from_rig, result.intrinsics, result.points)
     residual, _ = residuals_and_jacobians(problem, state, make_groups(problem), with_jacobians=False)
     return residual
@@ -109,10 +110,11 @@ def test_solve_matches_reference(name: str) -> None:
     assert mojo.exit_reason == reference32.exit_reason
     assert len(trace32) / 2 <= len(mojo.trace) <= 2 * len(trace32), (len(mojo.trace), len(trace32))
 
-    pixels64 = _pixels(problem, reference64)
-    float32_effect = float(np.max(np.abs(_pixels(problem, reference32) - pixels64)))
-    error = float(np.max(np.abs(_pixels(problem, mojo) - pixels64)))
-    assert error <= 10 * float32_effect + PIXEL_FLOOR, (error, float32_effect)
+    residual64 = _residuals(problem, reference64)
+    residual = _residuals(problem, mojo)
+    cost_gap = 0.5 * float(np.sum(residual**2) - np.sum(residual64**2))
+    pixel_distance = float(np.linalg.norm(residual - residual64))
+    assert pixel_distance <= QUADRATIC_SLACK * np.sqrt(2 * max(cost_gap, 0.0)) + 1e-9, (pixel_distance, cost_gap)
 
 
 @pytest.mark.parametrize("name", CASES)
