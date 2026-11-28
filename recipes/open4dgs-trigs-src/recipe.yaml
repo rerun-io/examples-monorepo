@@ -62,7 +62,8 @@ source:
     # Fix, maths unchanged: the train step's remaining host syncs (30 -> 3 per step on the production config): dynamic-row
     # gathers by index_select on one nonzero per step (boolean indexing read the GPU forward and backward, per tensor),
     # the rigid rows' index once per kNN refresh, no any() guards in front of masked fills / where (_deform, the
-    # quaternion clamp, the static-row pins and gradient zeroing, the class invariants), the camera list stacked on the
+    # static-row pins and gradient zeroing, the class invariants; the quaternion clamp's guarded fallback could never
+    # fire after its clamp_min and is dropped with its guard), the camera list stacked on the
     # device, the direct active-row query's time as a cached device scalar, and the demoted-row count read only when
     # the temporal hierarchy needs it. Also the RGB+ED render split once into colour and depth (its backward one
     # concatenation) instead of sliced twice (each slice's backward a zero fill of the whole render plus a copy).
@@ -74,7 +75,7 @@ source:
 build:
   # Bump with every patch or build script change: the build string hash does not follow the recipe content, and the
   # shared rattler package cache would otherwise hand an older build to the next install.
-  number: 11
+  number: 12
   noarch: python
   script:
     # pixi-build reuses the host prefix between rebuilds: clear the target first.

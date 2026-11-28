@@ -14,7 +14,7 @@ diff --git a/src/trigs/core/trainer.py b/src/trigs/core/trainer.py
      def _const_tensor(self, value, device, dtype) -> Tensor:
          """``torch.tensor(value)`` on ``device``; a seam for a cached version (never modify the result in place)."""
          return torch.tensor(value, device=device, dtype=dtype)
-@@ -5734,9 +5740,7 @@
+@@ -5731,9 +5737,7 @@
                  )
                  opdiag_logit_before = params["opacities"].data.reshape(-1).clone()
  
