@@ -365,7 +365,7 @@ pub async fn run(a: SpeedArgs) -> Result<()> {
             ply: a.camera.ply,
             splats: scene.data.num_splats(),
             cameras,
-            provenance: Provenance::capture(),
+            provenance: gsplat_cli::provenance(),
             cpuset: host::cpuset()?,
             minimum_warmup_seconds: 5.0,
             minimum_measured_seconds: a.min_seconds,

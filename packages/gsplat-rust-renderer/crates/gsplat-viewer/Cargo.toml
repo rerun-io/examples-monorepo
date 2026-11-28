@@ -4,13 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 
-[features]
-default = ["app"]
-# The headless viewer App that `gsplat probe` builds (application.rs) until the probe moves to the canonical viewer.
-# The canonical viewer links the library without it. `default_web` = the stock views (map, audio) without analytics;
-# analytics' reqwest pulls a second wasm-streams, whose exported JS classes collide in wasm-bindgen.
-app = ["dep:re_video", "re_viewer/default_web"]
-
 [dependencies]
 gsplat-core = { path = "../gsplat-core" }
 anyhow.workspace = true
@@ -28,7 +21,7 @@ re_byte_size.workspace = true
 re_tracing.workspace = true
 re_format.workspace = true
 re_math = "0.33"
-# Without default features (no analytics); `app` adds `default_web`, the stock views.
+# Without default features (no analytics): the canonical viewer chooses Rerun's features.
 re_viewer.workspace = true
 ahash = "0.8"
 # Load-time split of SOG decoding (std Instant panics on wasm32).
@@ -37,17 +30,6 @@ web-time = "1.1"
 # The web viewer's page flags (web.rs).
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-sys = { version = "0.3", features = ["Location", "Navigator", "Window"] }
-
-# Native-only, behind `app`: the binary's gRPC server, crash handler, headless harness and runtime. The web build
-# and the canonical viewer link the lib.
-# Rerun 0.44 uses egui/eframe 0.37, so the headless kittest harness must stay on the same egui family as re_viewer.
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-# Native AV1 decoding at full speed (the lens and face videos of dataforge recordings): `nasm` turns on dav1d's
-# assembly. Without it Rerun 0.44 refuses AV1 on Linux x86-64 ("compile Rerun with the `nasm` feature") and decodes
-# 2-3x slower on Apple silicon. x86-64 assembles with nasm (the pixi feature's `nasm`); Apple silicon with the C
-# compiler. Linux arm64 has no native AV1 decoder in re_video 0.44 (no dav1d there), so the feature changes nothing.
-re_video = { workspace = true, features = ["nasm"], optional = true }
-
 
 # The TRiGS motion reference test reads its .rrd fixture (both crates are already in the graph via re_viewer).
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]

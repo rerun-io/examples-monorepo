@@ -18,6 +18,17 @@ pixi run -e canonical-viewer --frozen rerun-canonical -- recording.rrd       # a
 pixi run -e canonical-viewer-web --frozen canonical-viewer-web-build <stock-0.44.0-dir> <out-dir>
 ```
 
+`viewer-probe` (`rust/crates/viewer-probe`, built by `canonical-viewer-build`) times complete headless frames of the
+same viewer and reports the gsplat extension's counters. It needs a recording with one 3D view, and writes its camera
+path and a PNG beside the JSON report:
+
+```bash
+packages/canonical-viewer/target/release/viewer-probe recording.rrd --out frames.json --window-size 1920x1080
+```
+
+`--storage-binding-limit N` exercises the capacity fallback, and `--require-motion` rejects held views. The timing
+protocol: `packages/gsplat-rust-renderer/docs/architecture.md`.
+
 `rust/crates/web` is the web entry point: it installs the same hooks before JavaScript constructs the stock `WebHandle`,
 so pages keep the stock `@rerun-io/web-viewer` API. gsplat's page flags still work: `force_no_subgroups=1`,
 `profile=1`. The web build is 17.8 MB brotli (stock 0.44.0: 10.6 MB); depth video adds 0.3 MB of it.
@@ -42,7 +53,8 @@ so pages keep the stock `@rerun-io/web-viewer` API. gsplat's page flags still wo
 `patches/re_viewer-0.44.0-extension-hooks.patch` adds two hooks to `re_viewer`, at the two places every viewer
 (native, headless, web) passes through: the device request in `wgpu_options()` (it receives the adapter and Rerun's
 device descriptor) and the end of `App::with_commands` (every new `App`). `canonical_viewer::install_hooks` points them
-at `EXTENSIONS`, and `rerun-canonical` then runs the stock `rerun::run`.
+at `EXTENSIONS`, and `rerun-canonical` then runs the stock `rerun::run`. The patch also makes `wgpu_options()` public,
+so `viewer-probe` requests the same device as every viewer.
 
 A third hook, in `re_viewer_context`, keeps Rerun from warning (a toast on every start) when an extension replaces a
 stock fallback that it declares in `replaces_fallbacks`. Each declared (view, component) pair has one owner across all
@@ -64,7 +76,7 @@ Applied in order by `tools/prepare_rerun.py` (`RERUN_PATCHES`) to the Rerun tag'
 
 | Patch | What | Drop when |
 |---|---|---|
-| `re_viewer-0.44.0-extension-hooks.patch` | the device and `App::new` hooks (native, headless, web) and the declared-fallback hook | upstream has extension hooks (Pablo wants no upstream PRs, issues or proposal drafts) |
+| `re_viewer-0.44.0-extension-hooks.patch` | the device and `App::new` hooks (native, headless, web), the declared-fallback hook, and a public `wgpu_options()` for `viewer-probe` | upstream has extension hooks (Pablo wants no upstream PRs, issues or proposal drafts) |
 | `rerun-0.44.0-av1-arm64.patch` | native AV1 decoding on Linux arm64 (rerun-io/rerun#7755): `re_rav1d` 0.1.4 from a pinned git revision, whose arm64 assembly tables are hidden (the workspace's `[patch.crates-io]` gives depth-video-viewer the same `re_rav1d`) | a Rerun release fixes #7755 and `re_rav1d` 0.1.4 is on crates.io |
 | `rerun-0.44.0-proxy-slow-reader.patch` | the live proxy (`--serve-grpc`, and every viewer's own proxy) no longer lets one stalled reader block the logger and every other viewer: after one second of backpressure the sender overflows instead of waiting; 199 lines, over the 100-line rule, kept by Pablo's decision (design question 8). Limits below | upstream stops blocking on a stalled broadcast receiver |
 

@@ -1961,7 +1961,7 @@ description = "Download data, pretrained checkpoints, all Blender assets, or tan
 [feature.gsplat-rust-renderer.tasks.gsplat-build]
 cmd = "cargo build --release --locked --workspace --bins --all-features"
 cwd = "packages/gsplat-rust-renderer"
-description = "Build the gsplat CLI with its probe subcommand and the trainer"
+description = "Build the gsplat CLI and the trainer"
 
 [feature.gsplat-rust-renderer.tasks.gsplat-brush-cli-build]
 cmd = "cargo install --git https://github.com/ArthurBrussee/brush --rev 1388f74c6fe0236f68ee4915564bf00e9d2e3747 brush-cli --locked --root .brush"
@@ -1987,7 +1987,7 @@ description = "Render and evaluate Blender test splits; --checkpoint-only checks
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-check]
 cmd = "cargo-fmt -p gsplat-core -p gsplat-viewer -p gsplat-cli -p gsplat-train -- --check && cargo-clippy clippy --locked --workspace --all-targets --all-features -- -D warnings && cargo test --locked --workspace --all-features"
 cwd = "packages/gsplat-rust-renderer"
-description = "Check our Rust formatting, run Clippy including gsplat probe, and run Rust unit tests"
+description = "Check our Rust formatting, run Clippy, and run Rust unit tests"
 
 [feature.gsplat-rust-renderer.tasks.gate]
 depends-on = ["lint", "typecheck", "deadcode", "tests", "tests-integration", "gsplat-rust-check"]
@@ -2148,9 +2148,9 @@ description = "Check out the Rerun tag into target/patch/ and apply patches/ (sk
 # The prepare step is in the command, not in depends-on: other environments call this task (gsplat's tests), and pixi
 # resolves a called task's depends-on in the caller's environment.
 [feature.canonical-viewer.tasks.canonical-viewer-build]
-cmd = "python tools/prepare_rerun.py && cargo build --release --locked --manifest-path rust/Cargo.toml --target-dir target --bin rerun-canonical"
+cmd = "python tools/prepare_rerun.py && cargo build --release --locked --manifest-path rust/Cargo.toml --target-dir target --bin rerun-canonical --bin viewer-probe"
 cwd = "packages/canonical-viewer"
-description = "Build rerun-canonical (release) into target/release/"
+description = "Build rerun-canonical and viewer-probe (release) into target/release/"
 
 [feature.canonical-viewer.tasks.rerun-canonical]
 cmd = "target/release/rerun-canonical"
@@ -2160,7 +2160,7 @@ description = "Run rerun-canonical; any `rerun` arguments follow (an .rrd path, 
 
 # Call the env's cargo-fmt/cargo-clippy directly (see gsplat-rust-check for why).
 [feature.canonical-viewer.tasks.canonical-viewer-rust-check]
-cmd = "cargo-fmt --manifest-path rust/Cargo.toml -p canonical-viewer -p canonical-viewer-extension -- --check && cargo-clippy clippy --locked --manifest-path rust/Cargo.toml --target-dir target --all-targets -- -D warnings && cargo test --locked --manifest-path rust/Cargo.toml --target-dir target"
+cmd = "cargo-fmt --manifest-path rust/Cargo.toml -p canonical-viewer -p canonical-viewer-extension -p viewer-probe -- --check && cargo-clippy clippy --locked --manifest-path rust/Cargo.toml --target-dir target --all-targets -- -D warnings && cargo test --locked --manifest-path rust/Cargo.toml --target-dir target"
 depends-on = ["canonical-viewer-prepare"]
 cwd = "packages/canonical-viewer"
 description = "Check Rust formatting, run Clippy and the Rust unit tests"
