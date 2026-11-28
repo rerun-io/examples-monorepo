@@ -386,16 +386,17 @@ platforms = ["linux-64", "linux-aarch64"]
 # Depth PNGs for catalog and Rerun logging (packages/depth-png).
 depth-png = { path = "packages/depth-png" }
 python = "3.12.*"
-icecream = ">=2.1.3,<2.2"
+icecream = ">=2.1.3"
 einops = ">=0.8.0,<0.9"
-omegaconf = "*"
+# posekit (solve group "stages") runs sam2 on Hydra 1.3, which needs omegaconf <2.4.
+omegaconf = "<2.4"
 scipy = "*"
 timm = ">=1.0.15,<2"
-matplotlib = ">=3.8.3,<3.9"
-pandas = ">=2.3.3,<2.4"
-jupyterlab = ">=4.2.0,<4.3"
+matplotlib = ">=3.8.3"
+pandas = ">=2.3.3"
+jupyterlab = ">=4.2.0"
 tyro = ">=0.9.1,<0.10"
-open3d = ">=0.19.0,<0.20"
+open3d = ">=0.19.0"
 imageio = ">=2.37.0,<3"
 # monopriors.gpu_image reproduces cv2.remap's OpenCV 5 rule (exact float coordinates); OpenCV 4 snaps
 # float maps to 1/32 px and rounds half up.
@@ -1041,6 +1042,8 @@ scikit-image = "*"
 posekit = { path = "packages/posekit", editable = true }
 trtkit = { path = "packages/trtkit", editable = true }
 sam2 = { path = "packages/sam2-streaming", editable = true }
+# sam2 initializes Hydra with version_base="1.2", which Hydra 1.4 rejects.
+hydra-core = ">=1.3.2,<1.4"
 onnx = "*"
 onnxscript = "*"
 
@@ -1082,10 +1085,10 @@ platforms = ["linux-64", "linux-aarch64"]
 [feature.nvdec444.pypi-dependencies]
 pynvvideocodec = "==2.2.4"
 
-# These four existing Transformers wrappers have decorated .to() stubs that
-# pyrefly misbinds as unbound methods in this isolated dependency solve.
+# Transformers types its wrappers' .to() as a decorated function that pyrefly misbinds as an unbound method,
+# and Sam3Config.vision_config as `dict | PreTrainedConfig | None`; every posekit lane uses this baseline.
 [feature.posekit-egohand.activation.env]
-PYREFLY_EXTRA_ARGS = "--baseline ${PIXI_PROJECT_ROOT}/packages/posekit/egohand-pyrefly-baseline.json"
+PYREFLY_EXTRA_ARGS = "--baseline ${PIXI_PROJECT_ROOT}/packages/posekit/pyrefly-baseline.json"
 
 # SAM 3D Body model dependencies, outside the base posekit lane. Its upstream source
 # (`sam_3d_body`) installs from the pinned pixi-build recipe in recipes/sam-3d-body-src.
@@ -1137,7 +1140,7 @@ kernels = ">=0.11.3"
 PACKAGE_DIR = "packages/posekit"
 # The same four Transformers .to() stub false positives as posekit-egohand; the WiLoR and EgoHand lanes
 # are not installed here (see [feature.posekit.activation.env]).
-PYREFLY_EXTRA_ARGS = "--baseline ${PIXI_PROJECT_ROOT}/packages/posekit/egohand-pyrefly-baseline.json --project-excludes=src/posekit/models/wilor.py --project-excludes=src/posekit/models/wilor_net/*.py --project-excludes=src/posekit/models/egohand_capture.py --project-excludes=src/posekit/models/egohand_cuda_crops.py --project-excludes=src/posekit/models/egohand_mhr.py --project-excludes=src/posekit/models/egohand_soma.py --project-excludes=src/posekit/models/egohand_tensor.py"
+PYREFLY_EXTRA_ARGS = "--baseline ${PIXI_PROJECT_ROOT}/packages/posekit/pyrefly-baseline.json --project-excludes=src/posekit/models/wilor.py --project-excludes=src/posekit/models/wilor_net/*.py --project-excludes=src/posekit/models/egohand_capture.py --project-excludes=src/posekit/models/egohand_cuda_crops.py --project-excludes=src/posekit/models/egohand_mhr.py --project-excludes=src/posekit/models/egohand_soma.py --project-excludes=src/posekit/models/egohand_tensor.py"
 
 [feature.posekit-body.tasks.posekit-body-download-examples]
 cmd = "test -f data/body3d-examples/yoga-example.jpg || curl -fsSL --retry 3 --create-dirs -o data/body3d-examples/Planche.jpg https://raw.githubusercontent.com/rerun-io/sam3d-body-rerun/343f51a84616082a040a9697aeeb584ddbd0647a/data/example-data/Planche.jpg -o data/body3d-examples/Amir-Khan-Lamont-Peterson_2689582.jpg https://raw.githubusercontent.com/rerun-io/sam3d-body-rerun/343f51a84616082a040a9697aeeb584ddbd0647a/data/example-data/Amir-Khan-Lamont-Peterson_2689582.jpg -o data/body3d-examples/BNAAHPYGMYSE26U6C6T7VA6544.jpg https://raw.githubusercontent.com/rerun-io/sam3d-body-rerun/343f51a84616082a040a9697aeeb584ddbd0647a/data/example-data/BNAAHPYGMYSE26U6C6T7VA6544.jpg -o data/body3d-examples/yoga-example.jpg https://raw.githubusercontent.com/rerun-io/sam3d-body-rerun/343f51a84616082a040a9697aeeb584ddbd0647a/data/example-data/yoga-example.jpg"
@@ -1206,7 +1209,7 @@ no-build-isolation = ["cholespy"]
 [feature.posekit-hands.activation.env]
 PACKAGE_DIR = "packages/posekit"
 # posekit-egohand's baseline; the SAM 3D Body lane is not installed here (see [feature.posekit.activation.env]).
-PYREFLY_EXTRA_ARGS = "--baseline ${PIXI_PROJECT_ROOT}/packages/posekit/egohand-pyrefly-baseline.json --project-excludes=src/posekit/models/sam3d_body*.py --project-excludes=src/posekit/body_rerun.py --project-excludes=src/posekit/apis/body3d_mv_video.py --project-excludes=tests/test_body_fast_*.py"
+PYREFLY_EXTRA_ARGS = "--baseline ${PIXI_PROJECT_ROOT}/packages/posekit/pyrefly-baseline.json --project-excludes=src/posekit/models/sam3d_body*.py --project-excludes=src/posekit/body_rerun.py --project-excludes=src/posekit/apis/body3d_mv_video.py --project-excludes=tests/test_body_fast_*.py"
 
 [feature.posekit-hands.tasks.posekit-video-hands]
 cmd = "python tools/demos/video_hands.py"
@@ -1244,7 +1247,7 @@ PYREFLY_TARGET = "src/posekit tests tools"
 # soma-runtime + posekit-egohand). The base lane excludes all three; posekit-body and posekit-hands come
 # before posekit in their envs (the first feature's value wins) and exclude only what they lack.
 # `--project-excludes=<glob>`: with a space the task shell would expand the glob into files to check.
-PYREFLY_EXTRA_ARGS = "--project-excludes=src/posekit/models/sam3d_body*.py --project-excludes=src/posekit/body_rerun.py --project-excludes=src/posekit/apis/body3d_mv_video.py --project-excludes=tests/test_body_fast_*.py --project-excludes=src/posekit/models/wilor.py --project-excludes=src/posekit/models/wilor_net/*.py --project-excludes=src/posekit/models/egohand_capture.py --project-excludes=src/posekit/models/egohand_cuda_crops.py --project-excludes=src/posekit/models/egohand_mhr.py --project-excludes=src/posekit/models/egohand_soma.py --project-excludes=src/posekit/models/egohand_tensor.py"
+PYREFLY_EXTRA_ARGS = "--baseline ${PIXI_PROJECT_ROOT}/packages/posekit/pyrefly-baseline.json --project-excludes=src/posekit/models/sam3d_body*.py --project-excludes=src/posekit/body_rerun.py --project-excludes=src/posekit/apis/body3d_mv_video.py --project-excludes=tests/test_body_fast_*.py --project-excludes=src/posekit/models/wilor.py --project-excludes=src/posekit/models/wilor_net/*.py --project-excludes=src/posekit/models/egohand_capture.py --project-excludes=src/posekit/models/egohand_cuda_crops.py --project-excludes=src/posekit/models/egohand_mhr.py --project-excludes=src/posekit/models/egohand_soma.py --project-excludes=src/posekit/models/egohand_tensor.py"
 
 [feature.posekit.tasks.posekit-video-pose]
 cmd = "python tools/demos/video_pose.py"
@@ -1958,7 +1961,7 @@ description = "Download data, pretrained checkpoints, all Blender assets, or tan
 [feature.gsplat-rust-renderer.tasks.gsplat-build]
 cmd = "cargo build --release --locked --workspace --bins --all-features"
 cwd = "packages/gsplat-rust-renderer"
-description = "Build the gsplat CLI with its probe subcommand and the trainer"
+description = "Build the gsplat CLI and the trainer"
 
 [feature.gsplat-rust-renderer.tasks.gsplat-brush-cli-build]
 cmd = "cargo install --git https://github.com/ArthurBrussee/brush --rev 1388f74c6fe0236f68ee4915564bf00e9d2e3747 brush-cli --locked --root .brush"
@@ -1984,7 +1987,7 @@ description = "Render and evaluate Blender test splits; --checkpoint-only checks
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-check]
 cmd = "cargo-fmt -p gsplat-core -p gsplat-viewer -p gsplat-cli -p gsplat-train -- --check && cargo-clippy clippy --locked --workspace --all-targets --all-features -- -D warnings && cargo test --locked --workspace --all-features"
 cwd = "packages/gsplat-rust-renderer"
-description = "Check our Rust formatting, run Clippy including gsplat probe, and run Rust unit tests"
+description = "Check our Rust formatting, run Clippy, and run Rust unit tests"
 
 [feature.gsplat-rust-renderer.tasks.gate]
 depends-on = ["lint", "typecheck", "deadcode", "tests", "tests-integration", "gsplat-rust-check"]
@@ -2145,9 +2148,9 @@ description = "Check out the Rerun tag into target/patch/ and apply patches/ (sk
 # The prepare step is in the command, not in depends-on: other environments call this task (gsplat's tests), and pixi
 # resolves a called task's depends-on in the caller's environment.
 [feature.canonical-viewer.tasks.canonical-viewer-build]
-cmd = "python tools/prepare_rerun.py && cargo build --release --locked --manifest-path rust/Cargo.toml --target-dir target --bin rerun-canonical"
+cmd = "python tools/prepare_rerun.py && cargo build --release --locked --manifest-path rust/Cargo.toml --target-dir target --bin rerun-canonical --bin viewer-probe"
 cwd = "packages/canonical-viewer"
-description = "Build rerun-canonical (release) into target/release/"
+description = "Build rerun-canonical and viewer-probe (release) into target/release/"
 
 [feature.canonical-viewer.tasks.rerun-canonical]
 cmd = "target/release/rerun-canonical"
@@ -2157,7 +2160,7 @@ description = "Run rerun-canonical; any `rerun` arguments follow (an .rrd path, 
 
 # Call the env's cargo-fmt/cargo-clippy directly (see gsplat-rust-check for why).
 [feature.canonical-viewer.tasks.canonical-viewer-rust-check]
-cmd = "cargo-fmt --manifest-path rust/Cargo.toml -p canonical-viewer -p canonical-viewer-extension -- --check && cargo-clippy clippy --locked --manifest-path rust/Cargo.toml --target-dir target --all-targets -- -D warnings && cargo test --locked --manifest-path rust/Cargo.toml --target-dir target"
+cmd = "cargo-fmt --manifest-path rust/Cargo.toml -p canonical-viewer -p canonical-viewer-extension -p viewer-probe -- --check && cargo-clippy clippy --locked --manifest-path rust/Cargo.toml --target-dir target --all-targets -- -D warnings && cargo test --locked --manifest-path rust/Cargo.toml --target-dir target"
 depends-on = ["canonical-viewer-prepare"]
 cwd = "packages/canonical-viewer"
 description = "Check Rust formatting, run Clippy and the Rust unit tests"
@@ -2593,12 +2596,14 @@ slam-rs = { path = "packages/slam-rs", editable = true }
 dav1d = "1.2.*"
 # dataforge (below) imports these at module load (transports, gen_humanego_depth, insta360), and slam-rs-register runs its register tool.
 requests = "*"
+httpx = "*"
 depth-png = { path = "packages/depth-png" }
 insta360-io = { path = "packages/insta360-io" }
 
 [feature.slam-rs.target.linux-aarch64.dependencies]
 dav1d = "1.2.*"
 requests = "*"
+httpx = "*"
 depth-png = { path = "packages/depth-png" }
 insta360-io = { path = "packages/insta360-io" }
 
@@ -4432,8 +4437,10 @@ description = "What Animated SOG costs a trained run (--run <run dir>, --setting
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════
 [environments]
-colsfm = { features = ["common", "cuda", "colsfm", "torchcodec", "ffmpeg"], solve-group = "colsfm", no-default-feature = true }
-colsfm-dev = { features = ["common", "cuda", "colsfm", "dev", "torchcodec", "ffmpeg"], solve-group = "colsfm", no-default-feature = true }
+# solve-group "stages": capture_to_splat's stage envs share one version of each package (one family per PR;
+# ci/tests/test_flow_solve_groups.py checks it). Each env keeps its own features.
+colsfm = { features = ["common", "cuda", "colsfm", "torchcodec", "ffmpeg"], solve-group = "stages", no-default-feature = true }
+colsfm-dev = { features = ["common", "cuda", "colsfm", "dev", "torchcodec", "ffmpeg"], solve-group = "stages", no-default-feature = true }
 pipelines = { features = ["common", "pipelines", "ffmpeg"], solve-group = "pipelines", no-default-feature = true }
 pipelines-dev = { features = ["common", "pipelines", "dev", "ffmpeg"], solve-group = "pipelines", no-default-feature = true }
 agent-traces = { features = ["agent-traces", "ffmpeg"], solve-group = "agent-traces", no-default-feature = true }
@@ -4520,14 +4527,14 @@ monoprior = { features = [
     "cuda",
     "monoprior",
     "ffmpeg",
-], solve-group = "monoprior", no-default-feature = true }
+], solve-group = "stages", no-default-feature = true }
 monoprior-dev = { features = [
     "common",
     "cuda",
     "monoprior",
     "dev",
     "ffmpeg",
-], solve-group = "monoprior", no-default-feature = true }
+], solve-group = "stages", no-default-feature = true }
 monoprior-catalog = { features = [
     "common",
     "rerun-prerelease",
@@ -4536,7 +4543,7 @@ monoprior-catalog = { features = [
     "monoprior-catalog",
     "torchcodec",
     "ffmpeg",
-], solve-group = "monoprior-catalog", no-default-feature = true }
+], solve-group = "stages", no-default-feature = true }
 monoprior-catalog-dev = { features = [
     "common",
     "rerun-prerelease",
@@ -4546,7 +4553,7 @@ monoprior-catalog-dev = { features = [
     "dev",
     "torchcodec",
     "ffmpeg",
-], solve-group = "monoprior-catalog", no-default-feature = true }
+], solve-group = "stages", no-default-feature = true }
 prompt-da = { features = [
     "common",
     "cuda",
@@ -4667,7 +4674,7 @@ posekit = { features = [
     "posekit-yolo",
     "torchcodec",
     "ffmpeg",
-], solve-group = "posekit", no-default-feature = true }
+], solve-group = "stages", no-default-feature = true }
 posekit-hands = { features = ["common", "cuda", "posekit-hands", "posekit", "soma-runtime", "posekit-egohand", "posekit-wilor", "posekit-yolo", "torchcodec", "ffmpeg"], solve-group = "posekit-hands", no-default-feature = true }
 posekit-hands-dev = { features = ["common", "cuda", "posekit-hands", "posekit", "soma-runtime", "posekit-egohand", "posekit-wilor", "posekit-yolo", "dev", "torchcodec", "ffmpeg"], solve-group = "posekit-hands", no-default-feature = true }
 posekit-body = { features = ["common", "cuda", "posekit-body", "posekit", "posekit-sam3d-body", "torchcodec", "ffmpeg"], solve-group = "posekit-body", no-default-feature = true }
@@ -4680,7 +4687,7 @@ posekit-dev = { features = [
     "dev",
     "torchcodec",
     "ffmpeg",
-], solve-group = "posekit", no-default-feature = true }
+], solve-group = "stages", no-default-feature = true }
 lamp = { features = [
     "common",
     "cuda",
@@ -4929,7 +4936,7 @@ dataforge-cuda = { features = [
     "dataforge-cuda",
     "ffmpeg",
     "torchcodec",
-], solve-group = "dataforge-cuda", no-default-feature = true }
+], solve-group = "stages", no-default-feature = true }
 dataforge-cuda-dev = { features = [
     "common",
     "dataforge",
@@ -4937,7 +4944,7 @@ dataforge-cuda-dev = { features = [
     "dev",
     "ffmpeg",
     "torchcodec",
-], solve-group = "dataforge-cuda", no-default-feature = true }
+], solve-group = "stages", no-default-feature = true }
 handtrack = { features = [
     "catalog-common",
     "rerun-prerelease",
@@ -5057,9 +5064,9 @@ slam-rs-osx-dev = { features = [
     "dev",
     "ffmpeg",
 ], solve-group = "slam-rs-osx", no-default-feature = true }
-slam-rs-cuda = { features = ["catalog-common", "rerun-prerelease", "cuda", "slam-rs", "slam-rs-nvdec", "torchcodec", "ffmpeg"], solve-group = "slam-rs-cuda", no-default-feature = true }
+slam-rs-cuda = { features = ["catalog-common", "rerun-prerelease", "cuda", "slam-rs", "slam-rs-nvdec", "torchcodec", "ffmpeg"], solve-group = "stages", no-default-feature = true }
 slam-rs-pkg = { features = ["slam-rs-pkg", "ffmpeg"], solve-group = "slam-rs-pkg", no-default-feature = true }
-slam-rs-cuda-dev = { features = ["catalog-common", "rerun-prerelease", "cuda", "slam-rs", "slam-rs-nvdec", "dev", "torchcodec", "ffmpeg"], solve-group = "slam-rs-cuda", no-default-feature = true }
+slam-rs-cuda-dev = { features = ["catalog-common", "rerun-prerelease", "cuda", "slam-rs", "slam-rs-nvdec", "dev", "torchcodec", "ffmpeg"], solve-group = "stages", no-default-feature = true }
 mamma = { features = [
     "common",
     "cuda",

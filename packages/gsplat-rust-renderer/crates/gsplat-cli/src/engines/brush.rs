@@ -1,6 +1,10 @@
 //! Brush renderer oracle backend.
 use super::{Adapter, Counts, StageTiming};
-use crate::{PlyScene, camera::CameraSpec, settings::RenderSettings};
+use crate::{
+    PlyScene,
+    camera::{BrushCamera as _, CameraSpec},
+    settings::RenderSettings,
+};
 use anyhow::{Context as _, Result};
 use brush_render::{
     TextureMode,

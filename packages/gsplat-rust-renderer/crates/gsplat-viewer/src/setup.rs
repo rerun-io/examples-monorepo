@@ -1,11 +1,9 @@
-//! Registration of the compute splat renderer and visualizers, shared by the canonical viewer ([`EXTENSION`]) and the
-//! gsplat native and web viewers.
+//! Registration of the compute splat renderer and visualizers: the canonical viewer's gsplat extension ([`EXTENSION`]).
 
 use crate::visualizer;
 use canonical_viewer_extension::Extension;
 use re_sdk_types::View as _;
-use re_viewer::external::{eframe, re_renderer, re_sdk_types, re_viewer_context};
-use std::sync::Arc;
+use re_viewer::external::{re_sdk_types, re_viewer_context};
 
 /// The gsplat extension of the canonical viewer: the compute splat renderer, its visualizers and its device needs.
 pub const EXTENSION: Extension = Extension {
@@ -53,47 +51,6 @@ pub fn register_compute_splats(viewer: &mut re_viewer::App) -> anyhow::Result<()
         register_splat_system,
     )?;
     Ok(())
-}
-
-/// Request compute capabilities when the adapter supports the splat kernels.
-pub fn compute_wgpu_setup() -> eframe::egui_wgpu::WgpuSetup {
-    eframe::egui_wgpu::WgpuSetup::CreateNew(eframe::egui_wgpu::WgpuSetupCreateNew {
-        instance_descriptor: re_renderer::device_caps::instance_descriptor(None),
-        native_adapter_selector: Some(Arc::new(move |adapters, surface| {
-            re_renderer::device_caps::select_adapter(
-                adapters,
-                re_renderer::device_caps::instance_descriptor(None).backends,
-                surface,
-            )
-            // egui_wgpu's adapter selector returns `Result<_, String>`.
-            .map_err(|err| err.to_string())
-        })),
-        device_descriptor: compute_device_descriptor(gsplat_core::subgroups_allowed()),
-        ..eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle()
-    })
-}
-
-/// Rerun's device descriptor plus the limits the splat kernels need, when the adapter has them.
-///
-/// `SUBGROUP` is requested when the adapter offers it and `allow_subgroups` is set; without it the
-/// splat kernels take their workgroup-memory variant (the web viewer's `?force_no_subgroups=1`).
-pub fn compute_device_descriptor(
-    allow_subgroups: bool,
-) -> Arc<dyn Fn(&wgpu::Adapter) -> wgpu::DeviceDescriptor<'static> + Send + Sync> {
-    Arc::new(move |adapter| {
-        let mut descriptor =
-            re_renderer::device_caps::DeviceCaps::from_adapter_without_validation(adapter)
-                .device_descriptor();
-        descriptor.label = Some("Gaussian compute viewer");
-        descriptor.memory_hints = wgpu::MemoryHints::MemoryUsage;
-        apply_compute_needs(
-            &adapter.features(),
-            &adapter.limits(),
-            allow_subgroups,
-            &mut descriptor,
-        );
-        descriptor
-    })
 }
 
 /// Add the splat kernels' features and limits to `descriptor`, out of what the adapter offers.
@@ -146,5 +103,49 @@ mod tests {
             .iter()
             .map(|(view, component)| ((*view).to_owned(), (*component).to_owned()));
         assert!(declared.eq(expected));
+    }
+
+    #[test]
+    fn custom_spatial_view_keeps_both_explicit_choices() {
+        use re_viewer::external::{parking_lot, re_view_spatial};
+        use re_viewer_context::{ViewClass as _, ViewClassRegistry};
+        use std::sync::Arc;
+
+        let mut registry = ViewClassRegistry::default();
+        let reflection = Arc::new(parking_lot::RwLock::new(
+            re_sdk_types::reflection::reflection().clone(),
+        ));
+        let options = Default::default();
+        let mut fallbacks = Default::default();
+        registry
+            .add_class::<re_view_spatial::SpatialView3D>(&reflection, &options, &mut fallbacks)
+            .unwrap();
+        registry
+            .extend_class(
+                re_view_spatial::SpatialView3D::identifier(),
+                &reflection,
+                &options,
+                &mut fallbacks,
+                register_splat_system,
+            )
+            .unwrap();
+        let visualizers =
+            registry.new_visualizer_collection(re_view_spatial::SpatialView3D::identifier());
+        let mut splats: Vec<_> = visualizers
+            .iter_with_identifiers()
+            .map(|(id, _)| id.to_string())
+            .filter(|id| id.contains("GaussianSplats3D"))
+            .collect();
+        splats.sort();
+        assert_eq!(splats, ["ComputeGaussianSplats3D", "GaussianSplats3D"]);
+        assert!(
+            visualizers
+                .iter_with_identifiers()
+                .any(|(id, _)| id.as_str() == crate::selection::COMPUTE_HEXELS)
+        );
+        assert!(
+            visualizers.iter_with_identifiers().count() > 10,
+            "Other spatial visualizers remain registered"
+        );
     }
 }

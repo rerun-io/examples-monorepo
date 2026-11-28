@@ -20,7 +20,7 @@ CANONICAL_VIEWER: Path = ROOT.parent / "canonical-viewer/target/release/rerun-ca
 @pytest.fixture(scope="module")
 def binaries() -> Path:
     subprocess.run(
-        ["cargo", "build", "--locked", "-p", "gsplat-cli", "--features", "gsplat-cli/probe"],
+        ["cargo", "build", "--locked", "-p", "gsplat-cli"],
         cwd=ROOT, env=os.environ, check=True, timeout=1200,
     )
     return ROOT / "target/debug"
@@ -132,7 +132,7 @@ def run_capture(binaries: Path, viewer: Path, out: Path, mode: str) -> None:
 
 @pytest.mark.integration
 @pytest.mark.parametrize(("limit", "scale", "moving", "automatic"), [(1024, 0.18, False, False), (65536, 10.0, True, False), (1024, 0.18, False, True)])
-def test_storage_capacity_uses_visible_native_fallback(binaries: Path, tmp_path: Path, limit: int, scale: float, moving: bool, automatic: bool) -> None:
+def test_storage_capacity_uses_visible_native_fallback(viewer_probe: Path, tmp_path: Path, limit: int, scale: float, moving: bool, automatic: bool) -> None:
     """Upload and intersection capacity failures retain visible native splats, including while moving."""
     import numpy as np
     import rerun as rr
@@ -159,7 +159,7 @@ def test_storage_capacity_uses_visible_native_fallback(binaries: Path, tmp_path:
     rr.disconnect()
     report: Path = tmp_path / "fallback.json"
     result: subprocess.CompletedProcess[str] = subprocess.run(
-        [str(binaries / "gsplat"), "probe", str(recording_path), "--out", str(report), "--window-size", "800x600", "--storage-binding-limit", str(limit), *(["--require-motion"] if moving else [])],
+        [str(viewer_probe), str(recording_path), "--out", str(report), "--window-size", "800x600", "--storage-binding-limit", str(limit), *(["--require-motion"] if moving else [])],
         text=True, capture_output=True, check=False, timeout=180,
     )
     print(result.stdout, result.stderr, sep="\n")
@@ -172,7 +172,7 @@ def test_storage_capacity_uses_visible_native_fallback(binaries: Path, tmp_path:
 
 
 @pytest.mark.integration
-def test_hexel_capacity_failure_draws_the_points_fallback(binaries: Path, tmp_path: Path) -> None:
+def test_hexel_capacity_failure_draws_the_points_fallback(viewer_probe: Path, tmp_path: Path) -> None:
     """25 V3 hexels need 6,500 storage bytes; a 1,024-byte device limit leaves the Points3D-style fallback visible."""
     import numpy as np
     import rerun as rr
@@ -206,7 +206,7 @@ def test_hexel_capacity_failure_draws_the_points_fallback(binaries: Path, tmp_pa
     rr.disconnect()
     report: Path = tmp_path / "fallback.json"
     result: subprocess.CompletedProcess[str] = subprocess.run(
-        [str(binaries / "gsplat"), "probe", str(recording_path), "--out", str(report), "--window-size", "800x600", "--storage-binding-limit", "1024"],
+        [str(viewer_probe), str(recording_path), "--out", str(report), "--window-size", "800x600", "--storage-binding-limit", "1024"],
         text=True, capture_output=True, check=False, timeout=180,
     )
     print(result.stdout, result.stderr, sep="\n")

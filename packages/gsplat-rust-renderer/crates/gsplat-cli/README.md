@@ -16,8 +16,6 @@ target/release/gsplat parity --impl ours --oracle brush \
   --ply scene.ply --path transforms_test.json --holdout-every 8 --out parity.json
 target/release/gsplat parity --impl ours --archetype recording.rrd \
   --ply scene.ply --path cameras.json --save-images evidence --out quantization.json
-# Build with cargo build --locked -p gsplat-cli --features probe:
-target/debug/gsplat probe recording.rrd --out frames.json --window-size 1920x1080
 ```
 
 Hexel PLYs (`comment hexels_format 1`; variants v1, v2, v3 and 2D fits) render through
@@ -54,9 +52,6 @@ the ground-truth directory must contain matching RGB images without depth sideca
 `--convention published` selects the white-background checkpoint convention,
 and `brush` is the default. PNG scoring includes export clipping and rounding.
 
-The probe needs one 3D view and writes its camera path and a PNG beside the report.
-Use `--storage-binding-limit N` to exercise capacity fallback and `--require-motion`
-to reject held views. See [architecture](../../docs/architecture.md) for the timing
-protocol, precision boundaries, and report provenance.
+See [architecture](../../docs/architecture.md) for precision boundaries and report provenance.
 
 On Metal, `speed` reports `lane1: null` with `lane1_unavailable_reason`: per-stage GPU timestamps are unreliable. Frame timings remain available; Vulkan and DX12 retain stage timings.

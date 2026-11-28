@@ -101,7 +101,8 @@ one UI frame. Upstream integration needs the current full pose, projection, and
 pixel resolution in `DrawableCollectionViewInfo`; camera position alone cannot
 replace those fields.
 
-`gsplat probe` is enabled by the `probe` feature of `gsplat-cli`. It reads the camera
+`viewer-probe` (`packages/canonical-viewer/rust/crates/viewer-probe`, built by `canonical-viewer-build`) is the
+canonical viewer with a timing loop around it. It reads the camera
 through a view context system and measures a full headless UI/compute/composite
 frame with GPU completion. Its moving-camera guard rejects held views, and warmup
 and measurement end on whole 300-frame orbit boundaries; the ten warmup seconds count

@@ -1,5 +1,5 @@
 //! PLY metadata and raw f32 uploads at the application boundary.
-use crate::camera::CameraSpec;
+use crate::camera::{BrushCamera as _, CameraSpec};
 use anyhow::Context as _;
 use anyhow::Result;
 use brush_serde::import::SplatData;
