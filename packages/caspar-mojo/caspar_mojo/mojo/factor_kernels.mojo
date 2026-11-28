@@ -25,8 +25,8 @@ from max.gpu.primitives import warp
 from layout import ImmTileTensor, MutTileTensor, row_major
 
 from blocks import L1, Packed, VecIn, damped_solve, tri, tri_index
-from camera_models import CameraModel, MAX_PARAMS, Params
-from geometry import Pose, Vec3, apply, cross, rotation, translation
+from camera_models import CameraModel, MAX_PARAMS, Params, Projection
+from geometry import Mat3, Pose, Vec3, apply, cross, rotation, translation
 
 comptime L2 = type_of(row_major((0, 0)))
 comptime F32Ptr = MutPointer[Float32, MutUntrackedOrigin]
@@ -137,10 +137,22 @@ struct Linearized[K: Int](Movable):
     var calib: Array[Float32, 2 * Self.K]
 
 
+@fieldwise_init
+struct Observed[K: Int](Movable):
+    """One observation's world -> rig -> sensor chain (with the pieces its Jacobians reuse) and its projection."""
+
+    var world: Vec3
+    var r_rig: Mat3
+    var r_sensor: Mat3
+    var rig_point: Vec3
+    var proj: Projection[Self.K]
+
+
 @always_inline
-def project_observation[Model: CameraModel](
+def observe[Model: CameraModel](
     poses: F32In, rigs: F32In, intrinsics: F32In, points: F32In, frame: Int, camera: Int, point: Int
-) -> Linearized[Model.NUM_CALIB]:
+) -> Observed[Model.NUM_CALIB]:
+    """The one residual path: `score_kernel` and the linearisation project through it, so LM compares like with like."""
     comptime assert points.flat_rank == 2
     var pose = load_pose(poses, frame)
     var rig = load_pose(rigs, camera)
@@ -149,7 +161,19 @@ def project_observation[Model: CameraModel](
     var r_sensor = rotation(rig)
     var rig_point = apply(r_rig, translation(pose), world)
     var cam = apply(r_sensor, translation(rig), rig_point)
-    var proj = Model.project(cam.x, cam.y, cam.z, load_params(intrinsics, camera))
+    return Observed[Model.NUM_CALIB](world, r_rig, r_sensor, rig_point, Model.project(cam.x, cam.y, cam.z, load_params(intrinsics, camera)))
+
+
+@always_inline
+def project_observation[Model: CameraModel](
+    poses: F32In, rigs: F32In, intrinsics: F32In, points: F32In, frame: Int, camera: Int, point: Int
+) -> Linearized[Model.NUM_CALIB]:
+    var o = observe[Model](poses, rigs, intrinsics, points, frame, camera, point)
+    ref proj = o.proj
+    ref world = o.world
+    ref r_rig = o.r_rig
+    ref r_sensor = o.r_sensor
+    ref rig_point = o.rig_point
     var j_pose = Array[Float32, 12](fill=0.0)
     var j_point = Array[Float32, 6](fill=0.0)
     var j_rig = Array[Float32, 12](fill=0.0)
@@ -405,15 +429,9 @@ def score_kernel[Model: CameraModel](
     var n = global_idx.x
     var cost: Float32 = 0.0
     if n < Int(obs_frame.dim[0]()):
-        var camera = Int(obs_camera[n][0])
-        var pose = load_pose(poses, Int(obs_frame[n][0]))
-        var rig = load_pose(rigs, camera)
-        var point = Int(obs_point[n][0])
-        var world = Vec3(points[point, 0][0], points[point, 1][0], points[point, 2][0])
-        var cam = apply(rotation(rig), translation(rig), apply(rotation(pose), translation(pose), world))
-        var proj = Model.project(cam.x, cam.y, cam.z, load_params(intrinsics, camera))
-        var e0 = proj.u - pixels[n, 0][0]
-        var e1 = proj.v - pixels[n, 1][0]
+        var o = observe[Model](poses, rigs, intrinsics, points, Int(obs_frame[n][0]), Int(obs_camera[n][0]), Int(obs_point[n][0]))
+        var e0 = o.proj.u - pixels[n, 0][0]
+        var e1 = o.proj.v - pixels[n, 1][0]
         cost = 0.5 * (e0 * e0 + e1 * e1)
     reduce_add(scalars, Int(cost_slot), cost)
 
