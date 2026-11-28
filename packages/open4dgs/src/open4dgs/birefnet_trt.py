@@ -13,7 +13,7 @@ mattes at batch 8 but wrong ones (|p| differences up to 1.0 over ~70 % of pixels
 
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 from jaxtyping import Float16
@@ -22,7 +22,7 @@ from torch import Tensor
 from open4dgs.masks import MODEL_SIZE, MatteNet, load_birefnet
 
 if TYPE_CHECKING:
-    import trtkit
+    from trtkit import TrtBuildConfig
 
 MAX_BATCH: int = 8
 """The engine's batch (``predict_mattes``' default batch)."""
@@ -49,7 +49,7 @@ def onnx_path(model_dir: Path, cache_dir: Path = DEFAULT_CACHE_DIR) -> Path:
     return cache_dir / f"birefnet-{digest}_fp16_{MODEL_SIZE}_b{MAX_BATCH}_op{ONNX_OPSET}_v{EXPORT_VERSION}.onnx"
 
 
-def engine_config() -> "trtkit.TrtBuildConfig":
+def engine_config() -> "TrtBuildConfig":
     """The TensorRT build settings (part of the engine cache key): the static batch at the static crop size."""
     from trtkit import TrtBuildConfig
 
@@ -75,7 +75,8 @@ def _deform_conv2d_onnx(
     """``torchvision::deform_conv2d`` as ONNX ``DeformConv`` (same offset layout and modulation mask)."""
     from onnxscript import opset20 as op
 
-    return op.DeformConv(
+    # The exporter passes onnxscript tensors whose dtype (fp16 here) the signature cannot state without narrowing it.
+    return op.DeformConv(  # pyrefly: ignore[bad-specialization]
         input,
         weight,
         offset,
@@ -133,8 +134,9 @@ def cached_engine(model_dir: Path, cache_dir: Path = DEFAULT_CACHE_DIR) -> Path 
 def register_plugins() -> None:
     """Load TensorRT's plugin library: the parser maps ``DeformConv`` onto its ``ModulatedDeformConv2d`` plugin, and an
     engine holding that plugin deserialises only once the library is registered."""
-    import tensorrt as trt
+    import tensorrt
 
+    trt: Any = tensorrt  # the compiled bindings have incomplete stubs (as in trtkit.trt_builder)
     if not trt.init_libnvinfer_plugins(trt.Logger(trt.Logger.WARNING), ""):
         raise RuntimeError("TensorRT's plugin library did not register (the BiRefNet engine needs ModulatedDeformConv2d)")
 
