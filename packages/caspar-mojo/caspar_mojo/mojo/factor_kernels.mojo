@@ -21,6 +21,7 @@ from geometry import Mat3, Pose, Vec3, apply, cross, rotation, translation
 comptime L1 = type_of(row_major((0,)))
 comptime L2 = type_of(row_major((0, 0)))
 comptime F32Ptr = MutPointer[Float32, MutUntrackedOrigin]
+comptime F64Ptr = MutPointer[Float64, MutUntrackedOrigin]
 comptime F32In = ImmTileTensor[DType.float32, L2, ImmUntrackedOrigin]
 comptime I32In = ImmTileTensor[DType.int32, L1, ImmUntrackedOrigin]
 comptime VecIn = ImmTileTensor[DType.float32, L1, ImmUntrackedOrigin]
@@ -57,11 +58,15 @@ def atomic_add(p: F32Ptr, offset: Int, value: Float32):
 
 
 @always_inline
-def reduce_add(p: F32Ptr, slot: Int, value: Float32):
-    """Sum over the warp, then one atomic per warp. Every lane must call it."""
+def reduce_add(p: F64Ptr, slot: Int, value: Float32):
+    """Sum over the warp, then one float64 atomic per warp. Every lane must call it.
+
+    Float64 slots keep the cost free of the accumulation-order noise that would otherwise decide the
+    accept / reject of the near-converged trials (their cost changes are ~1e-6 relative).
+    """
     var total = warp.sum(value)
     if lane_id() == 0:
-        atomic_add(p, slot, total)
+        _ = Atomic[Float64, scope="device"].fetch_add[ordering=Ordering.relaxed](p.unsafe_offset(slot), Float64(total))
 
 
 @always_inline
@@ -154,7 +159,7 @@ def linearize_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bo
     jac: Jac,
     g: F32Ptr,
     hblk: F32Ptr,
-    scalars: F32Ptr,
+    scalars: F64Ptr,
     cost_slot: Int32,
     n6: Int32,
     n_calib: Int32,
@@ -230,7 +235,7 @@ def score_kernel[Model: CameraModel](
     obs_camera: I32In,
     obs_point: I32In,
     pixels: F32In,
-    scalars: F32Ptr,
+    scalars: F64Ptr,
     cost_slot: Int32,
 ):
     """The cost 1/2 sum |e|^2 at a (trial) state."""

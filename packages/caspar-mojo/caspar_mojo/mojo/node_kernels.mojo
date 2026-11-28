@@ -10,7 +10,7 @@ from max.gpu import global_idx
 
 from layout import ImmTileTensor, MutTileTensor
 
-from factor_kernels import F32In, F32Ptr, I32In, L1, L2, VecIn, reduce_add, tri, tri_index
+from factor_kernels import F32In, F64Ptr, I32In, L1, L2, VecIn, reduce_add, tri, tri_index
 from camera_models import CameraModel
 from geometry import Pose, retract
 
@@ -95,7 +95,7 @@ def pcg_precond_kernel[K: Int](
     lam: Float32,
     alpha: Float32,
     first: Int32,
-    scalars: F32Ptr,
+    scalars: F64Ptr,
     rho_slot: Int32,
 ):
     """Camera blocks: (k > 0) r -= alpha w, s += alpha p; z = M^-1 r; rho += r.z. (k = 0) s = 0."""
@@ -118,7 +118,7 @@ def pcg_direction_kernel(
     w: Vec,
     n_cam: Int32,
     first: Int32,
-    scalars: F32Ptr,
+    scalars: F64Ptr,
     rho_slot: Int32,
 ):
     """Camera part: beta = rho_k / rho_{k-1}, p = z + beta p, Mp = r + beta Mp, w = Mp. Point part: w = 0."""
@@ -135,14 +135,14 @@ def pcg_direction_kernel(
         w[i] = r[i][0]
         return
     # The slots sit two apart: [rho_k, pw_k, rho_{k+1}, ...]. The generated BetaFromNumDenom keeps rho_k.
-    var beta = scalars[unsafe_offset=Int(rho_slot)] / scalars[unsafe_offset=Int(rho_slot) - 2]
+    var beta = Float32(scalars[unsafe_offset=Int(rho_slot)] / scalars[unsafe_offset=Int(rho_slot) - 2])
     var mpi = r[i][0] + beta * mp[i][0]
     p[i] = z[i][0] + beta * p[i][0]
     mp[i] = mpi
     w[i] = mpi
 
 
-def dot_kernel(a: VecIn, b: VecIn, n: Int32, scalars: F32Ptr, slot: Int32):
+def dot_kernel(a: VecIn, b: VecIn, n: Int32, scalars: F64Ptr, slot: Int32):
     comptime assert a.flat_rank == 1 and b.flat_rank == 1
     var i = global_idx.x
     var v: Float32 = 0.0
@@ -237,7 +237,7 @@ def retract_kernel[Model: CameraModel](
     n6: Int32,
     n_calib: Int32,
     lam: Float32,
-    scalars: F32Ptr,
+    scalars: F64Ptr,
     pred_slot: Int32,
 ):
     """One thread per node (frames, cameras, points): trial = retract(state, s); fused s.(g + lambda D s)."""

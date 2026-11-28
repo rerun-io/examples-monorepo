@@ -229,8 +229,8 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
     var d_s = ctx.enqueue_create_buffer[DType.float32](nt)
     var d_h = ctx.enqueue_create_buffer[DType.float32](max(lay.n_h, 1))
     var n_scalars = SLOT_PCG + 2 * (options.reduced_pcg_iter_max + 1)
-    var d_scalars = ctx.enqueue_create_buffer[DType.float32](n_scalars)
-    var host2 = ctx.enqueue_create_host_buffer[DType.float32](2)
+    var d_scalars = ctx.enqueue_create_buffer[DType.float64](n_scalars)
+    var host2 = ctx.enqueue_create_host_buffer[DType.float64](2)
     ctx.enqueue_memset(d_p, 0.0)
     ctx.enqueue_memset(d_mp, 0.0)
     ctx.enqueue_memset(d_s, 0.0)
@@ -291,9 +291,9 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
         grid_dim=obs_grid, block_dim=BLOCK,
     )
     launches += 1
-    ctx.enqueue_copy(host2, d_scalars.create_sub_buffer[DType.float32](SLOT_COST_LINEARIZE, 2))
+    ctx.enqueue_copy(host2, d_scalars.create_sub_buffer[DType.float64](SLOT_COST_LINEARIZE, 2))
     ctx.synchronize()
-    var score_best = host2[0]
+    var score_best = Float32(host2[0])
     var initial_cost = score_best
     if linearize_only:
         _download(ctx, linearize_gradient, d_g, lay.n_tan)
@@ -364,10 +364,10 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
                 p.as_imm(), w.as_imm(), Int32(lay.n_cam), scalars, rho_slot + 1, grid_dim=_grid(lay.n_cam), block_dim=BLOCK
             )
             launches += 6
-            ctx.enqueue_copy(host2, d_scalars.create_sub_buffer[DType.float32](Int(rho_slot), 2))
+            ctx.enqueue_copy(host2, d_scalars.create_sub_buffer[DType.float64](Int(rho_slot), 2))
             ctx.synchronize()
-            var rho = host2[0]
-            alpha = rho / host2[1]
+            var rho = Float32(host2[0])
+            alpha = rho / Float32(host2[1])
             k += 1
             # A rho or alpha that is not finite and positive ends the PCG before its step (k = 1: a zero step).
             if not _usable(Float64(rho)) or not _usable(Float64(alpha)):
@@ -406,13 +406,13 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
             grid_dim=obs_grid, block_dim=BLOCK,
         )
         launches += 4
-        ctx.enqueue_copy(host2, d_scalars.create_sub_buffer[DType.float32](SLOT_COST_TRIAL, 2))
+        ctx.enqueue_copy(host2, d_scalars.create_sub_buffer[DType.float64](SLOT_COST_TRIAL, 2))
         ctx.synchronize()
-        var score_trial = host2[0]
+        var score_trial = Float32(host2[0])
         if print_progress:
             print(t"solver_iter: {it}  pcg_iter: {k}  score_current: {score_trial}  score_best: {score_best}  diag: {diag}")
         if score_trial < score_best * options.solver_rel_decrease_min:
-            var quality = (score_best - score_trial) / (0.5 * host2[1])
+            var quality = (score_best - score_trial) / Float32(0.5 * host2[1])
             var q = 2.0 * quality - 1.0
             var scale = max(options.diag_scaling_down, 1.0 - q * q * q)
             diag = max(options.diag_min, diag * scale)
