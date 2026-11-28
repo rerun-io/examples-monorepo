@@ -183,7 +183,7 @@ def _run_preprocess(cfg) -> None:
     import torch
     from hmr4d.utils.geo.hmr_cam import get_bbx_xys_from_xyxy
     from hmr4d.utils.preproc.tracker import Tracker
-    from hmr4d.utils.preproc.vitfeat_extractor import Extractor
+    from hmr4d.utils.preproc.vitfeat_extractor import Extractor, get_batch
     from hmr4d.utils.preproc.vitpose import VitPoseExtractor
     from hmr4d.utils.pylogger import Log
     from hmr4d.utils.video_io_utils import get_video_lwh
@@ -219,16 +219,22 @@ def _run_preprocess(cfg) -> None:
         bbx_xys = torch.load(paths.bbx, weights_only=True)["bbx_xys"]
         Log.info("[Preprocess] bbx (xyxy, xys) from %s", paths.bbx)
 
-    if not Path(paths.vitpose).exists():
+    need_vitpose = not Path(paths.vitpose).exists()
+    need_features = not Path(paths.vit_features).exists()
+    if need_vitpose or need_features:
+        # Both extractors build the same 256 px crops (get_batch at img_ds=0.5, a full decode of the clip) when given
+        # the video path; build them once and give both the tensor, with the boxes get_batch returns beside it.
+        crops, crop_bbx_xys = get_batch(video_path, bbx_xys, img_ds=0.5)
+    if need_vitpose:
         extractor = VitPoseExtractor()
-        torch.save(extractor.extract(video_path, bbx_xys), paths.vitpose)
+        torch.save(extractor.extract(crops, crop_bbx_xys), paths.vitpose)
         del extractor
     else:
         Log.info("[Preprocess] vitpose from %s", paths.vitpose)
 
-    if not Path(paths.vit_features).exists():
+    if need_features:
         extractor = Extractor()
-        torch.save(extractor.extract_video_features(video_path, bbx_xys), paths.vit_features)
+        torch.save(extractor.extract_video_features(crops, crop_bbx_xys), paths.vit_features)
         del extractor
     else:
         Log.info("[Preprocess] vit_features from %s", paths.vit_features)
