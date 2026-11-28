@@ -17,6 +17,10 @@ from caspar_mojo.problem import BaOptions, BaProblem, BaResult, CameraModel
 from caspar_mojo.reference.cameras import focal_and_extra_columns, project
 from caspar_mojo.reference.poses import camera_point, normalize_pose, retract_pose
 
+COST_DECREASE_FLOOR: float = 1e-6
+"""Smallest relative cost decrease a trial must show to be accepted, as in the Mojo solver (solver.mojo, same name).
+CASPAR's float32 cost sum cannot resolve a smaller decrease; polishing below it changes no result."""
+
 Vector = list[ndarray]
 """One (n_free, D) array per group; the camera groups come first, the point group last."""
 
@@ -332,7 +336,7 @@ def reference_solve(problem: BaProblem, options: BaOptions, dtype: type = np.flo
         candidate = retract(problem, state, groups, step)
         score_tried = real(cost(problem, candidate, groups))
         diag_current = diag
-        accepted = bool(score_tried < score_best * real(options.solver_rel_decrease_min))
+        accepted = bool(np.float64(score_tried) < np.float64(score_best) * options.solver_rel_decrease_min * (1.0 - COST_DECREASE_FLOOR))
         if accepted:
             predicted = real(0.5) * dot(
                 step, [g + diag * np.einsum("nii->ni", b) * s for g, b, s in zip(lin.gradient, lin.block_diagonal, step, strict=True)]

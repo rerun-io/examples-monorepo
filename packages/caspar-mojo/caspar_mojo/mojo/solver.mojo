@@ -47,6 +47,11 @@ comptime SLOT_COST_TRIAL = 1
 comptime SLOT_PRED = 2
 comptime SLOT_PCG = 4
 
+comptime COST_DECREASE_FLOOR: Float64 = 1e-6
+"""Smallest relative cost decrease a trial must show to be accepted. CASPAR's float32 cost sum cannot resolve a
+smaller one (its noise is about 1e-6 relative); our float64 sum can, and polishing below it costs up to 2.7x the solve
+for no change in the result. 1e-6 is also Ceres's default function tolerance."""
+
 comptime BLOCKS_PER_SM = 6
 """Resident blocks per SM the tiled observation kernels aim for; each block then walks consecutive tiles."""
 
@@ -623,7 +628,7 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
         ctx.synchronize()
         var score_trial = Float32(host2[0])
         var damping = diag
-        var accepted = score_trial < score_best * options.solver_rel_decrease_min
+        var accepted = Float64(score_trial) < Float64(score_best) * Float64(options.solver_rel_decrease_min) * (1.0 - COST_DECREASE_FLOOR)
         if accepted:
             var quality = (score_best - score_trial) / Float32(0.5 * host2[1])
             var q = 2.0 * quality - 1.0
