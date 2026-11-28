@@ -60,7 +60,7 @@ source:
   - path: ../../packages/depth-video-viewer/Cargo.toml
     target_directory: depth-video-viewer
     use_gitignore: false
-  # The library files only: application.rs (the standalone app, behind `app`) and src/testdata (tests) stay out.
+  # The library files only: src/testdata (tests) stays out.
   - path: ../../packages/depth-video-viewer/src/lib.rs
     target_directory: depth-video-viewer/src
     use_gitignore: false
@@ -71,9 +71,6 @@ source:
     target_directory: depth-video-viewer/src
     use_gitignore: false
   - path: ../../packages/depth-video-viewer/src/visualizer.rs
-    target_directory: depth-video-viewer/src
-    use_gitignore: false
-  - path: ../../packages/depth-video-viewer/src/main.rs
     target_directory: depth-video-viewer/src
     use_gitignore: false
   # The stock @rerun-io/web-viewer 0.44.0 package: the shell around the canonical re_viewer.js / re_viewer_bg.wasm.

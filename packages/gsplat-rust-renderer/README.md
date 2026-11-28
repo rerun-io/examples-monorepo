@@ -1,7 +1,8 @@
 # Gaussian splat renderer
 
 One raw-wgpu core renders PLY scenes in a standalone CLI and native
-`GaussianSplats3D` recordings in a custom Rerun viewer. Rust also provides
+`GaussianSplats3D` recordings in the canonical Rerun viewer (`rerun-canonical`, packages/canonical-viewer), whose
+gsplat extension is `crates/gsplat-viewer`. Rust also provides
 in-process Brush training, image metrics, and renderer comparisons.
 See [architecture](docs/architecture.md) for data boundaries and limitations.
 
@@ -13,23 +14,22 @@ the dev environment adds linting, type checks, and tests.
 ```bash
 pixi run -e gsplat-rust-renderer-dev --frozen gsplat-build
 pixi run -e gsplat-rust-renderer --frozen gsplat-download pretrained lego
-pixi shell -e gsplat-rust-renderer
-cd packages/gsplat-rust-renderer
-target/release/gsplat-rust-renderer
+pixi run -e canonical-viewer --frozen rerun-canonical     # the canonical viewer, with this renderer
 ```
 
 Activate a Pixi environment once to link the patched `brush-src` tree for Cargo and rust-analyzer; see the bump runbook in [Cargo.toml](Cargo.toml).
-In another activated shell, run `python tools/log_gaussian_ply.py --rr-config.connect`.
+In an activated gsplat shell (`pixi shell -e gsplat-rust-renderer`, in `packages/gsplat-rust-renderer`), run
+`python tools/log_gaussian_ply.py --rr-config.connect`.
 Pass `--rr-config.headless` when saving a recording without a display.
 
-The custom viewer selects compute rendering automatically. Stock Rerun selects
+The canonical viewer selects compute rendering automatically. Stock Rerun selects
 its native renderer for the same recording. An explicit compute visualizer
-selection requires the custom viewer.
+selection requires the canonical viewer.
 
 Hexel PLYs (planar hexagons, [hexel PLY contract](crates/gsplat-cli/README.md))
 enter Rerun as the custom `Hexels3D` archetype (`gsplat_rust_renderer.hexels3d`):
 f32 centres, xyzw rotations, two scales, opacity, sharpness, a colour field and
-the V2/V3 view term, plus a `Points3D` fallback on the same entity. The custom
+the V2/V3 view term, plus a `Points3D` fallback on the same entity. The canonical
 viewer draws the hexels with the core's hexel primitive; stock Rerun draws the
 fallback points. `tools/log_hexels_compare.py` logs a Brush 3DGS PLY and a hexel
 PLY side by side: both views track one orbit camera on the `frame` timeline
@@ -37,7 +37,7 @@ PLY side by side: both views track one orbit camera on the `frame` timeline
 with a per-scene metrics table below. `--layout brush|hexels` writes the
 one-view recording that `gsplat probe` measures.
 
-![Pretrained Lego in the custom viewer](docs/media/pretrained-lego.png)
+![Pretrained Lego in the canonical viewer](docs/media/pretrained-lego.png)
 
 ### Web viewer
 

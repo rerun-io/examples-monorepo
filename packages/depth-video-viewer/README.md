@@ -1,23 +1,22 @@
 # depth-video-viewer
 
-A Rerun 0.44 viewer that shows depth stored as AV1 10-bit monochrome lossless video (`DepthVideoStream`) in the
+A canonical-viewer extension that shows depth stored as AV1 10-bit monochrome lossless video (`DepthVideoStream`) in the
 built-in 2D and 3D spatial views. In 2D the depth is a colormapped image; under a `Pinhole` in 3D it is a depth cloud,
 exactly as for `DepthImage`/`EncodedDepthImage`.
 
 It is an out-of-tree extension of the canonical viewer (`packages/canonical-viewer`): the library exports
 `EXTENSION`, which adds one visualizer to `Spatial2DView` and `Spatial3DView` through `App::extend_view_class`, and
-`rerun-canonical` lists it beside gsplat. The standalone `depth-video-viewer` binary (feature `app`, on by default)
-registers the same `EXTENSION` until the canonical viewer replaces it. Rerun's crates come from git tag `0.44.0` (not
-on crates.io) with a `[patch.crates-io]` for its unreleased egui, no Rerun fork.
+`rerun-canonical` lists it beside gsplat; there is no standalone binary. Rerun's crates come from git tag `0.44.0`
+(not on crates.io) with a `[patch.crates-io]` for its unreleased egui, no Rerun fork.
 
 The Rust archetype, decoder and visualizer and the Python `log.py` are out-of-tree scaffolding for checking depth as
 video end to end. They are deleted once `DepthVideoStream` ships in Rerun; the encoder settings, the comparison tool
 and the evidence stay here.
 
-## Why a custom viewer
+## Why an extension
 
 Stock Rerun keeps only 8 bits of 10-bit AV1 luma: rav1d decodes 10-bit streams in every build, and `re_video` then
-right-shifts the samples to 8 bits (`decode/av1.rs:295-297`, TODO #7594). This viewer decodes with the same crate
+right-shifts the samples to 8 bits (`decode/av1.rs:295-297`, TODO #7594). This extension decodes with the same crate
 (`re_rav1d`) and copies the Y plane as is, so every 10-bit code comes back exact. The codes then go through the same public upload
 as `DepthImage` (`gpu_bridge::image_to_gpu`, an `R16Uint` texture), so the pixels equal those of a PNG
 `EncodedDepthImage` of the same codes.
@@ -27,13 +26,6 @@ as `DepthImage` (`gpu_bridge::image_to_gpu`, an `R16Uint` texture), so the pixel
 `rerun-canonical` draws `DepthVideoStream` (`pixi run -e canonical-viewer --frozen rerun-canonical -- recording.rrd`).
 `tests/test_viewer_pixels.py` (`pixi run -e depth-video-viewer-dev --frozen tests-golden`) checks that it draws the
 video pixel-identical to a PNG `EncodedDepthImage` of the same codes, in 2D, as a 3D cloud and beside gsplat splats.
-The standalone binary:
-
-```bash
-# From the repo root.
-pixi run -e depth-video-viewer --frozen depth-video-viewer-build
-pixi run -e depth-video-viewer --frozen depth-video-viewer -- recording.rrd     # or --headless, --port 9876
-```
 
 Log from Python with the stock rerun-sdk (`depth_video_viewer/log.py`, `encode.py`):
 

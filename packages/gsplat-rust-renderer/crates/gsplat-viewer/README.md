@@ -1,9 +1,12 @@
 # gsplat-viewer
 
+The gsplat extension of the canonical viewer (`packages/canonical-viewer`): `setup::EXTENSION` registers the compute
+splat, Hexels3D, SOG, SOG LOD and animated SOG visualizers. Open recordings with `rerun-canonical`:
+
 ```bash
-target/release/gsplat-rust-renderer recording.rrd
+rerun-canonical recording.rrd
 # Without a display:
-target/release/gsplat-rust-renderer recording.rrd --headless --port 9877
+rerun-canonical recording.rrd --headless --port 9877
 ```
 
 For complete headless frame timings, use `gsplat probe` (the `gsplat-cli` `probe` feature);
