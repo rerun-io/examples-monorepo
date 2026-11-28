@@ -21,9 +21,13 @@ ENABLED: bool = INFERENCE.dit_fused_glue
 
 
 def active(x: Tensor) -> bool:
-    """Whether inference on ``x`` takes the fused kernels (CUDA, no autograd)."""
+    """Whether inference on ``x`` takes the fused kernels: the one eligibility rule of every dispatch site.
 
-    return ENABLED and x.is_cuda and not torch.is_grad_enabled()
+    The kernels round to BF16 and index contiguous rows, so any other input (an FP32 stream, a strided view, autograd)
+    runs the eager code instead of rounding differently or raising.
+    """
+
+    return ENABLED and x.is_cuda and x.dtype == torch.bfloat16 and x.is_contiguous() and not torch.is_grad_enabled()
 
 
 @triton.jit

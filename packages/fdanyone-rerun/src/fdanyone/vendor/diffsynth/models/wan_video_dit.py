@@ -118,7 +118,7 @@ def normalized_modulation(
 
     if torch.is_grad_enabled():
         return modulate(norm(x), shift, scale)
-    if fused.active(x) and x.dtype == torch.bfloat16 and x.is_contiguous():
+    if fused.active(x):
         return fused.layer_norm_modulation(x, shift, scale, norm.eps)
 
     output = torch.empty_like(x)
@@ -341,13 +341,15 @@ class DiTBlock(nn.Module):
         # token slab for the equally shaped second-projection output.
         if not torch.is_grad_enabled():
             del x
-            if isinstance(self.ffn[2], Fp8RowwiseLinear):
-                return self.ffn[2].forward_gelu(hidden)
+            if isinstance(self.ffn[2], Fp8RowwiseLinear) and fused.active(hidden):
+                return project_fp8_shared((self.ffn[2],), hidden, gelu=True)[0]
         hidden = gelu_tanh(hidden)
         return self.ffn[2](hidden)
 
     def _norm3(self, x: torch.Tensor) -> torch.Tensor:
-        if fused.active(x) and x.is_contiguous():
+        """A call, not a local, so the normalized slab is released before the FFN allocates its hidden activation."""
+
+        if fused.active(x):
             return fused.layer_norm_affine(x, self.norm3.weight, self.norm3.bias, self.norm3.eps)
         return self.norm3(x)
 
@@ -362,7 +364,7 @@ class DiTBlock(nn.Module):
 
         if torch.is_grad_enabled():
             return x + (branch if gate is None else gate * branch)
-        if gate is not None and fused.active(x) and x.is_contiguous() and branch.is_contiguous():
+        if gate is not None and fused.active(x) and fused.active(branch):
             return fused.gated_residual_(x, branch, gate)
         if gate is not None:
             branch.mul_(gate)

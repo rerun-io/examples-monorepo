@@ -7,6 +7,8 @@ from dataclasses import dataclass
 
 import torch
 
+from fdanyone.model import fused
+
 _DIT_PROJECTION_PATTERN: re.Pattern[str] = re.compile(
     r"blocks\.(?P<block>\d+)\."
     r"(?:(?:self_attn|self_attn_mvs|cross_attn)\.(?:q|k|v|o)|"
@@ -73,27 +75,11 @@ class Fp8RowwiseLinear(torch.nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return project_fp8_shared((self,), x)[0]
 
-    def forward_gelu(self, x: torch.Tensor) -> torch.Tensor:
-        """``forward(gelu_tanh(x))``, the GELU fused into the activation quantization (eagerly it overwrites ``x``)."""
-
-        return project_fp8_shared((self,), x, gelu=True)[0]
-
     def _gemm(self, quantized: torch.Tensor, scale_a: torch.Tensor, out: torch.Tensor) -> None:
-        torch._scaled_mm(
-            quantized, self.weight.t(), scale_a=scale_a, scale_b=self.weight_scale, bias=self.bias, out_dtype=torch.bfloat16, out=out
-        )
-
-    def _project_chunk(self, rows: torch.Tensor, out: torch.Tensor) -> None:
-        """Quantize one row chunk and write its BF16 product into ``out``; temporaries end here."""
-
-        chunk = rows.to(torch.bfloat16)  # the BF16 autocast contract of the replaced nn.Linear
-        amax = torch.linalg.vector_norm(chunk, ord=float("inf"), dim=-1, keepdim=True, dtype=torch.float32)
-        inverse_scale = (FP8_MAX / amax.clamp_(min=_TINY_AMAX)).to(torch.bfloat16)  # [m, 1]
-        quantized = chunk.mul(inverse_scale).to(FP8_DTYPE)
         torch._scaled_mm(
             quantized,
             self.weight.t(),  # column-major [K, N]
-            scale_a=inverse_scale.float().reciprocal(),  # [m, 1] fp32
+            scale_a=scale_a,  # [m, 1] fp32
             scale_b=self.weight_scale,  # [1, N] fp32
             bias=self.bias,
             out_dtype=torch.bfloat16,
@@ -101,34 +87,40 @@ class Fp8RowwiseLinear(torch.nn.Module):
         )
 
 
+def _quantize_rows_eager(rows: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """The eager reference of ``fused.quantize_rows_fp8``: e4m3fn rows and their FP32 dequantization scale."""
+
+    chunk = rows.to(torch.bfloat16)  # the BF16 autocast contract of the replaced nn.Linear
+    amax = torch.linalg.vector_norm(chunk, ord=float("inf"), dim=-1, keepdim=True, dtype=torch.float32)
+    inverse_scale = (FP8_MAX / amax.clamp_(min=_TINY_AMAX)).to(torch.bfloat16)  # [m, 1]
+    return chunk.mul(inverse_scale).to(FP8_DTYPE), inverse_scale.float().reciprocal()
+
+
 def project_fp8_shared(
     linears: tuple[Fp8RowwiseLinear, ...], x: torch.Tensor, *, gelu: bool = False
 ) -> list[torch.Tensor]:
-    """Apply FP8 linears that read the same input, quantizing each row chunk of it once."""
+    """Apply FP8 linears that read the same input, quantizing each row chunk of it once.
+
+    ``gelu`` projects ``gelu_tanh(x)`` with the activation folded into the fused quantization; it has no eager form
+    here (the eager caller applies ``gelu_tanh`` in place first).
+    """
 
     first = linears[0]
-    rows = x.reshape(-1, first.in_features)
+    rows = x.reshape(-1, first.in_features)  # a copy for a strided input (the repeated cross-attention context)
+    use_fused = fused.active(rows)
+    if gelu and not use_fused:
+        raise ValueError("The GELU-folded projection needs the fused path (fdanyone.model.fused.active).")
     outs = [torch.empty((rows.shape[0], linear.out_features), dtype=torch.bfloat16, device=x.device) for linear in linears]
-    from fdanyone.model import fused as fused_kernels
-
-    fused = fused_kernels.active(x)
-    if gelu and not fused:
-        from fdanyone.vendor.diffsynth.models.wan_video_dit import gelu_tanh
-
-        rows = gelu_tanh(rows)
     # The fused kernel keeps only the FP8 copy (1 B per element) of a chunk; eager also keeps a BF16 scaled copy.
-    rows_per_chunk = max(16, first.chunk_budget_bytes // first.in_features) if fused else first.rows_per_chunk
+    rows_per_chunk = max(16, first.chunk_budget_bytes // first.in_features) if use_fused else first.rows_per_chunk
     # Autocast would run the row-maximum reduction on an FP32 copy of each chunk.
     with torch.autocast(device_type=x.device.type, enabled=False):
         for start in range(0, rows.shape[0], rows_per_chunk):
             chunk = rows[start : start + rows_per_chunk]
-            if fused:
-                quantized, scale_a = fused_kernels.quantize_rows_fp8(chunk.to(torch.bfloat16), gelu=gelu)
+            quantized, scale_a = fused.quantize_rows_fp8(chunk, gelu=gelu) if use_fused else _quantize_rows_eager(chunk)
             for linear, out in zip(linears, outs, strict=True):
-                if fused:
-                    linear._gemm(quantized, scale_a, out[start : start + rows_per_chunk])
-                else:
-                    linear._project_chunk(chunk, out[start : start + rows_per_chunk])
+                linear._gemm(quantized, scale_a, out[start : start + rows_per_chunk])
+            del quantized, scale_a  # else the next chunk's allocation overlaps this one and doubles the budget
     return [out.view(*x.shape[:-1], linear.out_features) for linear, out in zip(linears, outs, strict=True)]
 
 
