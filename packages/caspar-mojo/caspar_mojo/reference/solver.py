@@ -191,9 +191,7 @@ def retract(problem: BaProblem, state: State, groups: list[Group], step: Vector)
     return State(rig, sensor, intrinsics, points)
 
 
-def reference_solve(
-    problem: BaProblem, options: BaOptions, dtype: type = np.float64, cost_decrease_floor: float = COST_DECREASE_FLOOR
-) -> BaResult:
+def reference_solve(problem: BaProblem, options: BaOptions, dtype: type = np.float64, cost_decrease_floor: float = COST_DECREASE_FLOOR) -> BaResult:
     """Levenberg-Marquardt with CASPAR's PCG, reduced camera system, damping rule and exits.
 
     Args:

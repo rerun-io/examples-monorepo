@@ -155,8 +155,10 @@ def _merged(
 ) -> Float64[ndarray, "n w"]:
     """`original` with the solved values in its free rows' `columns`: fixed values never pass through float32."""
     out: Float64[ndarray, "n w"] = np.array(original, dtype=np.float64, order="C")
-    selection = np.ix_(np.flatnonzero(free), columns)
-    out[selection] = solved[selection]
+    in_columns: Bool[ndarray, " w"] = np.zeros(out.shape[1], dtype=bool)
+    in_columns[columns] = True
+    # A broadcast mask, not an index grid: np.ix_ over 273 k points cost 10 ms of a 50 ms call on clip 007.
+    np.copyto(out, solved, where=free[:, None] & in_columns)
     return out
 
 
