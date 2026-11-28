@@ -16,7 +16,9 @@ trigs = pytest.importorskip("trigs", reason="TRiGS comes from recipes/open4dgs-t
 pytestmark = pytest.mark.integration
 
 
-def _one_step(batched: bool, prior: bool, monkeypatch: pytest.MonkeyPatch) -> tuple[dict[str, torch.Tensor], dict[str, list], int]:
+def _one_step(
+    batched: bool, prior: bool, monkeypatch: pytest.MonkeyPatch, steps: int = 1, bar: object | None = None, log_every: int = 1
+) -> tuple[dict[str, torch.Tensor], dict[str, list], int]:
     from gsplat import rasterization
     from trigs.core.trainer import TrigsTrainingConfig
     from trigs.init.from_colmap import build_canonical_from_npz
@@ -79,12 +81,12 @@ def _one_step(batched: bool, prior: bool, monkeypatch: pytest.MonkeyPatch) -> tu
     }
     params, sh_degree, scene_extent = build_canonical_from_npz(keyframes, fps=FPS, keyframe_stride=3, device=dev)
     config = TrigsTrainingConfig(
-        n_steps=1,
+        n_steps=steps,
         fps=FPS,
         keyframe_stride=3,
         holdout_views=(),
         psnr_eval_every=0,
-        tb_log_every=1,
+        tb_log_every=log_every,
         tb_stats_every=0,
         viewer_snapshot_every=0,
         train_seed=0,
@@ -103,7 +105,7 @@ def _one_step(batched: bool, prior: bool, monkeypatch: pytest.MonkeyPatch) -> tu
             tuple(torch.zeros(F, H, W, 3, dtype=torch.uint8) + encode_normals(torch.tensor([0.0, 0.0, -1.0]), torch.tensor(True)) for _ in range(C)),
         )
         trainer.camera_loss_hook = MonoPriorLoss(
-            PriorConfig(schedule="steps", start_step=0, ramp_end_step=0, log_every=1, depth_edge_max=10.0, min_valid_fraction=0.0),
+            PriorConfig(schedule="steps", start_step=0, ramp_end_step=0, log_every=log_every, depth_edge_max=10.0, min_valid_fraction=0.0),
             maps,
             tuple(torch.stack([m[c].cpu() for m in gt_masks.values()]) for c in range(C)),
             tuple(range(C)),
@@ -149,6 +151,7 @@ def _one_step(batched: bool, prior: bool, monkeypatch: pytest.MonkeyPatch) -> tu
         gt_alphas_per_frame=gt_masks,
         config=config,
         writer=Scalars(),
+        progress_bar=bar,
     )
     monkeypatch.undo()
     if prior:
@@ -175,3 +178,32 @@ def test_batched_camera_losses_equal_the_camera_loop(prior: bool, monkeypatch: p
         assert rows_batch[name] == pytest.approx(rows_loop[name], rel=1e-5), name
     if prior:
         assert rows_loop["prior/depth"][0] > 0.0
+
+
+def test_steady_train_step_waits_on_the_host_at_most_three_times(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Recipe patches 0010-0012 + the batched pass: a steady production-config step (strided, fused loss, bf16 Adam,
+    prior on) synchronises with the GPU only for the active-row nonzero, the dynamic-row nonzero and gsplat's
+    torch.inverse of the view matrices (was ~30 per step: boolean-index gathers forward and backward, any() guards)."""
+    if not torch.cuda.is_available():
+        pytest.skip("needs a CUDA GPU (gsplat rasterization, Mojo SSIM)")
+    import warnings
+
+    caught: list[warnings.WarningMessage] = []
+
+    class Bar:
+        steps = 0
+
+        def update(self, n: int = 1) -> None:
+            self.steps += n
+            # Step 40: every stride offset's cameras and every frame's time constant exist (built once, with a sync).
+            if self.steps == 40:
+                torch.cuda.synchronize()
+                torch.cuda.set_sync_debug_mode("warn")
+            elif self.steps == 41:
+                torch.cuda.set_sync_debug_mode(0)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _one_step(True, True, monkeypatch, steps=42, bar=Bar(), log_every=100)  # step 40 is not a log step
+    syncs = [w for w in caught if "synchronizing CUDA operation" in str(w.message)]
+    assert 1 <= len(syncs) <= 3, [f"{w.filename.split('/')[-1]}:{w.lineno}" for w in syncs]
