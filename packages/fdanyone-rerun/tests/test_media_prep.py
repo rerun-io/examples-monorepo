@@ -20,7 +20,7 @@ CROP: Crop = Crop(top=8, left=16, height=48, width=64, original_height=64, origi
 
 def _video(path: Path, count: int) -> Path:
     generator: np.random.Generator = np.random.default_rng(0)
-    frames: list[UInt8[ndarray, "64 96 3"]] = [generator.integers(0, 256, (64, 96, 3), dtype=np.uint8) for _ in range(count)]
+    frames: tuple[UInt8[ndarray, "64 96 3"], ...] = tuple(generator.integers(0, 256, (64, 96, 3), dtype=np.uint8) for _ in range(count))
     return write_video(frames, path, Fraction(30), crf=18, preset="medium")
 
 
