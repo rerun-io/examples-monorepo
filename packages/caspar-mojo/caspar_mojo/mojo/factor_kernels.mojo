@@ -11,6 +11,7 @@ Scatter-adds into the gradient, the block diagonal and the products use relaxed 
 """
 
 from std.atomic import Atomic, Ordering
+from std.math import sqrt
 from max.gpu import WARP_SIZE, global_idx, lane_id, thread_idx
 from max.gpu.memory import AddressSpace
 from max.gpu.sync import barrier
@@ -27,6 +28,7 @@ comptime L2 = type_of(row_major((0, 0)))
 comptime F32Ptr = MutPointer[Float32, MutUntrackedOrigin]
 comptime F64Ptr = MutPointer[Float64, MutUntrackedOrigin]
 comptime F32In = ImmTileTensor[DType.float32, L2, ImmUntrackedOrigin]
+comptime Vec = MutTileTensor[DType.float32, L1, MutUntrackedOrigin]
 comptime I32In = ImmTileTensor[DType.int32, L1, ImmUntrackedOrigin]
 comptime VecIn = ImmTileTensor[DType.float32, L1, ImmUntrackedOrigin]
 
@@ -37,6 +39,43 @@ def tri(d: Int) -> Int:
 
 def tri_index[D: Int](i: Int, j: Int) -> Int:
     return i * D - i * (i - 1) // 2 + (j - i)
+
+
+@always_inline
+def damped_solve[D: Int](hblk: VecIn, h: Int, rhs: Array[Float32, D], lam: Float32) -> Array[Float32, D]:
+    comptime assert hblk.flat_rank == 1
+    var a = Array[Float32, D * D](fill=0.0)
+    comptime for i in range(D):
+        comptime for j in range(i, D):
+            var hij = hblk[h + tri_index[D](i, j)][0]
+            a[i * D + j] = hij
+            a[j * D + i] = hij
+        a[i * D + i] = a[i * D + i] * (1.0 + lam) + lam * 1e-6
+    # In-place Cholesky, lower triangle.
+    comptime for j in range(D):
+        var d = a[j * D + j]
+        comptime for k in range(j):
+            d -= a[j * D + k] * a[j * D + k]
+        var l = sqrt(d)
+        a[j * D + j] = l
+        comptime for i in range(j + 1, D):
+            var s = a[i * D + j]
+            comptime for k in range(j):
+                s -= a[i * D + k] * a[j * D + k]
+            a[i * D + j] = s / l
+    var y = Array[Float32, D](fill=0.0)
+    comptime for i in range(D):
+        var s = rhs[i]
+        comptime for k in range(i):
+            s -= a[i * D + k] * y[k]
+        y[i] = s / a[i * D + i]
+    comptime for ii in range(D):
+        comptime i = D - 1 - ii
+        var s = y[i]
+        comptime for k in range(i + 1, D):
+            s -= a[k * D + i] * y[k]
+        y[i] = s / a[i * D + i]
+    return y^
 
 
 @always_inline
@@ -333,7 +372,13 @@ def add_block_transpose[D: Int](j: Array[Float32, 2 * D], u0: Float32, u1: Float
     scatter_values[D](dst, key, values)
 
 
-def cross_cameras_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
+comptime GATHER_NEGATE = 0
+"""dst_p = -M_pp^-1 H_pc x_cam: the point half of the Schur matvec."""
+comptime GATHER_BACKSUBSTITUTE = 1
+"""dst_p = M_pp^-1 (g_p - H_pc x_cam): the point step after the PCG."""
+
+
+def point_gather_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool, MODE: Int](
     poses: F32In,
     rigs: F32In,
     intrinsics: F32In,
@@ -342,54 +387,68 @@ def cross_cameras_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG
     rig_off: I32In,
     calib_off: I32In,
     point_off: I32In,
-    obs_frame: I32In,
-    obs_camera: I32In,
-    obs_point: I32In,
+    point_start: I32In,
+    by_point_frame: I32In,
+    by_point_camera: I32In,
     x: VecIn,
-    dst: F32Ptr,
+    g: VecIn,
+    dst: Vec,
+    hblk: VecIn,
+    point_v: Int32,
+    point_h: Int32,
+    lam: Float32,
 ):
-    """First Schur pass at the linearisation state, x zero on the points: dst_cam += cross camera-camera terms,
-    dst_point += H_pc x_cam."""
-    comptime assert obs_frame.flat_rank == 1 and obs_camera.flat_rank == 1 and obs_point.flat_rank == 1
-    comptime assert pose_off.flat_rank == 1 and rig_off.flat_rank == 1 and calib_off.flat_rank == 1
-    comptime assert point_off.flat_rank == 1
+    """One thread per point gathers its observations (point-sorted copies of frame and camera): H_pc x_cam summed
+    in registers, then the damped 3x3 point solve. No atomics: the camera-sorted order scatters a point's terms."""
+    comptime assert point_off.flat_rank == 1 and point_start.flat_rank == 1 and pose_off.flat_rank == 1
+    comptime assert by_point_frame.flat_rank == 1 and by_point_camera.flat_rank == 1
+    comptime assert rig_off.flat_rank == 1 and calib_off.flat_rank == 1
+    comptime assert g.flat_rank == 1 and dst.flat_rank == 1
     comptime K = Model.NUM_CALIB
-    var n_obs = Int(obs_frame.dim[0]())
-    var valid = global_idx.x < n_obs
-    var n = min(global_idx.x, n_obs - 1)
-    var frame = Int(obs_frame[n][0])
-    var camera = Int(obs_camera[n][0])
-    var point = Int(obs_point[n][0])
-    var o = project_observation[Model](poses, rigs, intrinsics, points, frame, camera, point)
-    var po = Int(pose_off[frame][0]) if valid else -1
-    var ro = -1
-    var co = -1
-    comptime if REFINE_RIG:
-        ro = Int(rig_off[camera][0]) if valid else -1
-    comptime if REFINE_INTRINSICS:
-        co = Int(calib_off[camera][0]) if valid else -1
-    var up = (Float32(0.0), Float32(0.0))
-    var ur = (Float32(0.0), Float32(0.0))
-    var uc = (Float32(0.0), Float32(0.0))
-    if po >= 0:
-        up = block_times[6](o.pose, x, po)
-    if ro >= 0:
-        ur = block_times[6](o.rig, x, ro)
-    if co >= 0:
-        uc = block_times[K](o.calib, x, co)
-    var u0 = up[0] + ur[0] + uc[0]
-    var u1 = up[1] + ur[1] + uc[1]
-    comptime if REFINE_RIG or REFINE_INTRINSICS:
-        add_block_transpose[6](o.pose, u0 - up[0], u1 - up[1], dst, po)
+    var j = global_idx.x
+    if j >= Int(point_off.dim[0]()):
+        return
+    var v = Int(point_off[j][0])
+    if v < 0:
+        return
+    var w = Array[Float32, 3](fill=0.0)
+    for i in range(Int(point_start[j][0]), Int(point_start[j + 1][0])):
+        var frame = Int(by_point_frame[i][0])
+        var camera = Int(by_point_camera[i][0])
+        var o = project_observation[Model](poses, rigs, intrinsics, points, frame, camera, j)
+        var u0: Float32 = 0.0
+        var u1: Float32 = 0.0
+        var po = Int(pose_off[frame][0])
+        if po >= 0:
+            var up = block_times[6](o.pose, x, po)
+            u0 += up[0]
+            u1 += up[1]
         comptime if REFINE_RIG:
-            add_block_transpose[6](o.rig, u0 - ur[0], u1 - ur[1], dst, ro)
+            var ro = Int(rig_off[camera][0])
+            if ro >= 0:
+                var ur = block_times[6](o.rig, x, ro)
+                u0 += ur[0]
+                u1 += ur[1]
         comptime if REFINE_INTRINSICS:
-            add_block_transpose[K](o.calib, u0 - uc[0], u1 - uc[1], dst, co)
-    var pto = Int(point_off[point][0]) if valid else -1
-    add_block_transpose[3](o.point, u0, u1, dst, pto)
+            var co = Int(calib_off[camera][0])
+            if co >= 0:
+                var uc = block_times[K](o.calib, x, co)
+                u0 += uc[0]
+                u1 += uc[1]
+        comptime for k in range(3):
+            w[k] += o.point[k] * u0 + o.point[3 + k] * u1
+    var rhs = Array[Float32, 3](fill=0.0)
+    comptime for k in range(3):
+        comptime if MODE == GATHER_NEGATE:
+            rhs[k] = -w[k]
+        else:
+            rhs[k] = g[v + k][0] - w[k]
+    var sol = damped_solve[3](hblk, Int(point_h) + tri(3) * ((v - Int(point_v)) // 3), rhs, lam)
+    comptime for k in range(3):
+        dst[v + k] = sol[k]
 
 
-def cross_points_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
+def cross_points_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool, CAMERA_TERMS: Bool](
     poses: F32In,
     rigs: F32In,
     intrinsics: F32In,
@@ -401,14 +460,18 @@ def cross_points_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG:
     obs_frame: I32In,
     obs_camera: I32In,
     obs_point: I32In,
-    x: VecIn,
+    x_cam: VecIn,
+    x_point: VecIn,
     dst: F32Ptr,
 ):
-    """Second Schur pass at the linearisation state: dst_cam += H_cp x_point."""
+    """Camera side of the Schur products at the linearisation state: dst_cam += H_cp x_point and, with
+    `CAMERA_TERMS`, the cross camera-camera terms of H_cc x_cam (pose-rig-calib of one observation; the in-block
+    terms come from M p)."""
     comptime assert obs_frame.flat_rank == 1 and obs_camera.flat_rank == 1 and obs_point.flat_rank == 1
     comptime assert pose_off.flat_rank == 1 and rig_off.flat_rank == 1 and calib_off.flat_rank == 1
     comptime assert point_off.flat_rank == 1
     comptime K = Model.NUM_CALIB
+    comptime CROSS = CAMERA_TERMS and (REFINE_RIG or REFINE_INTRINSICS)
     var n_obs = Int(obs_frame.dim[0]())
     var valid = global_idx.x < n_obs
     var n = min(global_idx.x, n_obs - 1)
@@ -419,13 +482,34 @@ def cross_points_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG:
     var pto = Int(point_off[point][0]) if valid else -1
     var u = (Float32(0.0), Float32(0.0))
     if pto >= 0:
-        u = block_times[3](o.point, x, pto)
-    # A fixed point adds nothing: its lanes join the warp sums with key -1.
-    var po = Int(pose_off[frame][0]) if pto >= 0 else -1
-    add_block_transpose[6](o.pose, u[0], u[1], dst, po)
+        u = block_times[3](o.point, x_point, pto)
+    var po = Int(pose_off[frame][0]) if valid else -1
+    var ro = -1
+    var co = -1
     comptime if REFINE_RIG:
-        var ro = Int(rig_off[camera][0]) if pto >= 0 else -1
-        add_block_transpose[6](o.rig, u[0], u[1], dst, ro)
+        ro = Int(rig_off[camera][0]) if valid else -1
     comptime if REFINE_INTRINSICS:
-        var co = Int(calib_off[camera][0]) if pto >= 0 else -1
-        add_block_transpose[K](o.calib, u[0], u[1], dst, co)
+        co = Int(calib_off[camera][0]) if valid else -1
+    var up = (Float32(0.0), Float32(0.0))
+    var ur = (Float32(0.0), Float32(0.0))
+    var uc = (Float32(0.0), Float32(0.0))
+    comptime if CROSS:
+        if po >= 0:
+            up = block_times[6](o.pose, x_cam, po)
+        if ro >= 0:
+            ur = block_times[6](o.rig, x_cam, ro)
+        if co >= 0:
+            uc = block_times[K](o.calib, x_cam, co)
+    var u0 = u[0] + up[0] + ur[0] + uc[0]
+    var u1 = u[1] + up[1] + ur[1] + uc[1]
+    # Without camera terms a fixed point adds nothing: its lanes join the warp sums with key -1.
+    comptime if not CROSS:
+        if pto < 0:
+            po = -1
+            ro = -1
+            co = -1
+    add_block_transpose[6](o.pose, u0 - up[0], u1 - up[1], dst, po)
+    comptime if REFINE_RIG:
+        add_block_transpose[6](o.rig, u0 - ur[0], u1 - ur[1], dst, ro)
+    comptime if REFINE_INTRINSICS:
+        add_block_transpose[K](o.calib, u0 - uc[0], u1 - uc[1], dst, co)

@@ -15,15 +15,15 @@ from layout import TileTensor, row_major
 from camera_models import CameraModel, FullOpenCV, MAX_PARAMS, OpenCVFisheye, Pinhole, SimpleRadial
 from factor_kernels import (
     BLOCK,
-    cross_cameras_kernel,
+    GATHER_BACKSUBSTITUTE,
+    GATHER_NEGATE,
     cross_points_kernel,
     linearize_kernel,
+    point_gather_kernel,
     score_kernel,
     tri,
 )
 from node_kernels import (
-    POINT_SOLVE_BACKSUBSTITUTE,
-    POINT_SOLVE_NEGATE,
     axpy_kernel,
     dot_kernel,
     pcg_direction_kernel,
@@ -160,6 +160,33 @@ def _offsets(free: U8HostIn, n: Int, start: Int, width: Int, mut next: Int) -> L
     return out^
 
 
+@fieldwise_init
+struct ByPoint(Movable):
+    """Observations regrouped by point (a counting sort): point j's are rows start[j]..start[j+1] of frame/camera."""
+
+    var start: List[Int32]
+    var frame: List[Int32]
+    var camera: List[Int32]
+
+
+def _by_point(problem: HostProblem) -> ByPoint:
+    var start = List[Int32](length=problem.n_points + 1, fill=0)
+    for n in range(problem.n_obs):
+        start[Int(problem.obs_point[unsafe_offset=n]) + 1] += 1
+    for j in range(problem.n_points):
+        start[j + 1] += start[j]
+    var next = start.copy()
+    var frame = List[Int32](length=problem.n_obs, fill=0)
+    var camera = List[Int32](length=problem.n_obs, fill=0)
+    for n in range(problem.n_obs):
+        var j = Int(problem.obs_point[unsafe_offset=n])
+        var slot = Int(next[j])
+        next[j] += 1
+        frame[slot] = problem.obs_frame[unsafe_offset=n]
+        camera[slot] = problem.obs_camera[unsafe_offset=n]
+    return ByPoint(start^, frame^, camera^)
+
+
 def _grid(n: Int) -> Int:
     return max(ceildiv(n, BLOCK), 1)
 
@@ -237,6 +264,10 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
     var d_rig_off = _upload_list(ctx, rig_off)
     var d_calib_off = _upload_list(ctx, calib_off)
     var d_point_off = _upload_list(ctx, point_off)
+    var by_point = _by_point(problem)
+    var d_point_start = _upload_list(ctx, by_point.start)
+    var d_by_point_frame = _upload_list(ctx, by_point.frame)
+    var d_by_point_camera = _upload_list(ctx, by_point.camera)
     var nt = max(lay.n_tan, 1)
     var d_g = ctx.enqueue_create_buffer[DType.float32](nt)
     var d_r = ctx.enqueue_create_buffer[DType.float32](nt)
@@ -264,6 +295,9 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
     var t_rig_off = TileTensor(d_rig_off, row_major((nc,))).as_imm()
     var t_calib_off = TileTensor(d_calib_off, row_major((nc,))).as_imm()
     var t_point_off = TileTensor(d_point_off, row_major((np,))).as_imm()
+    var point_start = TileTensor(d_point_start, row_major((np + 1,))).as_imm()
+    var by_point_frame = TileTensor(d_by_point_frame, row_major((no,))).as_imm()
+    var by_point_camera = TileTensor(d_by_point_camera, row_major((no,))).as_imm()
     var g = TileTensor(d_g, row_major((nt,)))
     var r = TileTensor(d_r, row_major((nt,)))
     var z = TileTensor(d_z, row_major((nt,)))
@@ -281,11 +315,11 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
 
     comptime linearize = linearize_kernel[Model, REFINE_INTRINSICS, REFINE_RIG]
     comptime score = score_kernel[Model]
-    comptime cross_cameras = cross_cameras_kernel[Model, REFINE_INTRINSICS, REFINE_RIG]
-    comptime cross_points = cross_points_kernel[Model, REFINE_INTRINSICS, REFINE_RIG]
+    comptime cross_points = cross_points_kernel[Model, REFINE_INTRINSICS, REFINE_RIG, False]
+    comptime cross_all = cross_points_kernel[Model, REFINE_INTRINSICS, REFINE_RIG, True]
+    comptime gather_negate = point_gather_kernel[Model, REFINE_INTRINSICS, REFINE_RIG, GATHER_NEGATE]
+    comptime gather_backsubstitute = point_gather_kernel[Model, REFINE_INTRINSICS, REFINE_RIG, GATHER_BACKSUBSTITUTE]
     comptime precond = pcg_precond_kernel[K]
-    comptime point_negate = point_solve_kernel[POINT_SOLVE_NEGATE]
-    comptime point_backsubstitute = point_solve_kernel[POINT_SOLVE_BACKSUBSTITUTE]
     comptime retract = retract_kernel[Model]
 
     # Kernel launches only; memsets and device copies are not counted.
@@ -354,13 +388,13 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
         ctx.enqueue_memset(d_scalars, 0.0)
         # RcsReduceRhs: r_cam = g_cam - H_cp H_pp^-1 g_p.
         ctx.enqueue_copy(dst_buf=d_r, src_buf=d_g)
-        ctx.enqueue_function[point_negate](
-            g.as_imm(), g.as_imm(), z, hblk, point_v, point_h, n_free_points, diag, grid_dim=_grid(lay.n_free_points), block_dim=BLOCK
+        ctx.enqueue_function[point_solve_kernel](
+            g.as_imm(), z, hblk, point_v, point_h, n_free_points, diag, grid_dim=_grid(lay.n_free_points), block_dim=BLOCK
         )
         _tick(ctx, prof, prof_times, 1, prof_last)
         ctx.enqueue_function[cross_points](
-            lin_poses, lin_rigs, lin_intr, lin_points, t_pose_off, t_rig_off, t_calib_off, t_point_off, obs_frame, obs_camera, obs_point, z.as_imm(), d_r.unsafe_ptr(),
-            grid_dim=obs_grid, block_dim=BLOCK,
+            lin_poses, lin_rigs, lin_intr, lin_points, t_pose_off, t_rig_off, t_calib_off, t_point_off, obs_frame, obs_camera, obs_point,
+            z.as_imm(), z.as_imm(), d_r.unsafe_ptr(), grid_dim=obs_grid, block_dim=BLOCK,
         )
         _tick(ctx, prof, prof_times, 2, prof_last)
         launches += 2
@@ -383,25 +417,21 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
             )
             _tick(ctx, prof, prof_times, 4, prof_last)
             # RcsMatvec: w_cam = M_cc p + H_cc' p - H_cp H_pp^-1 H_pc p (w enters holding M p).
-            ctx.enqueue_function[cross_cameras](
-                lin_poses, lin_rigs, lin_intr, lin_points, t_pose_off, t_rig_off, t_calib_off, t_point_off, obs_frame, obs_camera, obs_point, p.as_imm(), d_w.unsafe_ptr(),
-                grid_dim=obs_grid, block_dim=BLOCK,
+            ctx.enqueue_function[gather_negate](
+                lin_poses, lin_rigs, lin_intr, lin_points, t_pose_off, t_rig_off, t_calib_off, t_point_off, point_start, by_point_frame,
+                by_point_camera, p.as_imm(), g.as_imm(), z, hblk, point_v, point_h, diag, grid_dim=_grid(np), block_dim=BLOCK,
             )
             _tick(ctx, prof, prof_times, 5, prof_last)
-            ctx.enqueue_function[point_negate](
-                w.as_imm(), g.as_imm(), z, hblk, point_v, point_h, n_free_points, diag, grid_dim=_grid(lay.n_free_points), block_dim=BLOCK
-            )
-            _tick(ctx, prof, prof_times, 1, prof_last)
-            ctx.enqueue_function[cross_points](
-                lin_poses, lin_rigs, lin_intr, lin_points, t_pose_off, t_rig_off, t_calib_off, t_point_off, obs_frame, obs_camera, obs_point, z.as_imm(), d_w.unsafe_ptr(),
-                grid_dim=obs_grid, block_dim=BLOCK,
+            ctx.enqueue_function[cross_all](
+                lin_poses, lin_rigs, lin_intr, lin_points, t_pose_off, t_rig_off, t_calib_off, t_point_off, obs_frame, obs_camera, obs_point,
+                p.as_imm(), z.as_imm(), d_w.unsafe_ptr(), grid_dim=obs_grid, block_dim=BLOCK,
             )
             _tick(ctx, prof, prof_times, 2, prof_last)
             ctx.enqueue_function[dot_kernel](
                 p.as_imm(), w.as_imm(), Int32(lay.n_cam), scalars, rho_slot + 1, grid_dim=_grid(lay.n_cam), block_dim=BLOCK
             )
             _tick(ctx, prof, prof_times, 6, prof_last)
-            launches += 6
+            launches += 5
             ctx.enqueue_copy(host2, d_scalars.create_sub_buffer[DType.float64](Int(rho_slot), 2))
             ctx.synchronize()
             var rho = Float32(host2[0])
@@ -420,15 +450,11 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
             ctx.enqueue_function[axpy_kernel](s, p.as_imm(), alpha, Int32(lay.n_cam), grid_dim=_grid(lay.n_cam), block_dim=BLOCK)
             _tick(ctx, prof, prof_times, 7, prof_last)
             launches += 1
-        # RcsBackSubstitute: s_p = H_pp^-1 (g_p - H_pc s_cam).
-        ctx.enqueue_memset(d_w, 0.0)
-        ctx.enqueue_function[cross_cameras](
-            lin_poses, lin_rigs, lin_intr, lin_points, t_pose_off, t_rig_off, t_calib_off, t_point_off, obs_frame, obs_camera, obs_point, s.as_imm(), d_w.unsafe_ptr(),
-            grid_dim=obs_grid, block_dim=BLOCK,
-        )
-        _tick(ctx, prof, prof_times, 5, prof_last)
-        ctx.enqueue_function[point_backsubstitute](
-            w.as_imm(), g.as_imm(), s, hblk, point_v, point_h, n_free_points, diag, grid_dim=_grid(lay.n_free_points), block_dim=BLOCK
+        # RcsBackSubstitute: s_p = H_pp^-1 (g_p - H_pc s_cam), reading s_cam from a copy (w is free now).
+        ctx.enqueue_copy(dst_buf=d_w, src_buf=d_s)
+        ctx.enqueue_function[gather_backsubstitute](
+            lin_poses, lin_rigs, lin_intr, lin_points, t_pose_off, t_rig_off, t_calib_off, t_point_off, point_start, by_point_frame,
+            by_point_camera, w.as_imm(), g.as_imm(), s, hblk, point_v, point_h, diag, grid_dim=_grid(np), block_dim=BLOCK,
         )
         _tick(ctx, prof, prof_times, 8, prof_last)
         # Retract into the trial state (with s.(g + lambda D s) fused), then score it.
@@ -448,7 +474,7 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
             grid_dim=obs_grid, block_dim=BLOCK,
         )
         _tick(ctx, prof, prof_times, 10, prof_last)
-        launches += 4
+        launches += 3
         ctx.enqueue_copy(host2, d_scalars.create_sub_buffer[DType.float64](SLOT_COST_TRIAL, 2))
         ctx.synchronize()
         var score_trial = Float32(host2[0])
@@ -481,7 +507,7 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
     ctx.synchronize()
     var solve_seconds = Float64(perf_counter_ns() - t0) * 1e-9
     if prof:
-        print(t"linearize={prof_times[0] // 1000}us point_negate={prof_times[1] // 1000}us cross_points={prof_times[2] // 1000}us precond={prof_times[3] // 1000}us pcg_direction_kernel={prof_times[4] // 1000}us cross_cameras={prof_times[5] // 1000}us dot_kernel={prof_times[6] // 1000}us axpy_kernel={prof_times[7] // 1000}us point_backsubstitute={prof_times[8] // 1000}us retract={prof_times[9] // 1000}us score={prof_times[10] // 1000}us")
+        print(t"linearize={prof_times[0] // 1000}us point_solve={prof_times[1] // 1000}us cross_points={prof_times[2] // 1000}us precond={prof_times[3] // 1000}us pcg_direction_kernel={prof_times[4] // 1000}us point_gather={prof_times[5] // 1000}us dot_kernel={prof_times[6] // 1000}us axpy_kernel={prof_times[7] // 1000}us point_backsubstitute={prof_times[8] // 1000}us retract={prof_times[9] // 1000}us score={prof_times[10] // 1000}us")
     _download(ctx, result.intrinsics, d_intr, nc * MAX_PARAMS)
     _download(ctx, result.sensor_from_rig, d_rigs, nc * 7)
     _download(ctx, result.rig_from_world, d_poses, nf * 7)
