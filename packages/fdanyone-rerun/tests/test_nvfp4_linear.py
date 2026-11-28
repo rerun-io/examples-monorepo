@@ -90,8 +90,11 @@ def test_gelu_path_equals_gelu_then_project() -> None:
     nv = Nvfp4Linear(torch.nn.Linear(512, 256, device="cuda").to(torch.bfloat16))
     x = torch.randn(256, 512, device="cuda", dtype=torch.bfloat16) * 2
     fused = nv.forward_gelu(x)
-    eager = nv(torch.nn.functional.gelu(x, approximate="tanh"))
-    assert float((fused.float() - eager.float()).norm() / eager.float().norm()) < 1e-2
+    # The fused path takes the per-tensor scale from amax(x), an upper bound of amax(gelu(x)).
+    amax = x.float().abs().amax().clamp(min=0.17)
+    a = dequantize(quantize_activation_reference(torch.nn.functional.gelu(x, approximate="tanh"), amax), 256, 512)
+    expected = torch.nn.functional.linear(a, dequantize(nv.weight_operand, 256, 512), nv.bias.float())
+    torch.testing.assert_close(fused.float(), expected, rtol=2e-2, atol=2e-2)
 
 
 def test_policy_puts_only_the_chosen_groups_in_nvfp4(monkeypatch: pytest.MonkeyPatch) -> None:

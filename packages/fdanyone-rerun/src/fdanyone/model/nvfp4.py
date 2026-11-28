@@ -115,11 +115,15 @@ def quantize_weight(weight: torch.Tensor, candidates: tuple[float, ...] = WEIGHT
     return Nvfp4Tensor(_pack(best_codes.view(rows, cols)), to_blocked(best_scale.to(torch.float8_e4m3fn)), (1.0 / encode).reshape(()).float())
 
 
-def quantize_activation_reference(rows: torch.Tensor) -> Nvfp4Tensor:
-    """Eager twin of :func:`quantize_activation` (tests)."""
+def quantize_activation_reference(rows: torch.Tensor, amax: torch.Tensor | None = None) -> Nvfp4Tensor:
+    """Eager twin of :func:`quantize_activation` (tests); ``amax`` overrides the per-tensor maximum (the fused GELU path
+    takes it from the GELU input)."""
 
     values = rows.float()
-    encode = _RANGE / values.abs().amax().clamp(min=_TINY_AMAX)
+    amax = values.abs().amax() if amax is None else amax.float()
+    # Tensor / tensor is an IEEE division, as in the kernel; ``float / tensor`` multiplies by a reciprocal (1 ulp off,
+    # which flips exact E2M1 ties).
+    encode = torch.full_like(amax, _RANGE) / amax.clamp(min=_TINY_AMAX)
     blocks = values.view(rows.shape[0], -1, BLOCK)
     scale = (blocks.abs().amax(-1) / FP4_MAX * encode).clamp(max=FP8_MAX).to(torch.float8_e4m3fn)
     scale_f = scale.float()
