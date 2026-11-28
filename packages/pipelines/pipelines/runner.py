@@ -6,16 +6,15 @@ missing or stale layer. The runner keeps no state: the catalog layers and their 
 ran (``simplecv.run_record``).
 """
 
-import os
 import shlex
-import subprocess
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 from rerun.catalog import DatasetEntry
+from simplecv.process_utils import run_command
 from simplecv.run_record import RunRecord, read_run_record
 
 from pipelines.capture_to_splat import Step
@@ -45,26 +44,14 @@ def step_command(step: Step, launch: Launch) -> list[str]:
     return command
 
 
-def child_environment(parent: Mapping[str, str]) -> dict[str, str]:
-    """The environment of a step's ``pixi run``, without the activation of the env the runner runs in.
-
-    pixi keeps what the step's env does not set: the runner's library paths would load into the stage, and a test's
-    PIXI_DEV_MODE would keep torch.compile off in it.
-    """
-    prefix: str | None = parent.get("CONDA_PREFIX")
-    child: dict[str, str] = {}
-    for name, value in parent.items():
-        entries: list[str] = value.split(os.pathsep)
-        kept: list[str] = entries if prefix is None else [entry for entry in entries if prefix not in entry]
-        if kept and name != "PIXI_DEV_MODE":
-            child[name] = os.pathsep.join(kept)
-    return child
-
-
 def last_line(log: Path) -> str:
-    """The log's last line with a letter or digit: a failed Python stage ends with its exception."""
-    lines: list[str] = [line.strip() for line in log.read_text(errors="replace").splitlines() if any(c.isalnum() for c in line)]
-    return lines[-1][:300] if lines else "its log is empty"
+    """The log's last line with a letter or digit, read line by line: a failed Python stage ends with its exception."""
+    last: str = "its log is empty"
+    with log.open(errors="replace") as lines:
+        for line in lines:
+            if any(character.isalnum() for character in line):
+                last = line.strip()[:300]
+    return last
 
 
 def run_flow(steps: Sequence[Step], launch: Launch, *, entry: DatasetEntry, segment: str, logs: Path) -> int:
@@ -87,8 +74,7 @@ def run_flow(steps: Sequence[Step], launch: Launch, *, entry: DatasetEntry, segm
         print(f"[{step.name}] {shlex.join(command)}\n[{step.name}] log {log}", flush=True)
         started: datetime = datetime.now(UTC)
         clock: float = time.monotonic()
-        with log.open("w") as output:
-            code: int = subprocess.run(command, env=child_environment(os.environ), stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, check=False).returncode
+        code: int = run_command(command, {}, log)
         if code != 0:
             print(f"[{step.name}] FAILED (exit {code}): {last_line(log)}", flush=True)
             return code

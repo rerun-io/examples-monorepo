@@ -10,6 +10,9 @@ import pytest
 
 rr = pytest.importorskip("rerun", reason="rerun-sdk is required by this test module")
 
+# A catalog server and stage subprocesses: the integration lane (AGENTS.md, Testing).
+pytestmark = pytest.mark.integration
+
 SEGMENT: str = "insta360__clip"
 
 

@@ -46,14 +46,3 @@ def test_a_step_runs_its_pixi_task_in_a_memory_scope_inside_the_gpu_lock(tmp_pat
         "pixi", "run", "--manifest-path", str(tmp_path / "pixi.toml"), "--frozen", "-e", "slam-rs-cuda", "slam-rs-catalog-layer", "--segment", "s",
     ]
     assert step_command(step, Launch(manifest=tmp_path / "pixi.toml", gpu_lock=None, memory_max=None))[:2] == ["pixi", "run"]
-
-
-def test_a_step_does_not_inherit_the_runners_env_activation() -> None:
-    from pipelines.runner import child_environment
-
-    parent: dict[str, str] = {
-        "CONDA_PREFIX": "/ws/.pixi/envs/pipelines", "PATH": "/ws/.pixi/envs/pipelines/bin:/usr/bin", "LD_LIBRARY_PATH": "/ws/.pixi/envs/pipelines/lib",
-        "PIXI_DEV_MODE": "1", "HOME": "/home/u",
-    }
-    child: dict[str, str] = child_environment(parent)
-    assert child["PATH"] == "/usr/bin" and "LD_LIBRARY_PATH" not in child and "PIXI_DEV_MODE" not in child and child["HOME"] == "/home/u"

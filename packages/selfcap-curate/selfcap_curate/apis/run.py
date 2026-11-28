@@ -4,8 +4,6 @@ The steps are ``STEPS``. selfcap-curate and selfcap-soma are separate pixi envir
 and imports neither's stages.
 """
 
-import os
-import subprocess
 from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -25,6 +23,7 @@ from dataforge.identity import SequenceIdentity
 from dataforge.selfcap_schema import SOMA_METRICS, SOMA_QUALITY_PROPERTY
 from dataforge.timing import ConvertRecord, load_records
 from rerun.catalog import CatalogClient
+from simplecv.process_utils import run_command
 
 from selfcap_curate.records import EpisodeKey
 
@@ -180,38 +179,6 @@ def soma_quality_line(catalog_url: str, dataset: str) -> str:
         if values:
             medians.append(f"{metric} {median(float(value) for value in values):.1f}")
     return f"SOMA_QUALITY pass {statuses.count('pass')}, flag {statuses.count('flag')}, median mm: {', '.join(medians) or 'none'}"
-
-
-def child_environment(parent: Mapping[str, str]) -> dict[str, str]:
-    """The environment of a nested ``pixi run``, without the activation of the env that runs selfcap-run.
-
-    pixi keeps what the new env does not set: selfcap-curate's LD_LIBRARY_PATH would load its libraries into selfcap-soma,
-    and a test's PIXI_DEV_MODE flag would keep torch.compile off in the tasks.
-    """
-    prefix: str | None = parent.get("CONDA_PREFIX")
-    child: dict[str, str] = {}
-    for name, value in parent.items():
-        entries: list[str] = value.split(os.pathsep)
-        kept: list[str] = entries if prefix is None else [entry for entry in entries if prefix not in entry]
-        if kept and name != "PIXI_DEV_MODE":
-            child[name] = os.pathsep.join(kept)
-    return child
-
-
-def run_command(command: list[str], env: dict[str, str], log_path: Path) -> int:
-    """Run one task with its output in ``log_path`` and return its exit code."""
-    with log_path.open("w") as log:
-        # The NAS SSD client caches new files as mode 000; chmod repairs its cached attributes.
-        log_path.chmod(0o644)
-        completed: subprocess.CompletedProcess[bytes] = subprocess.run(
-            command,
-            env={**child_environment(os.environ), **env},
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            check=False,
-        )
-    return completed.returncode
 
 
 def last_meaningful_line(log_path: Path) -> str:
