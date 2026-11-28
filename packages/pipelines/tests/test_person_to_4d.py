@@ -98,3 +98,15 @@ def test_a_clip_name_the_catalog_rejects_stops_the_flow_before_any_task(tmp_path
     for clip in ("MyClip", "my clip", "a/b", "-x", ""):
         with pytest.raises(ValueError, match="lower-case letters, digits and dashes"):
             flow_steps(video=tmp_path / "v.mp4", clip=clip, seed=1, catalog_url="u", output_root=tmp_path)
+
+
+def test_a_run_creates_the_scratch_directory_the_views_recording_opens_in(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """fdanyone-run opens --rr-config.save while it parses its CLI, before it makes any directory: on a fresh output root
+    the first task failed with "Failed to create file" (proof, 2026-11-28)."""
+    import pipelines.apis.person_to_4d as cli
+
+    acted: list[str] = []
+    monkeypatch.setattr(cli, "act", lambda action, *_, **__: acted.append(action))
+    cli.main(cli.Config(action="run", video=tmp_path / "v.mp4", clip="c", output_root=tmp_path / "fresh"))
+    run_rrd: Path = Path(_option(cli.flow_steps(video=tmp_path / "v.mp4", clip="c", seed=42, catalog_url="u", output_root=tmp_path / "fresh")[0].tasks[0].arguments, "--rr-config.save"))
+    assert acted == ["run"] and run_rrd.parent.is_dir()

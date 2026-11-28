@@ -26,6 +26,9 @@ LAYER_PITCH: int = 15
 """The ring's pitch, degrees above the subject."""
 NUM_FRAMES: int = 121
 """Frames 4DAnyone generates per view."""
+RUNS_SCRATCH: str = "fdanyone_run"
+"""Under the output root: fdanyone-run's run directories and recordings, scratch of the views step. It must exist before
+the task starts: fdanyone-run opens its recording while it parses its CLI."""
 
 
 def views_segment(clip: str, seed: int) -> str:
@@ -56,7 +59,7 @@ def flow_steps(*, video: Path, clip: str, seed: int, catalog_url: str, output_ro
     """
     root: Path = output_root.resolve()
     segment: str = views_segment(clip, seed)
-    run_dir: Path = root / "fdanyone_run" / segment
+    run_dir: Path = root / RUNS_SCRATCH / segment
     run_rrd: str = f"{run_dir}.rrd"  # beside the run directory, which --run.overwrite deletes when the task starts
     views: Step = Step("views", "base", VIEWS_DATASET, segment, (
         Task(ENVIRONMENT, "fdanyone-run", (

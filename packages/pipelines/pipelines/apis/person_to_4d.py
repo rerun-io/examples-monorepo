@@ -12,7 +12,7 @@ from pathlib import Path
 import tyro
 
 from pipelines.apis.actions import WORKSPACE_MANIFEST, Action, act
-from pipelines.person_to_4d import flow_steps, views_segment
+from pipelines.person_to_4d import RUNS_SCRATCH, flow_steps, views_segment
 from pipelines.runner import Launch
 
 
@@ -52,6 +52,8 @@ def main(config: Config) -> None:
     """
     segment: str = views_segment(config.clip, config.seed)
     logs: Path = config.logs or config.output_root.resolve() / "logs" / segment / datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    if config.action == "run":
+        (config.output_root.resolve() / RUNS_SCRATCH).mkdir(parents=True, exist_ok=True)
     act(
         config.action,
         flow_steps(video=config.video, clip=config.clip, seed=config.seed, catalog_url=config.catalog_url, output_root=config.output_root,
