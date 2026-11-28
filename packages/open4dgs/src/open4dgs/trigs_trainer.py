@@ -51,7 +51,7 @@ from trigs.core.trainer import TrigsTrainer, TrigsTrainingConfig, TrigsTrainingR
 from trigs.strategy.motion_guided_relocation import MotionGuidedRelocationStrategy
 
 from open4dgs.fused_loss import masked_composite_terms, masked_composite_terms_batch
-from open4dgs.strided import GSPLAT_EPS2D, STRIDE, STRIDE_OFFSETS, StrideState, strided_intrinsics, strided_pixels
+from open4dgs.strided import COARSE_STRIDE, GSPLAT_EPS2D, STRIDE, StrideState, stride_offsets, strided_intrinsics, strided_pixels
 
 RENDER_INPUT_KEYS: tuple[str, ...] = ("means", "quats", "scales", "opacities", "colors")
 """Per-row rasterizer inputs of ``_render_inputs`` that the cameras of a shared-time step receive as detached leaves."""
@@ -148,10 +148,12 @@ class SharedTimeGroup:
             self._leaves[key] = self._outputs[key].detach().requires_grad_(self._outputs[key].requires_grad)
         self._cameras: CameraConfig = cameras
         if trainer.pixel_stride > 1:  # lever 4: this step's cameras, frames and masks at one strided offset
-            offset: tuple[int, int] = STRIDE_OFFSETS[step % len(STRIDE_OFFSETS)]
-            trainer.stride_state.offset = offset
-            self._cameras = trainer.strided_cameras(cameras, offset)
-            self._leaves["raster_kwargs"] = {"eps2d": GSPLAT_EPS2D / STRIDE**2}
+            stride: int = trainer.stride_for_step(step)
+            offsets: tuple[tuple[int, int], ...] = stride_offsets(stride)
+            offset: tuple[int, int] = offsets[step % len(offsets)]
+            trainer.stride_state.offset, trainer.stride_state.stride = offset, stride
+            self._cameras = trainer.strided_cameras(cameras, offset, stride)
+            self._leaves["raster_kwargs"] = {"eps2d": GSPLAT_EPS2D / stride**2}
         self._last_info: dict | None = None
         self._loss: Tensor | None = None
         self._batches: list[SizeBatch] = []
@@ -181,11 +183,12 @@ class SharedTimeGroup:
         if not self._batch_cameras:
             out = self._trainer._rasterize_inputs(self._params, self._leaves, self._cameras, self._cam_group[group_i], self._config)
             out[3]["stride_offset"] = self._trainer.stride_state.offset
+            out[3]["stride"] = self._trainer.stride_state.stride
             self._last_info = out[3]
             return out
         b, j = self._batch_of[group_i]
         batch: SizeBatch = self._batches[b]
-        cam_info: dict = {**batch.info, "stride_offset": self._trainer.stride_state.offset}
+        cam_info: dict = {**batch.info, "stride_offset": self._trainer.stride_state.offset, "stride": self._trainer.stride_state.stride}
         if batch.depths is not None:
             cam_info["render_depth"] = batch.depths[j][None]
         return batch.colors[j][None], batch.alphas[j][None], batch.gamma, cam_info
@@ -235,7 +238,8 @@ class SharedTimeGroup:
             if depth is None:
                 return None
             hook_loss = hook.batch(
-                step=step, frame_idx=frame_idx, cams=cams, depth=depth[..., 0], alphas=alphas[..., 0], offset=trainer.stride_state.offset
+                step=step, frame_idx=frame_idx, cams=cams, depth=depth[..., 0], alphas=alphas[..., 0], offset=trainer.stride_state.offset,
+                stride=trainer.stride_state.stride,
             )
             if hook_loss is None:
                 return None
@@ -289,7 +293,7 @@ class SharedTimeGroup:
         if outs:
             torch.autograd.backward(outs, grads)
         self._batches, self._draws, self._loss, self._outputs, self._leaves = [], [], None, {}, {}
-        self._trainer.stride_state.offset = None
+        self._trainer.stride_state.offset, self._trainer.stride_state.stride = None, STRIDE
         self._trainer._step_memo = None
 
 
@@ -325,18 +329,18 @@ def add_duplicate_visibility(reloc_state: dict, info: dict, draws: tuple[int, ..
 # ---------------------------------------------------------------------------------------------------------------------
 
 
-def strided_camera_config(cameras: CameraConfig, offset: tuple[int, int]) -> CameraConfig:
-    """``cameras`` rendering only full-size pixels ``(offset[0] + STRIDE * i, offset[1] + STRIDE * j)``.
+def strided_camera_config(cameras: CameraConfig, offset: tuple[int, int], stride: int = STRIDE) -> CameraConfig:
+    """``cameras`` rendering only full-size pixels ``(offset[0] + stride * i, offset[1] + stride * j)``.
 
-    gsplat samples pixel q at q + 0.5: the strided pixel q is full-size pixel p = STRIDE * q + o, at p + 0.5, so
-    ``f' = f / STRIDE`` and ``c' = (c - o - 0.5) / STRIDE + 0.5``. Sizes are the number of full-size pixels sampled.
-    Rasterize with ``eps2d = GSPLAT_EPS2D / STRIDE**2`` to keep the full-size dilation.
+    gsplat samples pixel q at q + 0.5: the strided pixel q is full-size pixel p = stride * q + o, at p + 0.5, so
+    ``f' = f / stride`` and ``c' = (c - o - 0.5) / stride + 0.5``. Sizes are the number of full-size pixels sampled.
+    Rasterize with ``eps2d = GSPLAT_EPS2D / stride**2`` to keep the full-size dilation.
     """
     oy, ox = offset
-    Ks: Tensor = strided_intrinsics(cameras.Ks, offset)
+    Ks: Tensor = strided_intrinsics(cameras.Ks, offset, stride)
     n: int = int(Ks.shape[0])
-    widths: list[int] = [len(range(ox, cameras.width_for(c), STRIDE)) for c in range(n)]
-    heights: list[int] = [len(range(oy, cameras.height_for(c), STRIDE)) for c in range(n)]
+    widths: list[int] = [len(range(ox, cameras.width_for(c), stride)) for c in range(n)]
+    heights: list[int] = [len(range(oy, cameras.height_for(c), stride)) for c in range(n)]
     return HostSizedCameraConfig.from_matrices(viewmats=cameras.viewmats, Ks=Ks, widths=widths, heights=heights)
 
 
@@ -349,7 +353,7 @@ class _StridedRow(list[Tensor]):
 
     def __getitem__(self, cam: int) -> Tensor:  # pyrefly: ignore[bad-override]  # the trainer indexes one camera
         item: Tensor = super().__getitem__(cam)
-        return item if self._state.offset is None else strided_pixels(item, self._state.offset)
+        return item if self._state.offset is None else strided_pixels(item, self._state.offset, self._state.stride)
 
 
 def strided_frames(frames: Mapping[int, Sequence[Tensor]], state: StrideState) -> dict[int, list[Tensor]]:
@@ -365,6 +369,7 @@ class Open4dgsTrainer(TrigsTrainer):
         *args: object,
         batch_cameras: bool = True,
         pixel_stride: Literal[1, 2] = 1,
+        coarse_stride_steps: int = 0,
         adam_moments: Literal["fp32", "bf16"] = "fp32",
         fused_loss: bool = False,
         **kwargs: object,
@@ -375,6 +380,9 @@ class Open4dgsTrainer(TrigsTrainer):
             raise ValueError(f"pixel_stride must be 1 or {STRIDE}, got {pixel_stride}")
         self.batch_cameras: bool = batch_cameras
         self.pixel_stride: Literal[1, 2] = pixel_stride
+        if coarse_stride_steps < 0 or (coarse_stride_steps > 0 and pixel_stride == 1):
+            raise ValueError(f"coarse_stride_steps ({coarse_stride_steps}) needs pixel_stride {STRIDE} and must be >= 0")
+        self.coarse_stride_steps: int = coarse_stride_steps
         self.adam_moments: Literal["fp32", "bf16"] = adam_moments
         # Lever 6, None when off. dynamic=True: one compile for every image size (ROI cameras each have their own size;
         # per-size compiles hit dynamo's recompile limit and fall back to eager).
@@ -384,7 +392,7 @@ class Open4dgsTrainer(TrigsTrainer):
         self._compiled_batch_terms = torch.compile(masked_composite_terms_batch, dynamic=None) if fused_loss else None
         self.stride_state: StrideState = StrideState()
         self._strided_of: CameraConfig | None = None
-        self._strided: dict[tuple[int, int], CameraConfig] = {}
+        self._strided: dict[tuple[tuple[int, int], int], CameraConfig] = {}
         self._const_cache: dict[tuple[object, str, torch.dtype], Tensor] = {}
         self._step_memo: dict[tuple[str, int, int], Any] | None = None
         """While a ``SharedTimeGroup`` runs: each (term, frame, camera)'s losses, computed once for a camera drawn twice."""
@@ -453,13 +461,17 @@ class Open4dgsTrainer(TrigsTrainer):
             return
         super()._optimizer_step(optimizers)  # pyrefly: ignore[missing-attribute]  # recipe patch 0012
 
-    def strided_cameras(self, cameras: CameraConfig, offset: tuple[int, int]) -> CameraConfig:
-        """Lever 4: ``strided_camera_config(cameras, offset)``, built once per offset of one ``cameras`` object."""
+    def stride_for_step(self, step: int) -> int:
+        """Lever 4's stride at ``step``: ``COARSE_STRIDE`` for the first ``coarse_stride_steps`` steps, then ``STRIDE``."""
+        return COARSE_STRIDE if step < self.coarse_stride_steps else STRIDE
+
+    def strided_cameras(self, cameras: CameraConfig, offset: tuple[int, int], stride: int = STRIDE) -> CameraConfig:
+        """Lever 4: ``strided_camera_config(cameras, offset, stride)``, built once per offset of one ``cameras`` object."""
         if cameras is not self._strided_of:
             self._strided_of, self._strided = cameras, {}
-        out = self._strided.get(offset)
+        out = self._strided.get((offset, stride))
         if out is None:
-            out = self._strided[offset] = strided_camera_config(cameras, offset)
+            out = self._strided[(offset, stride)] = strided_camera_config(cameras, offset, stride)
         return out
 
     def _photometric_losses(

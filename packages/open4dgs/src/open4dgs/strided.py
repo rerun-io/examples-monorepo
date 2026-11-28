@@ -15,6 +15,14 @@ STRIDE: int = 2
 STRIDE_OFFSETS: tuple[tuple[int, int], ...] = ((0, 0), (1, 1), (0, 1), (1, 0))
 """(row, column) offsets inside the block, one per step in turn: every pixel is supervised once every four steps."""
 
+COARSE_STRIDE: int = 4
+"""Coarse phase (``TrainConfig.coarse_stride_steps``): one pixel of every 4 x 4 block per step."""
+
+COARSE_STRIDE_OFFSETS: tuple[tuple[int, int], ...] = tuple(
+    (STRIDE * iy + oy, STRIDE * ix + ox) for oy, ox in STRIDE_OFFSETS for iy, ix in STRIDE_OFFSETS
+)
+"""The 16 offsets of a coarse step in turn: consecutive steps land on different 2 x 2 sub-blocks."""
+
 GSPLAT_EPS2D: float = 0.3
 """gsplat's default 2D dilation (pixels squared) added to every projected covariance."""
 
@@ -24,20 +32,31 @@ class StrideState:
     """The strided offset of the step being trained, None outside a strided step (evaluation renders full size)."""
 
     offset: tuple[int, int] | None = None
+    stride: int = STRIDE
+    """The step's stride: ``STRIDE``, or ``COARSE_STRIDE`` in the coarse phase."""
 
 
-def strided_intrinsics(Ks: Float32[Tensor, "c 3 3"], offset: tuple[int, int]) -> Float32[Tensor, "c 3 3"]:
-    """Intrinsics whose pixel q is full-size pixel ``STRIDE * q + offset`` (see ``strided_camera_config``)."""
+def stride_offsets(stride: int) -> tuple[tuple[int, int], ...]:
+    """The offsets a step of ``stride`` cycles through."""
+    if stride == STRIDE:
+        return STRIDE_OFFSETS
+    if stride == COARSE_STRIDE:
+        return COARSE_STRIDE_OFFSETS
+    raise ValueError(f"no offsets for stride {stride}")
+
+
+def strided_intrinsics(Ks: Float32[Tensor, "c 3 3"], offset: tuple[int, int], stride: int = STRIDE) -> Float32[Tensor, "c 3 3"]:
+    """Intrinsics whose pixel q is full-size pixel ``stride * q + offset`` (see ``strided_camera_config``)."""
     oy, ox = offset
     out: Tensor = Ks.clone()
-    out[:, 0, 0] /= STRIDE
-    out[:, 1, 1] /= STRIDE
-    out[:, 0, 2] = (out[:, 0, 2] - ox - 0.5) / STRIDE + 0.5
-    out[:, 1, 2] = (out[:, 1, 2] - oy - 0.5) / STRIDE + 0.5
+    out[:, 0, 0] /= stride
+    out[:, 1, 1] /= stride
+    out[:, 0, 2] = (out[:, 0, 2] - ox - 0.5) / stride + 0.5
+    out[:, 1, 2] = (out[:, 1, 2] - oy - 0.5) / stride + 0.5
     return out
 
 
-def strided_pixels(x: Tensor, offset: tuple[int, int]) -> Tensor:
+def strided_pixels(x: Tensor, offset: tuple[int, int], stride: int = STRIDE) -> Tensor:
     """The (h, w, ...) image or map ``x`` at the pixels a step with ``offset`` renders (a view)."""
     oy, ox = offset
-    return x[oy::STRIDE, ox::STRIDE]
+    return x[oy::stride, ox::stride]

@@ -32,7 +32,7 @@ from gsplat.utils import depth_to_normal
 from jaxtyping import Bool, Float16, Float32, Int64, UInt8
 from torch import Tensor
 
-from open4dgs.strided import STRIDE_OFFSETS, strided_intrinsics, strided_pixels
+from open4dgs.strided import STRIDE, strided_intrinsics, strided_pixels
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,7 +275,7 @@ class MonoPriorLoss:
     _normals: tuple[Tensor, ...] = ()
     _static: tuple[Tensor, ...] = ()
     _K: Tensor | None = None
-    _K_strided: dict[tuple[int, int], Tensor] = field(default_factory=dict)
+    _K_strided: dict[tuple[tuple[int, int], int], Tensor] = field(default_factory=dict)
 
     def _to_device(self, device: torch.device) -> None:
         self._device = device
@@ -286,7 +286,15 @@ class MonoPriorLoss:
             for m, d in zip(self.masks, self._depth, strict=True)
         )
         self._K = self.K.to(device)
-        self._K_strided = {offset: strided_intrinsics(self._K, offset) for offset in STRIDE_OFFSETS}
+        self._K_strided = {}
+
+    def _strided_K(self, offset: tuple[int, int], stride: int) -> Tensor:
+        """Every camera's intrinsics at a strided step's pixels, built once per (offset, stride)."""
+        assert self._K is not None
+        out: Tensor | None = self._K_strided.get((offset, stride))
+        if out is None:
+            out = self._K_strided[(offset, stride)] = strided_intrinsics(self._K, offset, stride)
+        return out
 
     def _flush(self) -> None:
         if self._step >= 0 and self._sums is not None:
@@ -325,8 +333,9 @@ class MonoPriorLoss:
         # A strided step (TrainConfig.pixel_stride) renders a pixel subset: score the maps at the same pixels and intrinsics.
         offset: tuple[int, int] | None = info.get("stride_offset")
         if offset is not None:
-            normals, static, prior_depth = (strided_pixels(x, offset) for x in (normals, static, prior_depth))
-            K = self._K_strided[offset][cam_idx]
+            stride: int = info.get("stride", STRIDE)
+            normals, static, prior_depth = (strided_pixels(x, offset, stride) for x in (normals, static, prior_depth))
+            K = self._strided_K(offset, stride)[cam_idx]
         prior_normals, _ = decode_normals(normals)
         terms: PriorTerms = prior_terms(depth_rendered, alphas[0, ..., 0], static, prior_depth.float(), prior_normals, K, step, self.config)
         if logged:
@@ -344,6 +353,7 @@ class MonoPriorLoss:
         depth: Float32[Tensor, "b h w"],
         alphas: Float32[Tensor, "b h w"],
         offset: tuple[int, int] | None,
+        stride: int = STRIDE,
     ) -> Float32[Tensor, " b"] | None:
         """``__call__`` for the same-size cameras ``cams`` of one step at once (``depth``/``alphas`` their renders, one per
         camera): the per-camera losses, or None when a camera has no maps (the caller then calls per camera)."""
@@ -360,12 +370,12 @@ class MonoPriorLoss:
             self._to_device(depth.device)
         assert self._K is not None
         slots: list[int] = [self.positions.index(c) for c in cams]
-        Ks: Tensor = self._K if offset is None else self._K_strided[offset]
+        Ks: Tensor = self._K if offset is None else self._strided_K(offset, stride)
         maps: list[tuple[Tensor, Tensor, Tensor]] = [
             (self._normals[s][frame_idx], self._static[s][frame_idx], self._depth[s][frame_idx]) for s in slots
         ]
         if offset is not None:
-            maps = [(strided_pixels(n, offset), strided_pixels(v, offset), strided_pixels(d, offset)) for n, v, d in maps]
+            maps = [(strided_pixels(n, offset, stride), strided_pixels(v, offset, stride), strided_pixels(d, offset, stride)) for n, v, d in maps]
         normals, static, prior_depth = (torch.stack(parts) for parts in zip(*maps, strict=True))
         prior_normals, _ = decode_normals(normals)
         K: Tensor = torch.stack([Ks[c] for c in cams])

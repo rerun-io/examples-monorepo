@@ -78,6 +78,9 @@ class TrainConfig:
     """Strided pixel sampling (PennyGS 3.4, default on; 1 = full images): each step renders and supervises one pixel of every 2x2 block, cycling the
     offset so every pixel is supervised once every four steps (steps whose cameras do not share one time render full size);
     the MoGe-2 prior reads the same pixels."""
+    coarse_stride_steps: int = 0
+    """Coarse-to-fine lever 4: the first ``coarse_stride_steps`` steps render one pixel of every 4 x 4 block (cycling 16
+    offsets), the rest ``pixel_stride``'s 2 x 2; 0 = off. Needs ``pixel_stride=2``."""
     adam_moments: Literal["fp32", "bf16"] = "bf16"
     """Adam moment storage: ``fp32`` (torch.optim.Adam) or ``bf16`` (HiGS 4.3: bfloat16 moments, stochastically rounded,
     one fused Triton kernel per parameter; ``open4dgs.adam_bf16``)."""
@@ -600,6 +603,7 @@ def train_clip(
     trainer: Open4dgsTrainer = Open4dgsTrainer(
         device=str(dev),
         pixel_stride=config.pixel_stride,
+        coarse_stride_steps=config.coarse_stride_steps,
         adam_moments=config.adam_moments,
         fused_loss=config.fused_loss,
     )
