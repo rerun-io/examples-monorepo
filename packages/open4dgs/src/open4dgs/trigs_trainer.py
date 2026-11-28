@@ -51,8 +51,8 @@ from trigs.core.trainer import TrigsTrainer, TrigsTrainingConfig, TrigsTrainingR
 from trigs.strategy.motion_guided_relocation import MotionGuidedRelocationStrategy
 
 from open4dgs.fused_deform import DEFORM_KEYS, compiled_gather_deform, mark_rows_dynamic
-from open4dgs.fused_regularisers import compiled_core_regularisers
 from open4dgs.fused_loss import masked_composite_terms, masked_composite_terms_batch
+from open4dgs.fused_regularisers import compiled_core_regularisers
 from open4dgs.strided import GSPLAT_EPS2D, STRIDE, STRIDE_OFFSETS, StrideState, strided_intrinsics, strided_pixels
 
 RENDER_INPUT_KEYS: tuple[str, ...] = ("means", "quats", "scales", "opacities", "colors")
@@ -496,8 +496,14 @@ class Open4dgsTrainer(TrigsTrainer):
             threshold if smooth else 0.0,
         )
         return {
-            "active_idx": active_idx, "gamma": gamma, "sh_degree": sh_degree if with_shN else 0,
-            "means": means_t, "quats": quats_t, "scales": scales, "opacities": opacities, "colors": colors,
+            "active_idx": active_idx,
+            "gamma": gamma,
+            "sh_degree": sh_degree if with_shN else 0,
+            "means": means_t,
+            "quats": quats_t,
+            "scales": scales,
+            "opacities": opacities,
+            "colors": colors,
         }
 
     def _core_regularisers(  # pyrefly: ignore[bad-override]
@@ -524,8 +530,11 @@ class Open4dgsTrainer(TrigsTrainer):
         ):
             return None
         scale_rows: str = (
-            "off" if float(getattr(config, "lambda_scale_reg", 0.0)) <= 0.0
-            else "all" if getattr(config, "scale_reg_include_static", True) else "dynamic"
+            "off"
+            if float(getattr(config, "lambda_scale_reg", 0.0)) <= 0.0
+            else "all"
+            if getattr(config, "scale_reg_include_static", True)
+            else "dynamic"
         )
         mark_rows_dynamic(rigid_loss_idx)
         mark_rows_dynamic(nn_indices)

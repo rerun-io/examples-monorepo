@@ -39,7 +39,10 @@ def core_regularisers(
     motion: Tensor = (dyn * ((b_t**2).sum(dim=-1) + (b_r**2).sum(dim=-1))).sum() / count
     zeta_base: Tensor = torch.cat([base_t, base_r], dim=-1)
     rigid: Tensor = rigid_coherence_loss(
-        zeta_base.index_select(0, rigid_idx), sh0.index_select(0, rigid_idx), nn_indices, lambda_c=rigid_lambda_c,
+        zeta_base.index_select(0, rigid_idx),
+        sh0.index_select(0, rigid_idx),
+        nn_indices,
+        lambda_c=rigid_lambda_c,
         detach_color_weight=rigid_detach_color,
     )
     base_opa: Tensor = torch.sigmoid(opacities).reshape(-1)

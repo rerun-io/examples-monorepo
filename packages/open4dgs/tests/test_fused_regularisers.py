@@ -34,15 +34,14 @@ def _reference(p: dict[str, torch.Tensor], n: int, gamma: torch.Tensor, rigid_id
     any_dyn = dyn.numel() > 0
     motion = bezier_motion_loss(c0.index_select(0, dyn), c1.index_select(0, dyn), c2.index_select(0, dyn)) if any_dyn else zero
     zb = torch.cat([p["zeta_base_t"], p["zeta_base_r"]], dim=-1)
-    rigid = rigid_coherence_loss(zb.index_select(0, rigid_idx), p["sh0"].index_select(0, rigid_idx), nn_indices, lambda_c=50.0, detach_color_weight=False)
+    rigid = rigid_coherence_loss(
+        zb.index_select(0, rigid_idx), p["sh0"].index_select(0, rigid_idx), nn_indices, lambda_c=50.0, detach_color_weight=False
+    )
     base_opa = torch.sigmoid(p["opacities"]).unsqueeze(-1)
     reg = (base_opa.index_select(0, dyn) * gamma.index_select(0, dyn).detach()).mean() if any_dyn else zero
     sigma_t = torch.exp(p["log_durations"])
     sigma = torch.clamp(0.2 - sigma_t.index_select(0, dyn), min=0.0).pow(2).mean() if any_dyn else zero
-    if scale_rows == "off":
-        scale = zero
-    else:
-        scale = scale_size_loss(p["scales"], n, slice(None) if scale_rows == "all" else dyn_mask)
+    scale = zero if scale_rows == "off" else scale_size_loss(p["scales"], n, slice(None) if scale_rows == "all" else dyn_mask)
     return motion, rigid, reg, sigma, scale
 
 
@@ -60,8 +59,20 @@ def test_core_regularisers_equal_the_trigs_loop(static_fraction: float, scale_ro
     leaves = [v for v in p.values() if v.requires_grad]
     ref = _reference(p, n, gamma, rigid_idx, nn_indices, scale_rows)
     got = core_regularisers(
-        tuple(p[k] for k in ZETA), p["sh0"], p["opacities"], p["log_durations"], p["scales"], p["is_static"], gamma,
-        rigid_idx, nn_indices, 50.0, False, 0.2, scale_rows, n,
+        tuple(p[k] for k in ZETA),
+        p["sh0"],
+        p["opacities"],
+        p["log_durations"],
+        p["scales"],
+        p["is_static"],
+        gamma,
+        rigid_idx,
+        nn_indices,
+        50.0,
+        False,
+        0.2,
+        scale_rows,
+        n,
     )
     weights = (1.0, 0.3, 0.7, 1.3, 0.9)
     for a, b in zip(got, ref, strict=True):

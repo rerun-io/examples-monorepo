@@ -15,8 +15,22 @@ from trigs.math.quaternion import quaternion_multiply, quaternion_to_rotmat
 from trigs.math.se3 import bezier_quadratic, exp_se3_quat, gauge_fix_omega, tau_from_window
 
 DEFORM_KEYS: tuple[str, ...] = (
-    "times", "log_durations", "zeta_c0_t", "zeta_c1_t", "zeta_c2_t", "zeta_c0_r", "zeta_c1_r", "zeta_c2_r",
-    "zeta_base_t", "zeta_base_r", "anchors", "means", "quats", "opacities", "scales", "sh0",
+    "times",
+    "log_durations",
+    "zeta_c0_t",
+    "zeta_c1_t",
+    "zeta_c2_t",
+    "zeta_c0_r",
+    "zeta_c1_r",
+    "zeta_c2_r",
+    "zeta_base_t",
+    "zeta_base_r",
+    "anchors",
+    "means",
+    "quats",
+    "opacities",
+    "scales",
+    "sh0",
 )
 """Row-wise parameters ``gather_deform`` reads, in its argument order (``shN`` and ``is_static`` are optional)."""
 
@@ -99,4 +113,3 @@ def compiled_gather_deform(device: torch.device):  # noqa: ANN201  # gather_defo
 def mark_rows_dynamic(idx: Tensor) -> None:
     """The active-row index's length varies every step: one graph for every length, not a recompile per length."""
     torch._dynamo.maybe_mark_dynamic(idx, 0)
-

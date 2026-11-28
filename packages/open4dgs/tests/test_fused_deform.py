@@ -16,9 +16,15 @@ def _params(dev: str, n: int = 4000) -> dict[str, torch.Tensor]:
     params = {
         "times": (torch.rand(n, 1, generator=g) * 4.0).to(dev).requires_grad_(True),
         "log_durations": r(n, 1, scale=0.3),
-        "means": r(n, 3), "quats": r(n, 4), "opacities": r(n), "scales": r(n, 3, scale=0.2), "anchors": r(n, 3),
-        "sh0": r(n, 3), "shN": r(n, 15, 3, scale=0.1),
-        "zeta_base_t": r(n, 3, scale=0.3), "zeta_base_r": r(n, 3, scale=0.3),
+        "means": r(n, 3),
+        "quats": r(n, 4),
+        "opacities": r(n),
+        "scales": r(n, 3, scale=0.2),
+        "anchors": r(n, 3),
+        "sh0": r(n, 3),
+        "shN": r(n, 15, 3, scale=0.1),
+        "zeta_base_t": r(n, 3, scale=0.3),
+        "zeta_base_r": r(n, 3, scale=0.3),
     }
     for c in ("c0", "c1", "c2"):
         params[f"zeta_{c}_t"], params[f"zeta_{c}_r"] = r(n, 3, scale=0.1), r(n, 3, scale=0.1)
