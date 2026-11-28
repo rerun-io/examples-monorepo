@@ -193,7 +193,7 @@ pub async fn evaluate_directories(
         views,
         mean,
         convention,
-        provenance: Provenance::capture(),
+        provenance: crate::provenance(),
     })
 }
 

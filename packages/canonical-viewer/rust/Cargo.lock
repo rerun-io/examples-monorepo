@@ -4074,6 +4074,7 @@ dependencies = [
 name = "gsplat-core"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "bytemuck",
  "glam 0.30.10",
  "half",
@@ -4081,6 +4082,7 @@ dependencies = [
  "miniz_oxide",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.19",
  "wgpu",
 ]
@@ -12620,6 +12622,26 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "viewer-probe"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "canonical-viewer",
+ "canonical-viewer-extension",
+ "clap",
+ "egui_kittest",
+ "gsplat-core",
+ "gsplat-viewer",
+ "re_build_info",
+ "re_grpc_server",
+ "re_log",
+ "re_viewer",
+ "serde",
+ "serde_json",
+ "tokio",
+]
 
 [[package]]
 name = "walkdir"

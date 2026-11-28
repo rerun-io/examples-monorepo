@@ -2,7 +2,7 @@
 
 Brush enters as native `GaussianSplats3D`, Hexels as `Hexels3D` (stock Rerun shows its Points3D fallback).
 Below the views, a DataframeView lists our per-scene numbers (from the benchmark's `TABLE.json`) beside the
-published ones. The `brush` and `hexels` layouts keep one view, the shape `gsplat probe` measures.
+published ones. The `brush` and `hexels` layouts keep one view, the shape `viewer-probe` measures.
 """
 
 import os
@@ -60,9 +60,9 @@ class CompareConfig:
     hexels_method: str = "hexels-v1-30k-pub-wgsl"
     """Run directory of the hexel PLY (right view)."""
     layout: Layout = "compare"
-    """`compare` (two views and the table) or one view (`brush`, `hexels`) for `gsplat probe`."""
+    """`compare` (two views and the table) or one view (`brush`, `hexels`) for `viewer-probe`."""
     frames: int = 300
-    """Orbit poses; one per timeline step. 300 makes `gsplat probe`'s 300-frame windows whole orbits."""
+    """Orbit poses; one per timeline step. 300 makes `viewer-probe`'s 300-frame windows whole orbits."""
     width: int = 1920
     """Orbit camera resolution (orbit.json and the logged pinhole)."""
     height: int = 1080
@@ -70,9 +70,9 @@ class CompareConfig:
     fps: float = 30.0
     """Timeline playback rate; 60 advances one pose per headless probe frame."""
     brush_probe: Path | None = None
-    """`gsplat probe` report of the `brush` layout, shown in the table and its view title."""
+    """`viewer-probe` report of the `brush` layout, shown in the table and its view title."""
     hexels_probe: Path | None = None
-    """`gsplat probe` report of the `hexels` layout, shown in the table and its view title."""
+    """`viewer-probe` report of the `hexels` layout, shown in the table and its view title."""
     brush_speed: Path | None = None
     """`gsplat speed --impl ours` report of the Brush PLY on orbit.json, shown in the table."""
     hexels_speed: Path | None = None
