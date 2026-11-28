@@ -77,8 +77,8 @@ def test_core_regularisers_equal_the_trigs_loop(static_fraction: float, scale_ro
     weights = (1.0, 0.3, 0.7, 1.3, 0.9)
     for a, b in zip(got, ref, strict=True):
         torch.testing.assert_close(a, b, rtol=1e-5, atol=1e-7)
-    ga = torch.autograd.grad(sum(w * t for w, t in zip(weights, got, strict=True)), leaves, allow_unused=True)
-    gb = torch.autograd.grad(sum(w * t for w, t in zip(weights, ref, strict=True)), leaves, allow_unused=True)
+    ga = torch.autograd.grad(torch.stack([w * t for w, t in zip(weights, got, strict=True)]).sum(), leaves, allow_unused=True)
+    gb = torch.autograd.grad(torch.stack([w * t for w, t in zip(weights, ref, strict=True)]).sum(), leaves, allow_unused=True)
     for a, b in zip(ga, gb, strict=True):
         if a is None or b is None:
             assert (a is None or not a.any()) and (b is None or not b.any())

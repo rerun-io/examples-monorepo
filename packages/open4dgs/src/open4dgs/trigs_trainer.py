@@ -461,8 +461,8 @@ class Open4dgsTrainer(TrigsTrainer):
 
     def _render_inputs(  # pyrefly: ignore[bad-override]
         self,
-        params: nn.ParameterDict | dict,
-        cameras: CameraConfig | None,
+        params: nn.ParameterDict,
+        cameras: CameraConfig,
         cam_idx: int,
         t: float | Tensor,
         sh_degree: int,

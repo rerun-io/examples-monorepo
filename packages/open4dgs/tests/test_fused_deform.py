@@ -7,7 +7,7 @@ import torch
 pytest.importorskip("trigs", reason="TRiGS comes from recipes/open4dgs-trigs-src (open4dgs envs)")
 
 
-def _params(dev: str, n: int = 4000) -> dict[str, torch.Tensor]:
+def _params(dev: str, n: int = 4000) -> torch.nn.ParameterDict:
     g = torch.Generator().manual_seed(0)
 
     def r(*shape: int, scale: float = 1.0) -> torch.Tensor:
@@ -29,8 +29,15 @@ def _params(dev: str, n: int = 4000) -> dict[str, torch.Tensor]:
     for c in ("c0", "c1", "c2"):
         params[f"zeta_{c}_t"], params[f"zeta_{c}_r"] = r(n, 3, scale=0.1), r(n, 3, scale=0.1)
     params["zeta_base_r"].data[:50] = 0.0  # rows in the translation-only gauge branch
-    params["is_static"] = (torch.rand(n, 1, generator=g) < 0.2).float().to(dev)
-    return params
+    params["is_static"] = torch.nn.Parameter((torch.rand(n, 1, generator=g) < 0.2).float().to(dev), requires_grad=False)
+    return torch.nn.ParameterDict(params)
+
+
+def _cameras(dev: str):  # noqa: ANN202
+    from open4dgs.trigs_adapter import camera_config
+
+    K = torch.tensor([[110.0, 0.0, 63.2], [0.0, 105.0, 47.7], [0.0, 0.0, 1.0]])[None]
+    return camera_config(torch.eye(4)[None], K, [(128, 96)], torch.device(dev))
 
 
 def _render(trainer, params, idx, t, sh_degree, fused: bool):  # noqa: ANN001, ANN202
@@ -38,9 +45,9 @@ def _render(trainer, params, idx, t, sh_degree, fused: bool):  # noqa: ANN001, A
 
     trainer.fused_deform = fused
     trainer._active_idx_for_time = lambda *a, **k: idx
-    out = trainer._render_inputs(params, None, 0, t, sh_degree, TrigsTrainingConfig())
+    out = trainer._render_inputs(params, _cameras(str(params["means"].device)), 0, t, sh_degree, TrigsTrainingConfig())
     keys = ("means", "quats", "scales", "opacities", "colors", "gamma")
-    loss = sum((out[k] * torch.linspace(0.5, 1.5, out[k].numel(), device=out[k].device).reshape(out[k].shape)).sum() for k in keys)
+    loss = torch.stack([(out[k] * torch.linspace(0.5, 1.5, out[k].numel(), device=out[k].device).reshape(out[k].shape)).sum() for k in keys]).sum()
     grads = torch.autograd.grad(loss, [v for v in params.values() if v.requires_grad], allow_unused=True)
     return {k: out[k].detach() for k in keys} | {"sh_degree": out["sh_degree"]}, grads
 
