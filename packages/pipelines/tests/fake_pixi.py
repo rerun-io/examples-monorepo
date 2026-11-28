@@ -16,13 +16,15 @@ from rerun.catalog import CatalogClient
 from simplecv.catalog_layers import atomic_recording, register_layer
 from simplecv.run_record import start_run, write_run_record
 
-LAYER_OF_TASK: dict[str, str] = {"posekit-lens-masks": "lens_mask", "slam-rs-catalog-layer": "slam_rs"}
+LAYER_OF_TASK: dict[str, str] = {
+    "posekit-lens-masks": "lens_mask", "slam-rs-catalog-layer": "slam_rs", "dataforge-insta360-face-masks": "masks", "colsfm-catalog": "colsfm",
+}
 
 arguments: list[str] = sys.argv[1:]
 task: str = arguments[arguments.index("-e") + 2]
 options: dict[str, str] = {name: value for name, value in zip(arguments, arguments[1:], strict=False) if name.startswith("--")}
-segment: str = options["--segment"]
-catalog_url: str = options.get("--catalog") or options["--catalog-url"]
+segment: str = options.get("--segment") or options["--source.segment"]
+catalog_url: str = options.get("--catalog") or options.get("--catalog-url") or options["--source.catalog-url"]
 if os.environ.get("FAKE_STAGE_FAIL") == task:
     print(f"{task}: failing on purpose")
     sys.exit(3)
@@ -30,7 +32,7 @@ if os.environ.get("FAKE_STAGE_NOOP") == task:
     sys.exit(0)
 run = start_run(arguments, source=Path(__file__))
 layer: str = LAYER_OF_TASK[task]
-path: Path = Path(options["--output-dir"]) / f"{segment}.rrd"
+path: Path = Path(options["--layer-path"]) if "--layer-path" in options else Path(options["--output-dir"]) / f"{segment}.rrd"
 with atomic_recording(path, application_id="fake-stage", recording_id=segment, send_properties=False) as recording:
     recording.log(f"/{layer}", rr.TextLog(f"{task} {' '.join(arguments)}"), static=True)
     if os.environ.get("FAKE_STAGE_KILL") == task:

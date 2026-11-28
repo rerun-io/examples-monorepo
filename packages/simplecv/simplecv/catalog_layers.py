@@ -24,6 +24,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 import pyarrow as pa
 import rerun as rr
@@ -32,6 +33,8 @@ import rerun.chunk as rrc
 from datafusion import col, lit
 from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer, RegisteredBlueprint
 
+LENS_MASK_LAYER: str = "lens_mask"
+"""A 360 recording's lens masks: written by posekit's lens mask step, read by SLAM and the face masks."""
 DATASET_RETRY_DELAY_S: float = 1.0
 """Wait before the one retry of ``ensure_dataset`` (another worker may be creating the same dataset)."""
 
@@ -132,6 +135,17 @@ def segment_properties(entry: DatasetEntry, segment: str, group: str) -> dict[st
     prefix: str = f"property:{group}:"
     row: dict[str, object] = table.slice(0, 1).to_pylist()[0]
     return {name.removeprefix(prefix): cell for name, cell in row.items() if name.startswith(prefix) and isinstance(cell, list) and cell}
+
+
+def registered_layer_files(entry: DatasetEntry, segment: str) -> dict[str, Path]:
+    """Each layer of ``segment`` that the catalog holds as a local file, by layer name (the base is ``base``).
+
+    For a stage that reads layer files: the catalog server reads them at the same paths, so they are this host's too.
+    """
+    rows: list[dict[str, str]] = (
+        entry.manifest().filter(col("rerun_segment_id") == lit(segment)).select("rerun_layer_name", "rerun_storage_url").to_arrow_table().to_pylist()
+    )
+    return {row["rerun_layer_name"]: Path(unquote(urlparse(row["rerun_storage_url"]).path)) for row in rows if row["rerun_storage_url"].startswith("file://")}
 
 
 def register_layer(entry: DatasetEntry, paths: Sequence[Path], layer: str | None, *, replace: bool = True) -> None:

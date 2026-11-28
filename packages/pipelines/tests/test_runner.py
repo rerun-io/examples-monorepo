@@ -14,6 +14,8 @@ rr = pytest.importorskip("rerun", reason="rerun-sdk is required by this test mod
 pytestmark = pytest.mark.integration
 
 SEGMENT: str = "insta360__clip"
+LAYERS: tuple[str, ...] = ("lens_mask", "slam_rs", "masks", "colsfm")
+"""What the insta360 flow publishes, in order."""
 
 
 class Catalog(NamedTuple):
@@ -74,7 +76,7 @@ def _records(url: str) -> dict[str, object]:
 
     entry = CatalogClient(url).get_dataset(name="insta360")
     found: dict[str, object] = {}
-    for layer in ("lens_mask", "slam_rs"):
+    for layer in LAYERS:
         try:
             found[layer] = read_run_record(entry, SEGMENT, layer)
         except ValueError:
@@ -88,13 +90,13 @@ def test_a_run_publishes_every_step_with_the_arguments_the_flow_gave_it(tmp_path
     assert all(record is not None for record in records.values())
     command: str = records["slam_rs"].command  # pyrefly: ignore[missing-attribute]
     assert "-e slam-rs-cuda slam-rs-catalog-layer --segment insta360__clip" in command and command.endswith("--mask-entity people_mask")
-    assert sorted(path.name for path in (tmp_path / "logs").iterdir()) == ["00-lens_masks.log", "01-slam.log"]
+    assert sorted(path.name for path in (tmp_path / "logs").iterdir()) == ["00-lens_masks.log", "01-slam.log", "02-face_masks.log", "03-colsfm.log"]
 
 
 def test_a_failed_step_stops_the_flow_with_its_exit_code(tmp_path: Path, catalog: Catalog, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FAKE_STAGE_FAIL", "posekit-lens-masks")
     assert _run(tmp_path, catalog.url) == 3
-    assert _records(catalog.url) == {"lens_mask": None, "slam_rs": None}, "SLAM never ran on a missing mask layer"
+    assert set(_records(catalog.url).values()) == {None}, "no later step ran on a missing mask layer"
 
 
 def test_a_step_that_exits_0_without_publishing_stops_the_flow(tmp_path: Path, catalog: Catalog, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -118,6 +120,6 @@ def test_the_layer_files_restore_a_restarted_catalog(tmp_path: Path, catalog: Ca
     """The catalog is in memory; the layer files are the durable copy and carry their run records."""
     assert _run(tmp_path, catalog.url) == 0
     before = _records(catalog.url)
-    layers: dict[str, Path] = {layer: tmp_path / "layers" / layer / f"{SEGMENT}.rrd" for layer in ("lens_mask", "slam_rs")}
+    layers: dict[str, Path] = {layer: tmp_path / "layers" / layer / f"{SEGMENT}.rrd" for layer in LAYERS}
     for url in _serve(catalog.base, layers):
         assert _records(url) == before

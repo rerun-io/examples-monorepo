@@ -12,6 +12,11 @@ import rerun.chunk as rrc
 from conftest import read_back, recording_properties
 from jaxtyping import Float64, UInt8
 from numpy import ndarray
+from simplecv.run_record import RunStart, start_run
+
+
+def _run() -> RunStart:
+    return start_run(None, source=Path(__file__))
 
 LENS: int = 384
 FACE: int = 160
@@ -117,13 +122,13 @@ def read_masks(path: Path) -> dict[str, list[tuple[int, UInt8[ndarray, "h w"]]]]
 
 
 def test_each_lens_disc_lands_on_its_face_at_every_face_stamp(tmp_path: Path) -> None:
-    from dataforge.apis.insta360_face_masks import Config, main
+    from dataforge.apis.insta360_face_masks import write_face_masks
 
     base, faces, masks, output = (tmp_path / f"{name}.rrd" for name in ("base", "faces", "masks", "out"))
     write_base(base)
     write_faces(faces)
     write_masks(masks, [*STAMPS, 999_000_000])
-    main(Config(base=base, masks=masks, faces=faces, output=output))
+    write_face_masks(base, masks, faces, output, _run())
     found = read_masks(output)
     assert sorted(found) == [f"/world/rig_00/cam_{cam:02d}/pinhole/people_mask" for cam in range(2, 8)]
     record: dict[str, object] = recording_properties(read_back(output), "run_masks")
@@ -140,13 +145,13 @@ def test_each_lens_disc_lands_on_its_face_at_every_face_stamp(tmp_path: Path) ->
 
 def test_each_face_mask_draws_masked_pixels_as_a_tint_over_a_clear_face(tmp_path: Path) -> None:
     """The face masks carry the lens masks' own annotation context (posekit's): class 0 transparent, class 1 a blue tint."""
-    from dataforge.apis.insta360_face_masks import Config, main
+    from dataforge.apis.insta360_face_masks import write_face_masks
 
     base, faces, masks, output = (tmp_path / f"{name}.rrd" for name in ("base", "faces", "masks", "out"))
     write_base(base)
     write_faces(faces)
     write_masks(masks, STAMPS)
-    main(Config(base=base, masks=masks, faces=faces, output=output))
+    write_face_masks(base, masks, faces, output, _run())
     contexts: dict[str, list[dict[str, Any]]] = {}
     for chunk in rrc.RrdReader(output).store().stream().filter(is_static=True):
         batch = chunk.to_record_batch()
@@ -158,31 +163,31 @@ def test_each_face_mask_draws_masked_pixels_as_a_tint_over_a_clear_face(tmp_path
 
 
 def test_the_face_mask_layer_joins_the_base_recording_whatever_the_file_is_called(tmp_path: Path) -> None:
-    from dataforge.apis.insta360_face_masks import Config, main
+    from dataforge.apis.insta360_face_masks import write_face_masks
 
     base, faces, masks, output = (tmp_path / f"{name}.rrd" for name in ("renamed-base", "faces", "masks", "out"))
     write_base(base)
     write_faces(faces)
     write_masks(masks, STAMPS)
-    main(Config(base=base, masks=masks, faces=faces, output=output))
+    write_face_masks(base, masks, faces, output, _run())
     assert [entry.recording_id for entry in rrc.RrdReader(output).recordings()] == ["insta360__clip"]
 
 
 def test_a_face_stamp_without_a_mask_on_both_lenses_is_an_error(tmp_path: Path) -> None:
-    from dataforge.apis.insta360_face_masks import Config, main
+    from dataforge.apis.insta360_face_masks import write_face_masks
 
     base, faces, masks, output = (tmp_path / f"{name}.rrd" for name in ("base", "faces", "masks", "out"))
     write_base(base)
     write_faces(faces)
     write_masks(masks, STAMPS[:1])
     with pytest.raises(ValueError, match="no mask on both lenses"):
-        main(Config(base=base, masks=masks, faces=faces, output=output))
+        write_face_masks(base, masks, faces, output, _run())
     assert not output.exists()
 
 
 def test_a_quarter_size_mask_with_its_scale_joins_like_its_nearest_upsample(tmp_path: Path) -> None:
     """Contract v2: a mask at 1/4 of the lens size with a static scale of 4 gives the faces of the same mask repeated 4x4."""
-    from dataforge.apis.insta360_face_masks import Config, main
+    from dataforge.apis.insta360_face_masks import write_face_masks
 
     base, faces, small, full, out_small, out_full = (tmp_path / f"{n}.rrd" for n in ("base", "faces", "small", "full", "o1", "o2"))
     write_base(base)
@@ -196,8 +201,8 @@ def test_a_quarter_size_mask_with_its_scale_joins_like_its_nearest_upsample(tmp_
             for entity, rows in read_masks(small).items():
                 mask = next(m for t, m in rows if t == stamp)
                 recording.log(entity, rr.SegmentationImage(np.repeat(np.repeat(mask, 4, axis=0), 4, axis=1)))
-    main(Config(base=base, masks=small, faces=faces, output=out_small))
-    main(Config(base=base, masks=full, faces=faces, output=out_full))
+    write_face_masks(base, small, faces, out_small, _run())
+    write_face_masks(base, full, faces, out_full, _run())
     got, want = read_masks(out_small), read_masks(out_full)
     assert sorted(got) == sorted(want)
     for entity in want:
@@ -209,11 +214,54 @@ def test_a_quarter_size_mask_with_its_scale_joins_like_its_nearest_upsample(tmp_
 
 
 def test_a_scale_that_does_not_reach_the_lens_size_is_an_error(tmp_path: Path) -> None:
-    from dataforge.apis.insta360_face_masks import Config, main
+    from dataforge.apis.insta360_face_masks import write_face_masks
 
     base, faces, masks, output = (tmp_path / f"{name}.rrd" for name in ("base", "faces", "masks", "out"))
     write_base(base)
     write_faces(faces)
     write_masks(masks, STAMPS, factor=4, scale=3.0)
     with pytest.raises(ValueError, match="scale"):
-        main(Config(base=base, masks=masks, faces=faces, output=output))
+        write_face_masks(base, masks, faces, output, _run())
+
+
+@pytest.mark.integration
+def test_the_catalog_names_the_input_layers_and_gets_the_face_mask_layer(tmp_path: Path) -> None:
+    """From the catalog: the files of base, cube and lens_mask; the masks equal the file route's; the layer is registered."""
+    from rerun.catalog import CatalogClient
+    from simplecv.catalog_layers import ensure_dataset, register_layer, registered_layer_files
+
+    from dataforge.apis.insta360_face_masks import Config, main, write_face_masks
+
+    base, faces, masks, by_file = (tmp_path / f"{name}.rrd" for name in ("base", "faces", "masks", "by-file"))
+    write_base(base)
+    write_faces(faces)
+    write_masks(masks, STAMPS)
+    write_face_masks(base, masks, faces, by_file, _run())
+    with rr.server.Server() as server:
+        entry = ensure_dataset(server.client(), "insta360")
+        register_layer(entry, [base], None)
+        register_layer(entry, [faces], "cube")
+        register_layer(entry, [masks], "lens_mask")
+        main(Config(segment="insta360__clip", catalog_url=server.url(), output_dir=tmp_path / "out"))
+        registered = registered_layer_files(CatalogClient(server.url()).get_dataset(name="insta360"), "insta360__clip")
+        # An output directory holding another layer's file under the segment's name would replace it: the base (a link
+        # to it), or a later step's layer such as slam_rs.
+        same: Path = tmp_path / "inputs" / "insta360__clip.rrd"
+        same.parent.mkdir()
+        same.hardlink_to(base)
+        register_layer(entry, [same], None)
+        with pytest.raises(ValueError, match="file of layer base"):
+            main(Config(segment="insta360__clip", catalog_url=server.url(), output_dir=same.parent))
+        slam: Path = tmp_path / "slam_rs" / "insta360__clip.rrd"
+        slam.parent.mkdir()
+        slam.write_bytes(faces.read_bytes())
+        register_layer(entry, [slam], "slam_rs")
+        with pytest.raises(ValueError, match="file of layer slam_rs"):
+            main(Config(segment="insta360__clip", catalog_url=server.url(), output_dir=slam.parent))
+        assert slam.read_bytes() == faces.read_bytes()
+    output: Path = tmp_path / "out" / "insta360__clip.rrd"
+    assert registered["masks"] == output.resolve()
+    by_catalog = read_masks(output)
+    assert sorted(by_catalog) == sorted(read_masks(by_file))
+    for entity, rows in read_masks(by_file).items():
+        assert [(stamp, mask.tobytes()) for stamp, mask in rows] == [(stamp, mask.tobytes()) for stamp, mask in by_catalog[entity]]

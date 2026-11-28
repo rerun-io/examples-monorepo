@@ -13,6 +13,7 @@ without a mask on both lenses is an error.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,25 +25,25 @@ import rerun.chunk as rrc
 import torch
 from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
+from rerun.catalog import CatalogClient, DatasetEntry
+from simplecv.catalog_layers import LENS_MASK_LAYER, register_layer, registered_layer_files
 from simplecv.run_record import RunStart, start_run, write_run_record
 
 from dataforge import paths, schema, writing
 from dataforge.datasets import insta360_cube as cube
-from dataforge.datasets.insta360 import FACE_CAMS, RIG, LensCameras, cameras_from_recording, layer_device
+from dataforge.datasets.insta360 import CUBE_LAYER, FACE_CAMS, RIG, LensCameras, cameras_from_recording, layer_device
 
 
 @dataclass
 class Config:
-    """Join a lens-plane mask layer into the cube faces."""
+    """Join a segment's lens mask layer into its cube faces and register the face mask layer, all through the catalog."""
 
-    base: Path
-    """The base recording (lens cameras)."""
-    masks: Path
-    """The lens mask layer (``cam_0{0,1}/pinhole/people_mask``)."""
-    faces: Path
-    """The cube layer (face geometry and stamps)."""
-    output: Path
-    """The face mask layer to write."""
+    segment: str
+    """The Insta360 segment, in the catalog dataset named by its prefix, with its base, cube and lens_mask layers."""
+    catalog_url: str
+    """The catalog; it holds the layers as files at paths this host reads too."""
+    output_dir: Path
+    """The face mask layer is ``<output_dir>/<segment>.rrd``, visible at the same path to the catalog server."""
     device: Literal["cuda", "cpu"] | None = None
     """Where the faces are gathered (``insta360_cube.MaskJoin``); default ``cuda`` when torch sees a GPU."""
 
@@ -153,28 +154,50 @@ def check_mask_covers_lens(shape: tuple[int, int], scale: tuple[float, float], i
 
 
 def main(config: Config) -> None:
-    """Write the face mask layer.
+    """Write the segment's face mask layer from its base, cube and lens mask layers, and register it as ``masks``.
+
+    Raises:
+        ValueError: If the catalog lacks one of the three layers as a file, or the output is another layer's file.
+    """
+    run: RunStart = start_run(config, source=Path(__file__))
+    entry: DatasetEntry = CatalogClient(config.catalog_url).get_dataset(name=config.segment.split("__", 1)[0])
+    files: dict[str, Path] = registered_layer_files(entry, config.segment)
+    needed: tuple[str, ...] = (paths.BASE_LAYER, CUBE_LAYER, LENS_MASK_LAYER)
+    missing: list[str] = [layer for layer in needed if layer not in files]
+    if missing:
+        raise ValueError(f"{config.segment}: the catalog holds no file for layers {missing} (it has {sorted(files)})")
+    output: Path = config.output_dir.resolve() / f"{config.segment}.rrd"
+    # The atomic write replaces whatever file is at ``output``: only this layer's own file may be replaced (links count).
+    taken: list[str] = [layer for layer, path in files.items() if layer != paths.MASKS_LAYER and output.exists() and os.path.samefile(output, path)]
+    if taken:
+        raise ValueError(f"{output} is the file of layer {taken[0]}: the face masks would replace it; pass another --output-dir")
+    write_face_masks(files[paths.BASE_LAYER], files[LENS_MASK_LAYER], files[CUBE_LAYER], output, run, device=config.device)
+    register_layer(entry, [output], paths.MASKS_LAYER)
+    print(f"registered {output} as layer {paths.MASKS_LAYER} of {config.segment}")
+
+
+def write_face_masks(base: Path, masks: Path, faces: Path, output: Path, run: RunStart, *, device: Literal["cuda", "cpu"] | None = None) -> None:
+    """Write the face mask layer from the base, the lens mask layer and the cube layer files, with the run's record.
 
     Raises:
         ValueError: If a face stamp has no mask on both lenses, or a lens mask and its scale do not cover the lens image.
     """
-    run: RunStart = start_run(config, source=Path(__file__))
-    lenses: LensCameras = cameras_from_recording(config.base)
-    faces: dict[int, cube.CubeFace] = faces_from_layer(config.faces, lenses)
-    device: torch.device = layer_device(config.device)
-    join = cube.MaskJoin([cube.face_table(face, lenses.cameras, lenses.lens1_from_lens0, lenses.size) for face in faces.values()], lenses.size, device)
-    wanted: set[int] = {int(s) for s in face_stamps(config.faces)}
+    lenses: LensCameras = cameras_from_recording(base)
+    face_cameras: dict[int, cube.CubeFace] = faces_from_layer(faces, lenses)
+    gather_device: torch.device = layer_device(device)
+    join = cube.MaskJoin([cube.face_table(face, lenses.cameras, lenses.lens1_from_lens0, lenses.size) for face in face_cameras.values()], lenses.size, gather_device)
+    wanted: set[int] = {int(s) for s in face_stamps(faces)}
     lens_shape: tuple[int, int] = (lenses.size[1], lenses.size[0])
-    scales: dict[int, tuple[float, float]] = lens_mask_scales(config.masks)
+    scales: dict[int, tuple[float, float]] = lens_mask_scales(masks)
     pending: dict[int, dict[int, UInt8[ndarray, "h w"]]] = {}
     done: set[int] = set()
-    recording_id: str = rrc.RrdReader(config.base).recordings()[0].recording_id
-    annotation: rr.AnnotationContext | None = lens_mask_annotation(config.masks)
-    with writing.atomic_recording(config.output, recording_id=recording_id, send_properties=False) as recording:
-        for cam in faces:
+    recording_id: str = rrc.RrdReader(base).recordings()[0].recording_id
+    annotation: rr.AnnotationContext | None = lens_mask_annotation(masks)
+    with writing.atomic_recording(output, recording_id=recording_id, send_properties=False) as recording:
+        for cam in face_cameras:
             if annotation is not None:
                 rr.log(schema.people_mask_path(RIG, cam), annotation, static=True, recording=recording)
-        for lens, stamp, mask in lens_masks(config.masks, wanted):
+        for lens, stamp, mask in lens_masks(masks, wanted):
             if stamp in done:
                 continue
             check_mask_covers_lens(mask.shape, scales.get(lens, (1.0, 1.0)), lens_shape)
@@ -185,9 +208,9 @@ def main(config: Config) -> None:
             pair: dict[int, UInt8[ndarray, "h w"]] = pending.pop(stamp)
             done.add(stamp)
             recording.set_time("video_time", duration=np.timedelta64(stamp, "ns"))
-            for cam, joined in zip(faces, join.faces(pair[0], pair[1]), strict=True):
+            for cam, joined in zip(face_cameras, join.faces(pair[0], pair[1]), strict=True):
                 rr.log(schema.people_mask_path(RIG, cam), rr.SegmentationImage(joined), recording=recording)
         absent: list[int] = sorted(wanted - done)
         if absent:
-            raise ValueError(f"{len(absent)} face stamps have no mask on both lenses in {config.masks}, first {absent[:5]}")
+            raise ValueError(f"{len(absent)} face stamps have no mask on both lenses in {masks}, first {absent[:5]}")
         write_run_record(recording, run.finish(paths.MASKS_LAYER, recording_id))
