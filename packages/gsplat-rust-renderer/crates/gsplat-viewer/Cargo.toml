@@ -33,7 +33,7 @@ re_byte_size.workspace = true
 re_tracing.workspace = true
 re_format.workspace = true
 re_math = "0.33"
-# Without default features (no analytics); `app` and gsplat-viewer-web add `default_web`, the stock views.
+# Without default features (no analytics); `app` adds `default_web`, the stock views.
 re_viewer.workspace = true
 ahash = "0.8"
 # Load-time split of SOG decoding (std Instant panics on wasm32).

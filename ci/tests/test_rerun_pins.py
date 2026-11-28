@@ -20,8 +20,6 @@ PATCHED_GIT: tuple[str, ...] = (
     "https://github.com/rerun-io/re_mp4.git",
 )
 CANONICAL_PREPARE: Path = REPO_ROOT / "packages/canonical-viewer/canonical_viewer/apis/prepare_rerun.py"
-# A staged copy of CANONICAL_PREPARE until gsplat's web build moves onto the canonical viewer's web crate.
-WEB_VIEWER_BUILD: Path = REPO_ROOT / "packages/gsplat-rust-renderer/gsplat_rust_renderer/apis/build_web_viewer.py"
 CANONICAL_RECIPE: Path = REPO_ROOT / "packages/canonical-viewer/recipe/recipe.yaml"
 
 
@@ -79,12 +77,9 @@ def _constant(script: Path, name: str) -> str:
     return match.group(1)
 
 
-def test_patched_rerun_checkouts_use_the_conda_pin_tag() -> None:
-    scripts: tuple[Path, ...] = (CANONICAL_PREPARE, WEB_VIEWER_BUILD)
-    tags: dict[str, str] = {str(script.relative_to(REPO_ROOT)): _constant(script, "RERUN_TAG") for script in scripts}
-    commits: dict[str, str] = {str(script.relative_to(REPO_ROOT)): _constant(script, "RERUN_COMMIT") for script in scripts}
-    assert set(tags.values()) == {_conda_rerun_version()}, f"RERUN_TAG must be the conda rerun-sdk pin: {tags}"
-    assert len(set(commits.values())) == 1, f"the copies must check out the same commit: {commits}"
+def test_patched_rerun_checkout_uses_the_conda_pin_tag() -> None:
+    tag: str = _constant(CANONICAL_PREPARE, "RERUN_TAG")
+    assert tag == _conda_rerun_version(), f"canonical_viewer/apis/prepare_rerun.py RERUN_TAG {tag!r} must be the conda rerun-sdk pin"
 
 
 def test_canonical_recipe_version_is_the_conda_pin() -> None:

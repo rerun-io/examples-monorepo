@@ -16,10 +16,8 @@ The Brush observer patch changes no training or renderer math.
 Rerun is pinned to the 0.44.0 git tag (its crates are not on crates.io; the egui family is
 patched to the revisions Rerun's 0.44.0 Cargo.lock uses), Burn to `faec3983`, CubeCL to `46752244`,
 and wgpu to registry 30.0.0. Rerun's wasm-bindgen pin prevents use of Brush's wgpu 30.0.1 fork.
-The web build (`crates/gsplat-viewer-web`, its own Cargo workspace) links the stock
-`re_viewer` web entry point through two patches: a `re_viewer::web_hooks` hook, applied to a
-checkout of the Rerun tag, that requests our device features and registers the renderer,
-and the WebGPU `subgroups` feature mapping that wgpu 30 lacks, applied to its crates.io archive. On wasm32 the core prefixes
+The web build is the canonical viewer's (`packages/canonical-viewer`): its extension hooks request our device features
+and register the renderer, and its wgpu patch adds the WebGPU `subgroups` feature mapping that wgpu 30 lacks. On wasm32 the core prefixes
 subgroup shaders with `enable subgroups;`, which browsers require and naga rejects. Kernels stay within WebGPU workgroup, storage-buffer,
 and dispatch limits. The core rejects devices without subgroups; the custom viewer uses stock
 Gaussian quads when compute capabilities or buffer capacity are insufficient.

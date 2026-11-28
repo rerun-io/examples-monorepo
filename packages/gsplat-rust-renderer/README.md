@@ -41,13 +41,9 @@ one-view recording that `gsplat probe` measures.
 
 ### Web viewer
 
-`gsplat-rust-renderer-web` builds the custom viewer for the browser in the layout of a stock
-Rerun web viewer directory (app files plus `npm/`), so it can be served beside it as
-`/rerun-viewer/0.44.0-gsplat/`:
-
-```bash
-pixi run -e gsplat-rust-renderer-web gsplat-web-build <stock 0.44.0 viewer dir> <out dir>
-```
+The canonical viewer (`packages/canonical-viewer`) is the web build: its web crate holds this
+renderer with every other viewer extension (`canonical-viewer-web-build`), and `recipes/gradio-rerun-src` embeds it in
+Gradio apps.
 
 The compute renderer needs WebGPU subgroups (Chrome or Edge 134+); without them the
 viewer falls back to Rerun's splat renderer. In headless Chromium on an RTX 5090 a
