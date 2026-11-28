@@ -1,0 +1,14 @@
+# The C library floor of rerun-canonical (`stdlib('c')` in recipe.yaml): the binary runs on glibc 2.28 and newer
+# (Ubuntu 20.04+, as conda-forge's own rerun-sdk) and on macOS 11 and newer. The sysroot's run export adds
+# `__glibc >=2.28` to the package, so a machine below the floor fails the solve instead of installing a binary
+# that cannot start.
+c_stdlib:
+  - if: linux
+    then: sysroot
+  - if: osx
+    then: macosx_deployment_target
+c_stdlib_version:
+  - if: linux
+    then: "2.28"
+  - if: osx
+    then: "11.0"
