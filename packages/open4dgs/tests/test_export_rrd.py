@@ -162,4 +162,4 @@ def test_each_export_layer_carries_the_run_record_of_this_export(tmp_path: Path,
     for chunk in RrdReader(run / file).stream().filter(content=f"/__properties/run_{layer}", is_static=True).to_chunks():
         batch = chunk.to_record_batch()
         cells |= {name: batch.column(name).to_pylist()[0] for name in batch.schema.names if not name.startswith("rerun.")}
-    assert (cells["layer"], cells["segment"]) == ([layer], [run.name]) and "export" in str(cells["command"])
+    assert (cells["layer"], cells["segment"]) == ([layer], [run.name]) and str(run) in str(cells["config"]), "the export's own Config"
