@@ -303,38 +303,3 @@ def test_compiled_deform_equals_trigs_deform() -> None:
         assert grads[0].keys() == grads[1].keys() and "zeta_c1_r" in grads[0]
         for k, ga in grads[0].items():
             torch.testing.assert_close(grads[1][k], ga, rtol=1e-4, atol=1e-5 * float(ga.abs().max()) + 1e-12, msg=k)
-
-
-@pytest.mark.integration
-def test_fused_row_gather_equals_index_select() -> None:
-    """open4dgs.row_gather.gather_rows: index_select's values and its gradients (zero rows outside idx), for 1-D, 2-D and
-    3-D row tensors, a tensor without a gradient and an unused output; and Open4dgsTrainer(fused_gather=True)'s
-    _slice_rowwise_params matches the index_select path."""
-    if not torch.cuda.is_available():
-        pytest.skip("needs a CUDA GPU (Triton)")
-    from open4dgs.row_gather import gather_rows
-    from open4dgs.trigs_trainer import Open4dgsTrainer
-
-    g = torch.Generator(device="cuda").manual_seed(0)
-    n = 5003
-    shapes = [(n,), (n, 3), (n, 15, 3), (n, 1), (n, 4)]
-    base = [torch.randn(s, device="cuda", generator=g) for s in shapes]
-    idx = torch.randperm(n, device="cuda", generator=g)[:1777].sort().values
-    weights = [torch.randn((1777, *s[1:]), device="cuda", generator=g) for s in shapes]
-    results = []
-    for fused in (False, True):
-        ts = [b.clone().requires_grad_(i != 3) for i, b in enumerate(base)]
-        outs = gather_rows(ts, idx) if fused else tuple(t.index_select(0, idx) for t in ts)
-        sum((o * w).sum() for i, (o, w) in enumerate(zip(outs, weights, strict=True)) if i != 4).backward()
-        results.append(([o.detach() for o in outs], [t.grad for t in ts]))
-    for a, b in zip(results[0][0], results[1][0], strict=True):
-        assert torch.equal(a, b)
-    for a, b in zip(results[0][1], results[1][1], strict=True):
-        assert (a is None) == (b is None)
-        if a is not None and b is not None:
-            assert torch.equal(a, b)
-    assert results[1][1][3] is None and results[1][1][4] is None  # no grad wanted / output unused: None, as index_select
-    params = torch.nn.ParameterDict({"means": torch.nn.Parameter(base[1].clone()), "opacities": torch.nn.Parameter(base[0].clone())})
-    for fused in (False, True):
-        out = Open4dgsTrainer(device="cuda", fused_gather=fused)._slice_rowwise_params(params, idx)
-        assert torch.equal(out["means"], base[1][idx]) and torch.equal(out["opacities"], base[0][idx])

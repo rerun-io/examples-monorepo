@@ -323,7 +323,6 @@ class Open4dgsTrainer(TrigsTrainer):
         adam_moments: Literal["fp32", "bf16"] = "fp32",
         fused_loss: bool = False,
         compile_deform: bool = False,
-        fused_gather: bool = False,
         **kwargs: object,
     ) -> None:
         super().__init__(*args, **kwargs)  # pyrefly: ignore[bad-argument-type]
@@ -340,7 +339,6 @@ class Open4dgsTrainer(TrigsTrainer):
         # TRiGS's deform as one compiled graph (forward and backward a few fused kernels instead of ~150 elementwise
         # launches); dynamic=True: the active-row count changes every step.
         self._compiled_deform = torch.compile(self._eager_deform, dynamic=True) if compile_deform else None
-        self.fused_gather: bool = fused_gather
         self.stride_state: StrideState = StrideState()
         self._strided_of: CameraConfig | None = None
         self._strided: dict[tuple[int, int], CameraConfig] = {}
@@ -450,20 +448,7 @@ class Open4dgsTrainer(TrigsTrainer):
         ``index_add_`` instead of the sort-based ``index_put_(accumulate=True)`` of advanced indexing. ``idx`` (the active
         rows) has no repeats, so no two adds meet a row and the gradients are the same."""
         n: int = int(params["means"].shape[0])
-        rows: list[str] = [k for k, v in params.items() if isinstance(v, Tensor) and v.ndim >= 1 and int(v.shape[0]) == n]
-        out: dict = dict(params)
-        fused: list[str] = []
-        if self.fused_gather and idx.is_cuda:
-            # One launch for every contiguous float32 row tensor (open4dgs.row_gather), the same values and gradients.
-            fused = [k for k in rows if params[k].dtype == torch.float32 and params[k].is_contiguous() and params[k].device == idx.device]
-            if fused:
-                from open4dgs.row_gather import gather_rows
-
-                out.update(zip(fused, gather_rows([params[k] for k in fused], idx), strict=True))
-        for k in rows:
-            if k not in fused:
-                out[k] = params[k].index_select(0, idx)
-        return out
+        return {k: v.index_select(0, idx) if isinstance(v, Tensor) and v.ndim >= 1 and int(v.shape[0]) == n else v for k, v in params.items()}
 
     def _const_tensor(self, value: object, device: torch.device | str, dtype: torch.dtype) -> Tensor:
         """Lever 1: ``torch.tensor(value)`` on ``device``, built once per (value, device, dtype); never modify it in place."""
