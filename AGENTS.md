@@ -392,16 +392,20 @@ jupyter_client) would pull 4.x, and PyPI `s3fs` → `aiobotocore` needs <3. `gra
 (PyPI) pins an exact `rerun-sdk`; prefix.dev's conda-to-PyPI hash mapping gives the conda
 package the `rerun-sdk` purl, so uv treats it as installed and adds no second copy (check a
 re-lock for zero PyPI `rerun-sdk` entries). The same mapping covers its `gradio>=6` with the
-conda `gradio`. `gradio-rerun` comes from PyPI at the same version as `rerun-sdk`.
+conda `gradio`. `gradio-rerun` is the canonical viewer's build, not PyPI's: a wheel of
+`recipes/gradio-rerun-src` (the canonical web viewer embedded), pinned by URL to a `rerun-canonical-<tag>-<sha7>` release
+on ai-demos, at the same version as `rerun-sdk`. Keep it a PyPI wheel: replacing a PyPI package with a conda package that
+installs the same files makes pixi delete those files in existing environments.
 
 To bump, in one change:
 1. every conda `rerun-sdk` pin in `pixi.toml` (`grep -n 'rerun-sdk = ' pixi.toml`) and the
    `rerun-sdk` run dependencies in `packages/slam-rs/recipe.yaml`, `packages/insta360-io/recipe.yaml` and
    `recipes/gradio-rerun-src/recipe.yaml`;
-2. `gradio-rerun` in `[feature.common.pypi-dependencies]` to the same version — never separately —
-   and `recipes/gradio-rerun-src` (the fdanyone envs' gradio-rerun with the gsplat web viewer) to the
-   gradio-rerun-viewer release commit of that version and the matching `@rerun-io/web-viewer` npm
-   tarball, regenerating its one patch (`package.json` + `pnpm-lock.yaml`);
+2. `recipes/gradio-rerun-src` (gradio-rerun with the canonical web viewer) to the gradio-rerun-viewer
+   release commit of that version and the matching `@rerun-io/web-viewer` npm tarball, regenerating its
+   one patch (`package.json` + `pnpm-lock.yaml`); then build its wheel, publish it with the
+   rerun-canonical release, and point `gradio-rerun` in `[feature.common.pypi-dependencies]` at it —
+   never separately;
 3. the Rust `rerun`/`re_*` crates to match exactly (matching that release's egui family):
    `packages/robocap-live`, `packages/slam-rs`, the gsplat custom viewer
    (`packages/gsplat-rust-renderer/crates/*/Cargo.toml`), the depth-video viewer
