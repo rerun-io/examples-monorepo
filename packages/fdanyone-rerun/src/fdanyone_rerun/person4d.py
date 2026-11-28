@@ -144,11 +144,11 @@ def read_run_clip(
         if len(body.vertices) != num_frames:
             raise ValueError(f"{output_dir}: the body has {len(body.vertices)} frames, the clip {num_frames}")
         vertices: Float32[np.ndarray, "frames verts 3"] = body.vertices.astype(np.float32)
-        for camera, pending in zip(rig.cameras, decoded, strict=True):
+        for camera in rig.cameras:
             raise_if_stopped(cancel)
             stored_wh: tuple[int, int] = (camera.image_width, camera.image_height)
             target_wh: tuple[int, int] = fit_max_side(*stored_wh, max_side)
-            stored: UInt8[Tensor, "frames h w 3"] = pending.result()
+            stored: UInt8[Tensor, "frames h w 3"] = decoded.pop(0).result()  # popped: a resized view frees its full-size frames
             mattes: UInt8[Tensor, "frames h w"] = camera_matte(
                 matte_model,
                 stored,
