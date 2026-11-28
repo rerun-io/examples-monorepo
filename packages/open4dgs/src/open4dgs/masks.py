@@ -47,6 +47,9 @@ MODEL_SIZE: int = 1024
 """BiRefNet's input side (fdanyone ``FOREGROUND.image_size``)."""
 IMAGENET_MEAN: tuple[float, float, float] = (0.485, 0.456, 0.406)
 IMAGENET_STD: tuple[float, float, float] = (0.229, 0.224, 0.225)
+MatteNet = Callable[[Tensor], Sequence[Tensor]]
+"""What ``predict_mattes`` calls: ImageNet-normalised fp16 crops (``b 3 MODEL_SIZE MODEL_SIZE``) -> a sequence whose last
+item is the matte logits (``b 1 MODEL_SIZE MODEL_SIZE``): the torch BiRefNet or ``birefnet_trt.BiRefNetTrt``."""
 DECODE_THREADS: int = min(16, os.cpu_count() or 1)
 """PNG decode threads of ``read_clip_masks`` (``cv2.imdecode`` releases the GIL)."""
 
@@ -131,17 +134,21 @@ def fill_missing_boxes(boxes: Float32[ndarray, "frames 4"]) -> Float32[ndarray, 
 
 
 def predict_mattes(
-    model: torch.nn.Module,
+    model: MatteNet,
     frames: UInt8[Tensor, "n h w 3"],
     boxes: Float32[ndarray, "n 4"],
     device: torch.device,
     batch_size: int = 8,
 ) -> UInt8[Tensor, "n h w"]:
-    """BiRefNet mattes (255 = person) of each frame inside its box; zero outside it, the whole frame for a NaN box."""
+    """BiRefNet mattes (255 = person) of each frame inside its box; zero outside it, the whole frame for a NaN box; on the CPU.
+
+    The frames go to ``device`` in one copy and the mattes stay there until one copy back, so no batch waits on the host.
+    """
     height, width = frames.shape[1], frames.shape[2]
     mean: Tensor = torch.tensor(IMAGENET_MEAN, device=device).view(1, 3, 1, 1)
     std: Tensor = torch.tensor(IMAGENET_STD, device=device).view(1, 3, 1, 1)
-    out: UInt8[Tensor, "n h w"] = torch.zeros((len(frames), height, width), dtype=torch.uint8)
+    frames = frames.to(device)
+    out: UInt8[Tensor, "n h w"] = torch.zeros((len(frames), height, width), dtype=torch.uint8, device=device)
     crops: list[tuple[int, int, int, int]] = []
     for box in boxes:
         if not np.isfinite(box).all():
@@ -154,7 +161,7 @@ def predict_mattes(
         inputs: list[Tensor] = []
         for i in batch:
             x0, y0, x1, y1 = crops[i]
-            crop: Tensor = frames[i, y0:y1, x0:x1].to(device).permute(2, 0, 1)[None].float() / 255.0
+            crop: Tensor = frames[i, y0:y1, x0:x1].permute(2, 0, 1)[None].float() / 255.0
             inputs.append(F.interpolate(crop, size=(MODEL_SIZE, MODEL_SIZE), mode="bilinear", antialias=True, align_corners=False))
         with torch.inference_mode():
             logits: Tensor = model(((torch.cat(inputs) - mean) / std).half())[-1]
@@ -162,12 +169,12 @@ def predict_mattes(
         for slot, i in enumerate(batch):
             x0, y0, x1, y1 = crops[i]
             matte: Tensor = F.interpolate(probs[slot : slot + 1], size=(y1 - y0, x1 - x0), mode="bilinear", align_corners=False)[0, 0]
-            out[i, y0:y1, x0:x1] = (matte * 255.0).round().clamp(0, 255).to(torch.uint8).cpu()
-    return out
+            out[i, y0:y1, x0:x1] = (matte * 255.0).round().clamp(0, 255).to(torch.uint8)
+    return out.cpu()
 
 
 def camera_matte(
-    model: torch.nn.Module,
+    model: MatteNet,
     frames: UInt8[Tensor, "n h w 3"],
     box_points: Float32[ndarray, "n k 3"],
     world_T_cam: Float32[ndarray, "4 4"],
@@ -189,7 +196,7 @@ def camera_matte(
 def clip_mattes(
     clip: MultiViewClip,
     box_points: Callable[[int], Float32[ndarray, "n k 3"]],
-    model: torch.nn.Module,
+    model: MatteNet,
     pad_fraction: float,
     pad_px: float,
     device: torch.device,
@@ -259,7 +266,10 @@ def resample_masks(
     dtype: torch.dtype,
 ) -> Float32[Tensor, "t h3 w3"] | Float16[Tensor, "t h3 w3"]:
     """Stored-grid 8-bit mattes to [0, 1] on the clip grid (``resample_images``), ``RESAMPLE_CHUNK`` frames at a time on
-    ``compute_device``; the result lands on ``device`` as ``dtype``."""
+    ``compute_device``; the result lands on ``device`` as ``dtype``. Without a lens at the stored size the resample is the
+    identity, and the conversion alone runs where the result lands (no round trip through ``compute_device``)."""
+    if grid is None and (stored.shape[2], stored.shape[1]) == target_wh:
+        return (stored.to(device).float() / 255.0).clamp(0.0, 1.0).to(dtype).contiguous()
     return torch.cat(
         [
             resample_images(stored[start : start + RESAMPLE_CHUNK, None].to(compute_device).float() / 255.0, grid, target_wh)[:, 0]

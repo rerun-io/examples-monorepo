@@ -226,3 +226,65 @@ def test_clip_mattes_is_the_per_camera_box_and_matte_pipeline() -> None:
         boxes = fill_missing_boxes(person_boxes(points[cam], world_T_cam, K, (100, 80), 0.1, 4.0))
         assert torch.equal(got[cam], predict_mattes(model, frames[cam], boxes, cpu, 2))
     assert got[1][1].any()  # the frame without points takes its neighbours' box
+
+
+def _per_frame_mattes(model: torch.nn.Module, frames: torch.Tensor, boxes: np.ndarray, batch_size: int) -> torch.Tensor:
+    """The per-frame upload / per-frame host-return matte loop ``predict_mattes`` replaced: its reference output."""
+    import torch.nn.functional as F
+
+    from open4dgs.masks import IMAGENET_MEAN, IMAGENET_STD, MODEL_SIZE
+
+    height, width = frames.shape[1], frames.shape[2]
+    mean = torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1)
+    std = torch.tensor(IMAGENET_STD).view(1, 3, 1, 1)
+    out = torch.zeros((len(frames), height, width), dtype=torch.uint8)
+    crops = [
+        (0, 0, width, height) if not np.isfinite(b).all() else (int(np.floor(b[0])), int(np.floor(b[1])), int(np.ceil(b[2])), int(np.ceil(b[3])))
+        for b in boxes
+    ]
+    todo = [i for i, (x0, y0, x1, y1) in enumerate(crops) if x1 - x0 >= 8 and y1 - y0 >= 8]
+    for start in range(0, len(todo), batch_size):
+        batch = todo[start : start + batch_size]
+        inputs = []
+        for i in batch:
+            x0, y0, x1, y1 = crops[i]
+            crop = frames[i, y0:y1, x0:x1].permute(2, 0, 1)[None].float() / 255.0
+            inputs.append(F.interpolate(crop, size=(MODEL_SIZE, MODEL_SIZE), mode="bilinear", antialias=True, align_corners=False))
+        probs = model(((torch.cat(inputs) - mean) / std).half())[-1].float().sigmoid()
+        for slot, i in enumerate(batch):
+            x0, y0, x1, y1 = crops[i]
+            matte = F.interpolate(probs[slot : slot + 1], size=(y1 - y0, x1 - x0), mode="bilinear", align_corners=False)[0, 0]
+            out[i, y0:y1, x0:x1] = (matte * 255.0).round().clamp(0, 255).to(torch.uint8)
+    return out
+
+
+@pytest.mark.parametrize("batch_size", [1, 2, 3, 8])
+def test_predict_mattes_equals_the_per_frame_loop(batch_size: int) -> None:
+    """The device-resident matte loop (one upload, mattes kept on the device, one host copy) gives the per-frame loop's bytes:
+    NaN boxes take the whole frame, boxes under 8 px stay zero, the rest is BiRefNet inside the box."""
+    from open4dgs.masks import predict_mattes
+
+    gen = torch.Generator().manual_seed(1)
+    frames = torch.randint(0, 255, (5, 40, 60, 3), dtype=torch.uint8, generator=gen)
+    boxes = np.array(
+        [[3.2, 4.7, 40.1, 33.0], [np.nan] * 4, [10.0, 10.0, 14.0, 30.0], [0.0, 0.0, 60.0, 40.0], [20.5, 1.5, 59.5, 39.5]], dtype=np.float32
+    )
+    got = predict_mattes(_BoxMatte(), frames, boxes, torch.device("cpu"), batch_size)
+    assert got.device.type == "cpu" and got.dtype == torch.uint8
+    assert torch.equal(got, _per_frame_mattes(_BoxMatte(), frames, boxes, batch_size))
+    assert not got[2].any()
+
+
+def test_identity_mask_resample_is_the_8bit_conversion() -> None:
+    """No lens and the stored size: resample_masks is the 8-bit -> [0, 1] conversion alone, on the output device, with the
+    bytes of the general path (resample_images on the compute device)."""
+    from open4dgs.catalog_clip import RESAMPLE_CHUNK, resample_images
+    from open4dgs.masks import resample_masks
+
+    stored = _soft_mattes(RESAMPLE_CHUNK + 3, 30, 40)
+    cpu = torch.device("cpu")
+    expected = resample_images(stored[:, None].float() / 255.0, None, (40, 30))[:, 0].clamp(0.0, 1.0)
+    got = resample_masks(stored, None, (40, 30), torch.device("meta"), cpu, torch.float32)  # never touches the compute device
+    assert got.device == cpu and got.is_contiguous()
+    assert torch.equal(got, expected)
+    assert torch.equal(resample_masks(stored, None, (40, 30), torch.device("meta"), cpu, torch.float16), expected.half())

@@ -12,9 +12,11 @@ the fusion — see prompt-da's ``export_promptda_onnx`` for a worked example.
 """
 
 import hashlib
+import importlib.util
 import json
 import os
 import time
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -310,6 +312,27 @@ def ensure_engine(onnx_path: Path, config: TrtBuildConfig, *, cache_dir: Path = 
     return build_once(engine_path, build)
 
 
+def cached_engine(onnx_path: Path, config: TrtBuildConfig, *, cache_dir: Path = DEFAULT_TRT_CACHE_DIR) -> Path | None:
+    """The engine :func:`ensure_engine` would return when this machine has already built it; checks the caches only.
+
+    Lets a caller fall back to another backend instead of waiting for an export or a build.
+
+    Args:
+        onnx_path: ONNX interchange file the engine is built from.
+        config: Build configuration contributing to the cache key.
+        cache_dir: Engine cache root.
+
+    Returns:
+        The engine path, or None when the ONNX file or the engine is missing or TensorRT is not installed.
+    """
+    if not onnx_path.exists():
+        return None
+    if importlib.util.find_spec("tensorrt") is None:  # the engine name carries its version
+        return None
+    engine: Path = cached_engine_path(onnx_path, config, cache_dir=cache_dir, onnx_sha256=onnx_content_hash(onnx_path, cache_dir=cache_dir))
+    return engine if engine.exists() else None
+
+
 def onnx_content_hash(onnx_path: Path, *, cache_dir: Path | None = None) -> str:
     """Hex SHA-256 of an ONNX model, covering its external weight file if present.
 
@@ -321,11 +344,24 @@ def onnx_content_hash(onnx_path: Path, *, cache_dir: Path | None = None) -> str:
     Returns:
         Hex digest string over the proto and any external data.
     """
+    paths: list[Path] = [path for path in (onnx_path.expanduser(), onnx_path.expanduser().with_suffix(".onnx.data")) if path.exists()]
+    return files_content_hash(paths, cache_dir=cache_dir)
+
+
+def files_content_hash(paths: Sequence[Path], *, cache_dir: Path | None = None) -> str:
+    """Hex SHA-256 over the whole contents of ``paths`` in order, read once per file version.
+
+    Args:
+        paths: Files to hash (e.g. a model snapshot's code, config and weights).
+        cache_dir: Engine cache root that keeps the digest record; defaults to ``DEFAULT_TRT_CACHE_DIR``.
+
+    Returns:
+        Hex digest string; a new process finds it in the record while every file keeps its (inode, size, mtime).
+    """
     versions: list[tuple[str, int, int, int]] = []
-    for path in (onnx_path.expanduser(), onnx_path.expanduser().with_suffix(".onnx.data")):
-        if path.exists():
-            stat = path.stat()
-            versions.append((str(path.resolve()), stat.st_ino, stat.st_size, stat.st_mtime_ns))
+    for path in paths:
+        stat = path.expanduser().stat()
+        versions.append((str(path.expanduser().resolve()), stat.st_ino, stat.st_size, stat.st_mtime_ns))
     return _hash_files(tuple(versions), cache_dir or DEFAULT_TRT_CACHE_DIR)
 
 
