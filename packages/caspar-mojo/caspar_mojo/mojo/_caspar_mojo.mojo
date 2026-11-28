@@ -11,10 +11,7 @@ from std.python.bindings import PythonModuleBuilder
 
 from max.gpu.host import DeviceContext
 
-from camera_models import Pinhole
-from solver import F32HostIn, F32HostOut, HostProblem, HostState, I32HostIn, Options, Stats, U8HostIn, solve
-
-comptime PINHOLE = 0
+from solver import F32HostIn, F32HostOut, HostProblem, HostState, I32HostIn, Options, Stats, U8HostIn, solve_model
 
 
 def _f32_in(spec: PythonObject) raises -> F32HostIn:
@@ -54,33 +51,16 @@ def _problem(inputs: PythonObject) raises -> HostProblem:
     )
 
 
-def _any(mask: U8HostIn, n: Int) -> Bool:
-    for i in range(n):
-        if mask[unsafe_offset=i] != 0:
-            return True
-    return False
-
-
 def _run(
     inputs: PythonObject, options: Options, result: HostState, gradient: F32HostOut, hblk: F32HostOut, linearize_only: Bool
 ) raises -> Stats:
-    var problem = _problem(inputs)
-    var refine_intrinsics = _any(problem.intrinsics_free, problem.n_cameras)
-    var refine_rig = _any(problem.sensor_free, problem.n_cameras)
-    var model = Int(py=inputs[0])
-    if model != PINHOLE:
-        raise Error(t"camera model {model} is not ported yet")
-    var ctx = DeviceContext()
-    if refine_intrinsics and refine_rig:
-        return solve[Pinhole, True, True](ctx, problem, options, result, gradient, hblk, linearize_only)
-    if refine_intrinsics:
-        return solve[Pinhole, True, False](ctx, problem, options, result, gradient, hblk, linearize_only)
-    if refine_rig:
-        return solve[Pinhole, False, True](ctx, problem, options, result, gradient, hblk, linearize_only)
-    return solve[Pinhole, False, False](ctx, problem, options, result, gradient, hblk, linearize_only)
+    return solve_model(DeviceContext(), Int(py=inputs[0]), _problem(inputs), options, result, gradient, hblk, linearize_only)
 
 
 def _stats(stats: Stats) raises -> PythonObject:
+    var trace = Python.list()
+    for t in stats.trace:
+        trace.append(Python.tuple(Float64(t.cost_tried), Float64(t.cost_best), Float64(t.damping), t.pcg_iterations, t.accepted))
     return Python.tuple(
         Float64(stats.initial_cost),
         Float64(stats.final_cost),
@@ -89,11 +69,13 @@ def _stats(stats: Stats) raises -> PythonObject:
         stats.exit_reason,
         stats.solve_seconds,
         stats.launches,
+        trace,
     )
 
 
 def py_solve(inputs: PythonObject, options: PythonObject, outputs: PythonObject) raises -> PythonObject:
-    """`solve(inputs, options, outputs) -> (initial_cost, final_cost, iterations, pcg_iterations, exit, seconds, launches)`."""
+    """`solve(inputs, options, outputs) -> (initial_cost, final_cost, iterations, pcg_iterations, exit, seconds, launches,
+    trace)`, trace = [(cost_tried, cost_best, damping, pcg_iterations, accepted), ...]."""
     var opts = Options(
         solver_iter_max=Int(py=options[0]),
         diag_init=Float32(py=options[1]),

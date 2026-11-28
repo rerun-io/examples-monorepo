@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from reference.solver import State, jtj_cross, linearize, make_groups, reference_solve, retract
-from reference.synthetic import make_problem
 
 from caspar_mojo.problem import BaOptions, BaProblem, CameraModel
+from caspar_mojo.reference.solver import State, jtj_cross, linearize, make_groups, reference_solve, retract
+from caspar_mojo.reference.synthetic import make_problem
 
 
 def _state(problem: BaProblem) -> State:

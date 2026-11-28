@@ -3,8 +3,6 @@
 Built in memory from a seed, so no data file is written or read.
 """
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 
 import numpy as np
@@ -12,8 +10,8 @@ from jaxtyping import Float64
 from numpy import ndarray
 
 from caspar_mojo.problem import MAX_INTRINSICS, BaProblem, CameraModel
-from reference.cameras import project
-from reference.poses import camera_point, normalize_pose, retract_pose
+from caspar_mojo.reference.cameras import project
+from caspar_mojo.reference.poses import camera_point, normalize_pose, retract_pose
 
 WIDTH: int = 1280
 HEIGHT: int = 960
