@@ -116,15 +116,17 @@ def synthetic_reconstruction(
         if len(elements) < 2:
             continue
         track = pycolmap.Track([pycolmap.TrackElement(a, b) for a, b in elements])
-        point3D_id: int = reconstruction.add_point3D(points[i] + rng.normal(0, 0.05, 3), track, np.zeros(3, np.uint8))
-        for a, b in elements:
-            reconstruction.image(a).set_point3D_for_point2D(b, point3D_id)
+        # `add_point3D` links every element of the track to the new point.
+        reconstruction.add_point3D(points[i] + rng.normal(0, 0.05, 3), track, np.zeros(3, np.uint8))
     for frame_id in list(reconstruction.frames)[1:]:
         frame = reconstruction.frame(frame_id)
-        frame.rig_from_world = pycolmap.Rigid3d(frame.rig_from_world.rotation, np.asarray(frame.rig_from_world.translation) + rng.normal(0, 0.05, 3))
+        pose: pycolmap.Rigid3d | None = frame.rig_from_world
+        assert pose is not None, "every synthetic frame is posed"
+        frame.rig_from_world = pycolmap.Rigid3d(pose.rotation, np.asarray(pose.translation) + rng.normal(0, 0.05, 3))
     if num_cameras == 2:
         sensor = pycolmap.sensor_t(pycolmap.SensorType.CAMERA, 2)
-        true_from_rig: pycolmap.Rigid3d = reconstruction.rig(1).sensor_from_rig(sensor)
+        true_from_rig: pycolmap.Rigid3d | None = reconstruction.rig(1).sensor_from_rig(sensor)
+        assert true_from_rig is not None, "the second sensor was added with a pose"
         knocked = pycolmap.Rotation3d(_yaw(0.5) @ np.asarray(true_from_rig.rotation.matrix()))
         reconstruction.rig(1).set_sensor_from_rig(sensor, pycolmap.Rigid3d(knocked, np.asarray(true_from_rig.translation) + rng.normal(0, 0.02, 3)))
     return reconstruction

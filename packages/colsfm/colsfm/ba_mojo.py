@@ -16,6 +16,9 @@ another.
 
 Extraction reads the observations from `images.bin` and `points3D.bin` written to a RAM disk, because pycolmap has no
 bulk accessor for points2D and a per-observation Python loop costs about 1 µs each (2.5 s for P1's 2.4 M).
+That extraction (1.1 s for P1, 2.4 s for clip 007, against a 0.26 s solve) is the limit of this Python path, and it
+stays: the fast path is the C ABI that COLMAP's own CASPAR adapter calls (`caspar_mojo.h`), which packs the
+problem from COLMAP's C++ structures in place, with no file round trip and no Python per observation.
 """
 
 from __future__ import annotations
@@ -35,14 +38,6 @@ from numpy import ndarray
 
 CAMERA_MODEL_BY_NAME: Final[dict[str, CameraModel]] = {model.name: model for model in CameraModel}
 """COLMAP's model name to the contract's enum; the four models CASPAR projects."""
-
-PRINCIPAL_POINT_COLUMNS: Final[dict[CameraModel, tuple[int, ...]]] = {
-    CameraModel.PINHOLE: (2, 3),
-    CameraModel.SIMPLE_RADIAL: (1, 2),
-    CameraModel.OPENCV_FISHEYE: (2, 3),
-    CameraModel.FULL_OPENCV: (2, 3),
-}
-"""Columns of an intrinsics row that stay as they are on write-back: the principal point is never refined."""
 
 RAM_DISK: Final[Path] = Path("/dev/shm")
 
@@ -130,7 +125,9 @@ def _read_points3D(path: Path) -> tuple[Int64[ndarray, " p"], Float64[ndarray, "
     return ids, xyz, track_lengths
 
 
-def _pose_row(pose: pycolmap.Rigid3d) -> Float64[ndarray, " 7"]:
+def _pose_row(pose: pycolmap.Rigid3d | None) -> Float64[ndarray, " 7"]:
+    if pose is None:
+        raise ValueError("a frame of the problem has no rig_from_world (not registered)")
     return np.concatenate([np.asarray(pose.rotation.quat), np.asarray(pose.translation)])
 
 
@@ -315,9 +312,18 @@ def apply_result(reconstruction: pycolmap.Reconstruction, bridged: BridgedProble
         camera: pycolmap.Camera = reconstruction.camera(int(ids.camera_ids[row]))
         params: Float64[ndarray, " k"] = np.asarray(camera.params).copy()
         refined: Float64[ndarray, " k"] = result.intrinsics[row, : len(params)].copy()
-        keep = list(PRINCIPAL_POINT_COLUMNS[CameraModel(int(problem.camera_model[row]))])
+        # The principal point is never refined, so write-back keeps it as stored.
+        keep: list[int] = list(camera.principal_point_idxs())
         refined[keep] = params[keep]
-        camera.params = refined
+        camera.params = refined.tolist()
+
+
+TERMINATION_BY_EXIT: Final[dict[str, pycolmap.BundleAdjustmentTerminationType]] = {
+    "CONVERGED_DIAG_EXIT": pycolmap.BundleAdjustmentTerminationType.NO_CONVERGENCE,
+    "CONVERGED_SCORE_THRESHOLD": pycolmap.BundleAdjustmentTerminationType.CONVERGENCE,
+    "MAX_ITERATIONS": pycolmap.BundleAdjustmentTerminationType.NO_CONVERGENCE,
+}
+"""CASPAR's exit reason to COLMAP's termination, as COLMAP's adapter maps it (`bundle_adjustment_caspar.cc`)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -332,6 +338,18 @@ class MojoSolveSummary:
     """The `caspar_mojo.solver.solve` call: host arrays in, host arrays out."""
     apply_seconds: float
 
+    def bundle_adjustment_summary(self) -> pycolmap.BundleAdjustmentSummary:
+        """The pycolmap summary COLMAP's CASPAR adapter would have returned for this solve.
+
+        Returns:
+            Termination (`TERMINATION_BY_EXIT`; a non-finite or increased cost is a FAILURE) and residual count.
+        """
+        summary = pycolmap.BundleAdjustmentSummary()
+        summary.num_residuals = self.num_residuals
+        healthy: bool = bool(np.isfinite(self.result.final_cost)) and self.result.final_cost <= self.result.initial_cost
+        summary.termination_type = TERMINATION_BY_EXIT[self.result.exit_reason] if healthy else pycolmap.BundleAdjustmentTerminationType.FAILURE
+        return summary
+
 
 def mojo_options(ba_options: pycolmap.BundleAdjustmentOptions) -> BaOptions:
     """CASPAR's solver parameters from pycolmap's options, under the contract's (CASPAR's) names.
@@ -340,10 +358,24 @@ def mojo_options(ba_options: pycolmap.BundleAdjustmentOptions) -> BaOptions:
         ba_options: Options whose `caspar` block holds the solver parameters.
 
     Returns:
-        The same parameters for the Mojo solver.
+        The same parameters for the Mojo solver; a field the Mojo solver adds keeps its own default.
     """
     caspar: pycolmap.CasparBundleAdjustmentOptions = ba_options.caspar
-    return BaOptions(**{field: type(getattr(BaOptions(), field))(getattr(caspar, field)) for field in BaOptions.__dataclass_fields__})
+    return BaOptions(
+        solver_iter_max=int(caspar.solver_iter_max),
+        diag_init=float(caspar.diag_init),
+        diag_min=float(caspar.diag_min),
+        diag_scaling_up=float(caspar.diag_scaling_up),
+        diag_scaling_down=float(caspar.diag_scaling_down),
+        diag_exit_value=float(caspar.diag_exit_value),
+        score_exit_value=float(caspar.score_exit_value),
+        solver_rel_decrease_min=float(caspar.solver_rel_decrease_min),
+        reduced_camera_system=bool(caspar.reduced_camera_system),
+        reduced_pcg_iter_max=int(caspar.reduced_pcg_iter_max),
+        reduced_pcg_eta=float(caspar.reduced_pcg_eta),
+        pcg_iter_max=int(caspar.pcg_iter_max),
+        pcg_rel_error_exit=float(caspar.pcg_rel_error_exit),
+    )
 
 
 def solve_with_mojo(

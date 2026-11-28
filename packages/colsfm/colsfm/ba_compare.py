@@ -1,9 +1,11 @@
 """How far two bundle-adjustment solutions of the same start lie apart: the numbers of the CASPAR vs Mojo report.
 
 Both reconstructions come from one model solved by two solvers with the same gauge, so they share a frame and are
-compared directly, without an alignment. The cost of each is CASPAR's score, half the sum of squared residuals over
-the observations of the problem `colsfm.ba_mojo` reads, projected by COLMAP's own camera model (CASPAR's 1e-6
-projection epsilons are below double rounding at these depths).
+compared directly, without an alignment. A bundle adjustment keeps its factor topology, so the problem read once from
+the start (`colsfm.ba_mojo.problem_from_reconstruction`) names the observations and points of both solutions; each is
+evaluated at the state its reconstruction holds after write-back. The cost is CASPAR's score, half the sum of squared
+residuals over those observations, projected by COLMAP's own pose and camera model (CASPAR's 1e-6 projection epsilons
+are below double rounding at these depths).
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ from caspar_mojo.problem import BaProblem
 from jaxtyping import Float64, Int64
 from numpy import ndarray
 
-from colsfm.ba_mojo import BridgedProblem, problem_from_reconstruction
+from colsfm.ba_mojo import BridgedProblem
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,13 +28,13 @@ class SolveComparison:
     reprojection_a_px: float
     """COLMAP's mean reprojection error (`update_point_3d_errors` first)."""
     reprojection_b_px: float
-    reprojection_relative_difference: float
-    """(B - A) / A."""
+    reprojection_relative_difference: float | None
+    """(B - A) / A; 0.0 when both are zero, None when only A is (`relative_difference`)."""
     cost_a: float
     """Half the sum of squared residuals of the problem."""
     cost_b: float
-    cost_relative_difference: float
-    """(B - A) / A."""
+    cost_relative_difference: float | None
+    """(B - A) / A, as `reprojection_relative_difference`."""
     rotation_difference_max_deg: float
     """Angle of `cam_from_world` B relative to A, over the registered images."""
     rotation_difference_median_deg: float
@@ -40,41 +42,59 @@ class SolveComparison:
     """Camera-centre distance over the scene extent (diagonal of the camera centres' bounding box in A)."""
     center_difference_median: float
     point_difference_max: float
-    """Point distance over the scene extent, over the points both share."""
+    """Point distance over the scene extent, over the problem's points."""
     point_difference_median: float
     registered_images_a: int
     registered_images_b: int
 
 
-def problem_cost(reconstruction: pycolmap.Reconstruction, bridged: BridgedProblem) -> float:
-    """Half the sum of squared residuals of a problem's observations, at the state the problem holds.
+def relative_difference(a: float, b: float) -> float | None:
+    """(B - A) / A, defined for an exact reference too.
 
     Args:
-        reconstruction: Supplies each camera's model and size; the parameters come from the problem.
+        a: The reference value.
+        b: The other value.
+
+    Returns:
+        The relative difference; 0.0 when both are zero, None when only A is (no relative scale exists).
+    """
+    if a == 0.0:
+        return 0.0 if b == 0.0 else None
+    return (b - a) / a
+
+
+def _points(reconstruction: pycolmap.Reconstruction, point3D_ids: Int64[ndarray, " p"]) -> Float64[ndarray, "p 3"]:
+    return np.array([reconstruction.point3D(int(point3D_id)).xyz for point3D_id in point3D_ids], np.float64).reshape(-1, 3)
+
+
+def _cost(reconstruction: pycolmap.Reconstruction, bridged: BridgedProblem, points: Float64[ndarray, "p 3"]) -> float:
+    problem: BaProblem = bridged.problem
+    image_ids: Int64[ndarray, " n"] = bridged.ids.observation_image_ids
+    # The bridge orders observations camera-first, then by image, so each image's observations are one slice.
+    edges: Int64[ndarray, " k"] = np.concatenate([[0], np.flatnonzero(np.diff(image_ids)) + 1, [len(image_ids)]])
+    total: float = 0.0
+    for start, end in zip(edges[:-1].tolist(), edges[1:].tolist(), strict=True):
+        image: pycolmap.Image = reconstruction.image(int(image_ids[start]))
+        pose: pycolmap.Rigid3d = image.cam_from_world()
+        in_cam: Float64[ndarray, "m 3"] = (
+            points[problem.observation_point[start:end]] @ np.asarray(pose.rotation.matrix()).T + np.asarray(pose.translation)
+        )
+        residuals: Float64[ndarray, "m 2"] = np.asarray(reconstruction.camera(image.camera_id).img_from_cam(in_cam)) - problem.pixels[start:end]
+        total += 0.5 * float(np.sum(residuals**2))
+    return total
+
+
+def problem_cost(reconstruction: pycolmap.Reconstruction, bridged: BridgedProblem) -> float:
+    """Half the sum of squared residuals of a problem's observations, at the state the reconstruction holds.
+
+    Args:
+        reconstruction: A solution of the problem: it holds every point, image and camera the problem names.
         bridged: The problem and its ids, from `colsfm.ba_mojo.problem_from_reconstruction`.
 
     Returns:
         The cost.
     """
-    problem: BaProblem = bridged.problem
-    frame, camera_row, point = problem.observation_frame, problem.observation_camera, problem.observation_point
-    in_rig: Float64[ndarray, "n 3"] = _rotate(problem.rig_from_world[frame, :4], problem.points[point]) + problem.rig_from_world[frame, 4:]
-    in_cam: Float64[ndarray, "n 3"] = _rotate(problem.sensor_from_rig[camera_row, :4], in_rig) + problem.sensor_from_rig[camera_row, 4:]
-    total: float = 0.0
-    for row, camera_id in enumerate(bridged.ids.camera_ids.tolist()):
-        selected = camera_row == row
-        stored: pycolmap.Camera = reconstruction.camera(camera_id)
-        camera = pycolmap.Camera(model=stored.model, width=stored.width, height=stored.height, params=problem.intrinsics[row, : len(stored.params)])
-        residuals: Float64[ndarray, "m 2"] = np.asarray(camera.img_from_cam(in_cam[selected])) - problem.pixels[selected]
-        total += 0.5 * float(np.sum(residuals**2))
-    return total
-
-
-def _rotate(quat: Float64[ndarray, "n 4"], vectors: Float64[ndarray, "n 3"]) -> Float64[ndarray, "n 3"]:
-    unit: Float64[ndarray, "n 4"] = quat / np.linalg.norm(quat, axis=1, keepdims=True)
-    axis: Float64[ndarray, "n 3"] = unit[:, :3]
-    twice_cross: Float64[ndarray, "n 3"] = 2.0 * np.cross(axis, vectors)
-    return vectors + unit[:, 3:] * twice_cross + np.cross(axis, twice_cross)
+    return _cost(reconstruction, bridged, _points(reconstruction, bridged.ids.point3D_ids))
 
 
 def _mean_reprojection(reconstruction: pycolmap.Reconstruction) -> float:
@@ -82,28 +102,30 @@ def _mean_reprojection(reconstruction: pycolmap.Reconstruction) -> float:
     return reconstruction.compute_mean_reprojection_error()
 
 
-def compare_solutions(
-    a: pycolmap.Reconstruction, b: pycolmap.Reconstruction, config: pycolmap.BundleAdjustmentConfig, ba_options: pycolmap.BundleAdjustmentOptions
-) -> SolveComparison:
+def compare_solutions(a: pycolmap.Reconstruction, b: pycolmap.Reconstruction, bridged: BridgedProblem) -> SolveComparison:
     """Measure solution B against solution A of the same bundle adjustment.
 
     Args:
         a: The reference solution (CASPAR's).
         b: The other solution.
-        config: The solve's config (selects the problem whose cost is compared).
-        ba_options: The solve's options.
+        bridged: The problem both solved, read from their common start.
 
     Returns:
         The comparison.
+
+    Raises:
+        ValueError: When the two share no registered image.
     """
-    bridged_a: BridgedProblem = problem_from_reconstruction(a, config, ba_options)
-    bridged_b: BridgedProblem = problem_from_reconstruction(b, config, ba_options)
-    cost_a: float = problem_cost(a, bridged_a)
-    cost_b: float = problem_cost(b, bridged_b)
+    points_a: Float64[ndarray, "p 3"] = _points(a, bridged.ids.point3D_ids)
+    points_b: Float64[ndarray, "p 3"] = _points(b, bridged.ids.point3D_ids)
+    cost_a: float = _cost(a, bridged, points_a)
+    cost_b: float = _cost(b, bridged, points_b)
     reprojection_a: float = _mean_reprojection(a)
     reprojection_b: float = _mean_reprojection(b)
 
     image_ids: list[int] = sorted(set(a.reg_image_ids()) & set(b.reg_image_ids()))
+    if not image_ids:
+        raise ValueError("the two solutions share no registered image")
     poses_a: list[pycolmap.Rigid3d] = [a.image(i).cam_from_world() for i in image_ids]
     poses_b: list[pycolmap.Rigid3d] = [b.image(i).cam_from_world() for i in image_ids]
     angles: Float64[ndarray, " m"] = np.array([np.rad2deg(pa.rotation.angle_to(pb.rotation)) for pa, pb in zip(poses_a, poses_b, strict=True)])
@@ -111,20 +133,14 @@ def compare_solutions(
     centers_b: Float64[ndarray, "m 3"] = np.array([b.image(i).projection_center() for i in image_ids])
     extent: float = float(np.linalg.norm(np.ptp(centers_a, axis=0))) or 1.0
     center_differences: Float64[ndarray, " m"] = np.linalg.norm(centers_b - centers_a, axis=1) / extent
-
-    shared: Int64[ndarray, " p"] = np.intersect1d(bridged_a.ids.point3D_ids, bridged_b.ids.point3D_ids)
-    rows_a = np.searchsorted(bridged_a.ids.point3D_ids, shared)
-    rows_b = np.searchsorted(bridged_b.ids.point3D_ids, shared)
-    point_differences: Float64[ndarray, " p"] = (
-        np.linalg.norm(bridged_b.problem.points[rows_b] - bridged_a.problem.points[rows_a], axis=1) / extent if len(shared) else np.zeros(1)
-    )
+    point_differences: Float64[ndarray, " p"] = np.linalg.norm(points_b - points_a, axis=1) / extent if len(points_a) else np.zeros(1)
     return SolveComparison(
         reprojection_a_px=reprojection_a,
         reprojection_b_px=reprojection_b,
-        reprojection_relative_difference=(reprojection_b - reprojection_a) / reprojection_a,
+        reprojection_relative_difference=relative_difference(reprojection_a, reprojection_b),
         cost_a=cost_a,
         cost_b=cost_b,
-        cost_relative_difference=(cost_b - cost_a) / cost_a,
+        cost_relative_difference=relative_difference(cost_a, cost_b),
         rotation_difference_max_deg=float(angles.max()),
         rotation_difference_median_deg=float(np.median(angles)),
         center_difference_max=float(center_differences.max()),

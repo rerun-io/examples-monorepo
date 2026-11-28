@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pycolmap
 import pytest
 
+if TYPE_CHECKING:
+    from colsfm.apis.ba_synth import SynthCameraModel
+
 
 @pytest.mark.parametrize("model", ["PINHOLE", "SIMPLE_RADIAL", "OPENCV_FISHEYE", "FULL_OPENCV"])
-def test_tiny_model_is_perturbed_with_distortion(model: str) -> None:
+def test_tiny_model_is_perturbed_with_distortion(model: SynthCameraModel) -> None:
     from colsfm.apis.ba_synth import DISTORTION, synthetic_reconstruction
 
-    reconstruction = synthetic_reconstruction(5, 300, model)  # type: ignore[arg-type]
+    reconstruction = synthetic_reconstruction(5, 300, model)
     camera = reconstruction.camera(1)
     assert camera.model.name == model
     np.testing.assert_array_equal(camera.params[len(camera.params) - len(DISTORTION[model]) :], DISTORTION[model])
@@ -29,7 +33,7 @@ def test_rig_second_camera_is_not_identity() -> None:
     reconstruction = synthetic_reconstruction(4, 300, num_cameras=2)
     rig = reconstruction.rig(1)
     second = rig.sensor_from_rig(pycolmap.sensor_t(pycolmap.SensorType.CAMERA, 2))
-    assert np.linalg.norm(np.asarray(second.translation)) > 0.2
+    assert second is not None and np.linalg.norm(np.asarray(second.translation)) > 0.2
     assert reconstruction.num_images() == 8 and all(len(reconstruction.frame(f).image_ids) == 2 for f in reconstruction.frames)
 
 

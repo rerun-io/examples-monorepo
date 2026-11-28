@@ -111,6 +111,7 @@ from pathlib import Path
 import numpy as np
 import pycolmap
 
+from colsfm.ba_backend import PreparedSolve
 from colsfm.config import BundleAdjustmentConfig, VisionMappingConfig
 from colsfm.extrinsic_observations import (
     CameraPairKey,
@@ -125,8 +126,8 @@ from colsfm.mapping import (
     BundleAdjustmentSolve,
     MappingOptions,
     MappingResult,
-    bundle_adjustment_options,
-    registered_image_ids,
+    bundle_adjustment_solve,
+    default_gauge_frame_id,
     run_mapping,
     solve_bundle_adjustment,
 )
@@ -361,8 +362,8 @@ def refine_extrinsics(
     base_options: MappingOptions = dataclasses.replace(mapping_options, optimize_extrinsics=False, ba_plan=mapping.ba_plan)
     # The same gauge `run_mapping` picked for the mapping pass: the frame owning the
     # lowest registered image id, which is cuSFM's own choice (spec §6.3).
-    gauge_frame_id: int = reconstruction.image(min(registered_image_ids(reconstruction))).frame_id
-    ba_options: pycolmap.BundleAdjustmentOptions = bundle_adjustment_options(ba_config, base_options)
+    gauge_frame_id: int = default_gauge_frame_id(reconstruction)
+    prepared: PreparedSolve = bundle_adjustment_solve(ba_config, base_options)
     # Which image saw which point, and so which cameras co-observed, changes only when a
     # solve's post-solve guards remove observations; both are rebuilt then, and only then.
     observation_manager: pycolmap.ObservationManager = pycolmap.ObservationManager(reconstruction)
@@ -385,7 +386,7 @@ def refine_extrinsics(
         # `solve_extrinsics` raises on an unusable solve, so only accepted extrinsics are applied.
         apply_extrinsics(reconstruction, rig_reference, refined)
         solve: BundleAdjustmentSolve = solve_bundle_adjustment(
-            reconstruction, ba_options, gauge_frame_id, None, observation_manager, mapping_config.depth_threshold
+            reconstruction, prepared, gauge_frame_id, None, observation_manager, mapping_config.depth_threshold
         )
         # The new extrinsics can move an observation past a pole, so the boundary's pre-solve guard can remove some too.
         if solve.num_removed:

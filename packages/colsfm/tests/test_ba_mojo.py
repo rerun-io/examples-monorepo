@@ -15,12 +15,15 @@ def _tiny(model: str = "PINHOLE", num_cameras: int = 1) -> pycolmap.Reconstructi
     return synthetic_reconstruction(6, 400, model, num_cameras)  # type: ignore[arg-type]
 
 
+def _matrix(pose: pycolmap.Rigid3d | None) -> Float64[ndarray, "3 4"]:
+    assert pose is not None
+    return np.asarray(pose.matrix())
+
+
 def _config(reconstruction: pycolmap.Reconstruction) -> pycolmap.BundleAdjustmentConfig:
-    config = pycolmap.BundleAdjustmentConfig()
-    for image_id in sorted(reconstruction.reg_image_ids()):
-        config.add_image(image_id)
-    config.set_constant_rig_from_world_pose(min(reconstruction.reg_frame_ids()))
-    return config
+    from colsfm.apis.caspar_baseline import gauge_config
+
+    return gauge_config(reconstruction)
 
 
 def _options(refine_intrinsics: bool = False, refine_rig: bool = False) -> pycolmap.BundleAdjustmentOptions:
@@ -136,11 +139,11 @@ def test_round_trip_leaves_the_model_unchanged() -> None:
     for point3D_id in before.point3D_ids():
         np.testing.assert_allclose(reconstruction.point3D(point3D_id).xyz, before.point3D(point3D_id).xyz, rtol=0, atol=0)
     for frame_id in before.frames:
-        np.testing.assert_allclose(reconstruction.frame(frame_id).rig_from_world.matrix(), before.frame(frame_id).rig_from_world.matrix(), atol=1e-12)
+        np.testing.assert_allclose(_matrix(reconstruction.frame(frame_id).rig_from_world), _matrix(before.frame(frame_id).rig_from_world), atol=1e-12)
     for camera_id in before.cameras:
         np.testing.assert_allclose(reconstruction.camera(camera_id).params, before.camera(camera_id).params, rtol=0, atol=0)
     sensor = pycolmap.sensor_t(pycolmap.SensorType.CAMERA, 2)
-    np.testing.assert_allclose(reconstruction.rig(1).sensor_from_rig(sensor).matrix(), before.rig(1).sensor_from_rig(sensor).matrix(), atol=1e-12)
+    np.testing.assert_allclose(_matrix(reconstruction.rig(1).sensor_from_rig(sensor)), _matrix(before.rig(1).sensor_from_rig(sensor)), atol=1e-12)
 
 
 def test_apply_result_writes_free_nodes_only_and_keeps_principal_point() -> None:
@@ -151,7 +154,7 @@ def test_apply_result_writes_free_nodes_only_and_keeps_principal_point() -> None
     reconstruction = _tiny("SIMPLE_RADIAL")
     bridged = problem_from_reconstruction(reconstruction, _config(reconstruction), _options(refine_intrinsics=True))
     p = bridged.problem
-    gauge_pose = reconstruction.frame(int(bridged.ids.frame_ids[0])).rig_from_world.matrix()
+    gauge_pose = _matrix(reconstruction.frame(int(bridged.ids.frame_ids[0])).rig_from_world)
     rig_from_world = p.rig_from_world + 0.01
     result = BaResult(
         intrinsics=p.intrinsics + 1.0,
@@ -167,8 +170,9 @@ def test_apply_result_writes_free_nodes_only_and_keeps_principal_point() -> None
         total_seconds=0.0,
     )
     apply_result(reconstruction, bridged, result)
-    np.testing.assert_array_equal(reconstruction.frame(int(bridged.ids.frame_ids[0])).rig_from_world.matrix(), gauge_pose)
+    np.testing.assert_array_equal(_matrix(reconstruction.frame(int(bridged.ids.frame_ids[0])).rig_from_world), gauge_pose)
     written = reconstruction.frame(int(bridged.ids.frame_ids[1])).rig_from_world
+    assert written is not None
     np.testing.assert_allclose(written.rotation.quat, rig_from_world[1, :4] / np.linalg.norm(rig_from_world[1, :4]))
     f, cx, cy, k = p.intrinsics[0, :4]
     np.testing.assert_allclose(reconstruction.camera(1).params, [f + 1.0, cx, cy, k + 1.0])
@@ -198,20 +202,24 @@ def test_refined_principal_point_is_rejected() -> None:
 
 def test_compare_solutions_of_identical_and_moved_models() -> None:
     from colsfm.ba_compare import compare_solutions
+    from colsfm.ba_mojo import problem_from_reconstruction
 
     a = _tiny(num_cameras=2)
     residuals, _ = _pinhole_residuals(a)
-    same = compare_solutions(a, pycolmap.Reconstruction(a), _config(a), _options())
+    bridged = problem_from_reconstruction(a, _config(a), _options())
+    same = compare_solutions(a, pycolmap.Reconstruction(a), bridged)
     assert np.isclose(same.cost_a, 0.5 * np.sum(residuals**2), rtol=1e-9) and same.cost_relative_difference == 0.0
     assert same.rotation_difference_max_deg < 1e-6 and same.center_difference_max == 0.0 and same.point_difference_max == 0.0
     assert same.registered_images_a == same.registered_images_b == 12
 
     b = pycolmap.Reconstruction(a)
     frame = b.frame(3)
-    turn = pycolmap.Rotation3d(np.deg2rad([0.0, 1.0, 0.0])) * frame.rig_from_world.rotation
-    frame.rig_from_world = pycolmap.Rigid3d(turn, np.asarray(frame.rig_from_world.translation))
-    moved = compare_solutions(a, b, _config(a), _options())
+    pose = frame.rig_from_world
+    assert pose is not None
+    frame.rig_from_world = pycolmap.Rigid3d(pycolmap.Rotation3d(np.deg2rad([0.0, 1.0, 0.0])) * pose.rotation, np.asarray(pose.translation))
+    moved = compare_solutions(a, b, bridged)
     assert np.isclose(moved.rotation_difference_max_deg, 1.0, atol=1e-6) and moved.rotation_difference_median_deg < 1e-6
+    assert moved.reprojection_relative_difference is not None
     assert moved.cost_b > moved.cost_a and moved.reprojection_relative_difference > 0
 
 
@@ -228,21 +236,21 @@ def test_mojo_options_carry_caspars_parameters() -> None:
 
 @pytest.mark.integration
 def test_solve_with_mojo_matches_caspar_on_a_tiny_pinhole_model() -> None:
-    solver = pytest.importorskip("caspar_mojo.solver", reason="caspar_mojo.solver is not on this branch yet")
-    if not hasattr(solver, "solve"):
-        pytest.skip("caspar_mojo.solver.solve is not written yet")
-    from colsfm.apis.caspar_baseline import caspar_options
+    from colsfm.apis.caspar_baseline import caspar_options, gauge_config
+    from colsfm.ba_capability import detect_caspar_capability, detect_mojo_capability
     from colsfm.ba_compare import compare_solutions
-    from colsfm.ba_mojo import solve_with_mojo
+    from colsfm.ba_mojo import problem_from_reconstruction, solve_with_mojo
 
+    # Only a missing build skips; with both solvers present a refusal or a solve error is the regression this catches.
+    for name, capability in (("CASPAR", detect_caspar_capability()), ("caspar_mojo", detect_mojo_capability())):
+        if capability.availability == "unavailable":
+            pytest.skip(f"{name} is not built here: {capability.probe_errors}")
     start = _tiny()
     caspar, mojo = pycolmap.Reconstruction(start), pycolmap.Reconstruction(start)
     options = caspar_options()
-    try:
-        pycolmap.create_default_bundle_adjuster(options, _config(caspar), caspar).solve()
-        summary = solve_with_mojo(mojo, _config(mojo), options)
-    except (RuntimeError, ValueError) as error:
-        pytest.skip(f"no GPU answered: {error}")
-    comparison = compare_solutions(caspar, mojo, _config(start), options)
+    pycolmap.create_default_bundle_adjuster(options, gauge_config(caspar), caspar).solve()
+    summary = solve_with_mojo(mojo, gauge_config(mojo), options)
+    comparison = compare_solutions(caspar, mojo, problem_from_reconstruction(start, gauge_config(start), options))
     assert summary.num_residuals > 0
+    assert comparison.reprojection_relative_difference is not None and comparison.cost_relative_difference is not None
     assert abs(comparison.reprojection_relative_difference) < 0.02 and abs(comparison.cost_relative_difference) < 0.02
