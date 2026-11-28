@@ -11,9 +11,7 @@ The engine is static in the batch on purpose: an engine built from a dynamic-bat
 mattes at batch 8 but wrong ones (|p| differences up to 1.0 over ~70 % of pixels) at every other batch size.
 """
 
-import hashlib
 import os
-import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -24,38 +22,34 @@ from torch import Tensor
 from open4dgs.masks import MODEL_SIZE, MatteNet, load_birefnet
 
 if TYPE_CHECKING:
-    from trtkit import TrtBuildConfig
+    import trtkit
 
 MAX_BATCH: int = 8
 """The engine's batch (``predict_mattes``' default batch)."""
 ONNX_OPSET: int = 20
 """ONNX ``DeformConv`` needs opset 19 or later."""
+EXPORT_VERSION: int = 1
+"""Bump with every change to the exported graph (``_Logits``, ``_deform_conv2d_onnx``): it names the ONNX file."""
 DEFAULT_CACHE_DIR: Path = Path(os.environ.get("OPEN4DGS_CACHE_DIR", Path.home() / ".cache" / "open4dgs")) / "birefnet"
 """ONNX files here, engines under ``trt/`` (machine-local)."""
 
 
-def snapshot_digest(model_dir: Path) -> str:
-    """Identity of a BiRefNet snapshot: its code and config files, the weight file's size and its first and last MiB
-    (hashing all 444 MB from the NAS on every run would cost seconds)."""
-    digest = hashlib.sha256()
-    for name in ("birefnet.py", "BiRefNet_config.py", "config.json"):
-        digest.update((model_dir / name).read_bytes())
-    weights: Path = model_dir / "model.safetensors"
-    size: int = weights.stat().st_size
-    digest.update(str(size).encode())
-    with weights.open("rb") as file:
-        digest.update(file.read(1 << 20))
-        file.seek(max(0, size - (1 << 20)))
-        digest.update(file.read(1 << 20))
-    return digest.hexdigest()
+def snapshot_digest(model_dir: Path, cache_dir: Path = DEFAULT_CACHE_DIR) -> str:
+    """Identity of a BiRefNet snapshot: the whole contents of its code, config and weight files (read once per file
+    version: the digest record under ``cache_dir`` keeps it while the files keep their inode, size and mtime)."""
+    from trtkit.trt_builder import files_content_hash
+
+    names: tuple[str, ...] = ("birefnet.py", "BiRefNet_config.py", "config.json", "model.safetensors")
+    return files_content_hash([model_dir / name for name in names], cache_dir=cache_dir / "trt")
 
 
 def onnx_path(model_dir: Path, cache_dir: Path = DEFAULT_CACHE_DIR) -> Path:
     """Where the ONNX export of this snapshot lives (with its ``.data`` weights sidecar)."""
-    return cache_dir / f"birefnet-{snapshot_digest(model_dir.expanduser().resolve())[:12]}_fp16_{MODEL_SIZE}_b{MAX_BATCH}.onnx"
+    digest: str = snapshot_digest(model_dir.expanduser().resolve(), cache_dir)[:12]
+    return cache_dir / f"birefnet-{digest}_fp16_{MODEL_SIZE}_b{MAX_BATCH}_op{ONNX_OPSET}_v{EXPORT_VERSION}.onnx"
 
 
-def engine_config() -> "TrtBuildConfig":
+def engine_config() -> "trtkit.TrtBuildConfig":
     """The TensorRT build settings (part of the engine cache key): the static batch at the static crop size."""
     from trtkit import TrtBuildConfig
 
@@ -108,33 +102,21 @@ class _Logits(torch.nn.Module):
 
 def export_onnx(model_dir: Path, cache_dir: Path = DEFAULT_CACHE_DIR) -> Path:
     """Export the snapshot to ONNX once (on the CPU: the dynamo exporter traces with fake tensors); published atomically."""
+    from trtkit import export_onnx as export
     from trtkit.artifacts import build_once
 
     path: Path = onnx_path(model_dir, cache_dir)
 
     def build() -> None:
-        model: torch.nn.Module = load_birefnet(model_dir, torch.device("cpu"))
-        staging: Path = path.with_name(f"{path.name}.part{os.getpid()}")
-        staging.mkdir(parents=True)
-        try:
-            with torch.inference_mode():
-                torch.onnx.export(
-                    _Logits(model).eval(),
-                    (torch.zeros((MAX_BATCH, 3, MODEL_SIZE, MODEL_SIZE), dtype=torch.float16),),
-                    str(staging / path.name),
-                    input_names=["image"],
-                    output_names=["logits"],
-                    opset_version=ONNX_OPSET,
-                    dynamo=True,
-                    custom_translation_table={torch.ops.torchvision.deform_conv2d.default: _deform_conv2d_onnx},
-                )
-            # The sidecar first: the graph must never be visible while the weights it references are missing.
-            sidecar: Path = staging / f"{path.name}.data"
-            if sidecar.exists():
-                os.replace(sidecar, path.with_name(sidecar.name))
-            os.replace(staging / path.name, path)
-        finally:
-            shutil.rmtree(staging, ignore_errors=True)
+        export(
+            _Logits(load_birefnet(model_dir, torch.device("cpu"))).eval(),
+            (torch.zeros((MAX_BATCH, 3, MODEL_SIZE, MODEL_SIZE), dtype=torch.float16),),
+            path,
+            input_names=["image"],
+            output_names=["logits"],
+            opset_version=ONNX_OPSET,
+            custom_translation_table={torch.ops.torchvision.deform_conv2d.default: _deform_conv2d_onnx},
+        )
 
     return build_once(path, build)
 
@@ -142,15 +124,10 @@ def export_onnx(model_dir: Path, cache_dir: Path = DEFAULT_CACHE_DIR) -> Path:
 def cached_engine(model_dir: Path, cache_dir: Path = DEFAULT_CACHE_DIR) -> Path | None:
     """The engine of this snapshot when this machine has already built it; checks the caches only. None without trtkit."""
     try:
-        from trtkit.trt_builder import cached_engine_path, onnx_content_hash
+        from trtkit.trt_builder import cached_engine as find_engine
     except ImportError:
         return None
-    path: Path = onnx_path(model_dir, cache_dir)
-    if not path.exists():
-        return None
-    trt_dir: Path = cache_dir / "trt"
-    engine: Path = cached_engine_path(path, engine_config(), cache_dir=trt_dir, onnx_sha256=onnx_content_hash(path, cache_dir=trt_dir))
-    return engine if engine.exists() else None
+    return find_engine(onnx_path(model_dir, cache_dir), engine_config(), cache_dir=cache_dir / "trt")
 
 
 def register_plugins() -> None:
@@ -158,7 +135,8 @@ def register_plugins() -> None:
     engine holding that plugin deserialises only once the library is registered."""
     import tensorrt as trt
 
-    trt.init_libnvinfer_plugins(trt.Logger(trt.Logger.WARNING), "")
+    if not trt.init_libnvinfer_plugins(trt.Logger(trt.Logger.WARNING), ""):
+        raise RuntimeError("TensorRT's plugin library did not register (the BiRefNet engine needs ModulatedDeformConv2d)")
 
 
 def build_engine(model_dir: Path, cache_dir: Path = DEFAULT_CACHE_DIR) -> Path:
@@ -186,6 +164,9 @@ class BiRefNetTrt:
 
 
 def load_matte_model(model_dir: Path, device: torch.device, cache_dir: Path = DEFAULT_CACHE_DIR) -> MatteNet:
-    """The cached TensorRT engine when this machine has one for the snapshot (on CUDA), else the torch model."""
-    engine: Path | None = cached_engine(model_dir, cache_dir) if device.type == "cuda" else None
+    """The cached TensorRT engine when this machine has one for the snapshot, else the torch model on ``device``.
+
+    The engine runs on the current CUDA device only (trtkit binds it there), so another ``device`` takes torch."""
+    current: bool = device.type == "cuda" and device.index in (None, torch.cuda.current_device())
+    engine: Path | None = cached_engine(model_dir, cache_dir) if current else None
     return load_birefnet(model_dir, device) if engine is None else BiRefNetTrt(engine)

@@ -69,8 +69,10 @@ def test_onnx_path_follows_the_snapshot(tmp_path: Path) -> None:
     a = _snapshot(tmp_path / "a", b"\x00" * 3_000_000)
     b = _snapshot(tmp_path / "b", b"\x00" * 3_000_000)
     c = _snapshot(tmp_path / "c", b"\x00" * 2_999_999 + b"\x01")
+    middle = _snapshot(tmp_path / "middle", b"\x00" * 1_500_000 + b"\x01" + b"\x00" * 1_499_999)
     assert onnx_path(a, tmp_path) == onnx_path(b, tmp_path)
     assert onnx_path(a, tmp_path) != onnx_path(c, tmp_path)
+    assert onnx_path(a, tmp_path) != onnx_path(middle, tmp_path), "a weight change anywhere in the file is a new snapshot"
     assert onnx_path(a, tmp_path).parent == tmp_path
 
 
