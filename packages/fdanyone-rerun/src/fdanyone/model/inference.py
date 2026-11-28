@@ -10,6 +10,7 @@ from __future__ import annotations
 import gc
 import logging
 import math
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
@@ -373,6 +374,11 @@ def generate_views(
     root.mkdir(parents=True, exist_ok=False)
     metrics = GenerationMetrics(plan.primary_device_index)
 
+    # The source decode is CPU work: it runs beside pose conditioning, and source_encode only waits for it.
+    source_decode_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="source-decode")
+    source_decode = source_decode_pool.submit(conditioning.load_source_tensor)
+    source_decode_pool.shutdown(wait=False)
+
     with metrics.stage("prompt"):
         context = load_prompt_context(assets.prompt_context)
 
@@ -407,7 +413,7 @@ def generate_views(
                 vae = VaeExecutor.load(assets.vae, plan.candidate_devices)
 
         with metrics.stage("source_encode"):
-            source_video = _channels_last_source_layout(conditioning.load_source_tensor())
+            source_video = _channels_last_source_layout(source_decode.result())
             source_latents = vae.encode(source_video)
             del source_video
         _merge_view_stage_peak(metrics, "source_encode", vae)
