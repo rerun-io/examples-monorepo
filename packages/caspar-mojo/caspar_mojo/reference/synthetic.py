@@ -93,6 +93,7 @@ def make_problem(
     intrinsics_free: bool = False,
     sensor_free: bool = False,
     visible_fraction: float = 0.5,
+    frame_window: int | None = None,
 ) -> tuple[BaProblem, GroundTruth]:
     """Frames on a circle of radius 12 around a 8 x 4 x 8 point cloud, as ba_synth.py, observed with `model`.
 
@@ -110,6 +111,8 @@ def make_problem(
         intrinsics_free: Refine every camera's focal and extra parameters.
         sensor_free: Refine every non-reference camera's sensor_from_rig.
         visible_fraction: Probability that an in-image point is observed.
+        frame_window: Each frame considers only points [k, k + frame_window) (cyclic, k = frame * n_points // n_frames):
+            short tracks as in a long video, and a build cost linear in the frames. None: every point.
 
     Returns:
         The perturbed problem and the state its pixels were rendered from.
@@ -132,18 +135,21 @@ def make_problem(
 
     frames, cameras, point_ids, pixels = [], [], [], []
     for frame in range(n_frames):
+        candidates = np.arange(n_points) if frame_window is None else (frame * n_points // n_frames + np.arange(frame_window)) % n_points
+        n = len(candidates)
         for camera in range(rig_cameras):
             in_camera = camera_point(
-                np.repeat(rig_from_world[frame : frame + 1], n_points, 0), np.repeat(sensor_from_rig[camera : camera + 1], n_points, 0), points
+                np.repeat(rig_from_world[frame : frame + 1], n, 0), np.repeat(sensor_from_rig[camera : camera + 1], n, 0), points[candidates]
             ).point_cam
-            pixel = project(model, in_camera, np.repeat(intrinsics[camera : camera + 1], n_points, 0)).pixel
+            pixel = project(model, in_camera, np.repeat(intrinsics[camera : camera + 1], n, 0)).pixel
             pixel = pixel + rng.normal(0.0, noise_px, pixel.shape)
-            seen = (in_camera[:, 2] > 0.5) & (pixel >= 0).all(1) & (pixel < [WIDTH, HEIGHT]).all(1) & (rng.random(n_points) < visible_fraction)
-            ids = np.flatnonzero(seen)
+            seen = (in_camera[:, 2] > 0.5) & (pixel >= 0).all(1) & (pixel < [WIDTH, HEIGHT]).all(1) & (rng.random(n) < visible_fraction)
+            ids = candidates[np.flatnonzero(seen)]
+            pixel = pixel[np.flatnonzero(seen)]
             frames.append(np.full(len(ids), frame))
             cameras.append(np.full(len(ids), camera))
             point_ids.append(ids)
-            pixels.append(pixel[ids])
+            pixels.append(pixel)
     observation_point = np.concatenate(point_ids)
     keep_point = np.bincount(observation_point, minlength=n_points) >= 2
     new_index = np.cumsum(keep_point) - 1

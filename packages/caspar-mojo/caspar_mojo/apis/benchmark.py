@@ -2,8 +2,10 @@
 
 P1 is `make_problem(PINHOLE, 400 frames, 40,000 points, seed 0, visible 0.15)`: 2,398,861 observations, the harness's
 p1 model. The `*-100` problems match p3/p4/p5 (100 frames, 20,000 points, about 300 k observations) and `rig-100`
-p6 (two cameras, the second's extrinsic refined). Every LM trial count and PCG iteration count is printed next to its
-time: after convergence float32 noise decides the tail length, so time per PCG iteration is the fair comparison.
+p6 (two cameras, the second's extrinsic refined). `clip007-shape` is p2 (clip 007): 524 frames of a fixed 6-camera
+rig, about 380 observations per image and 4 per point, so warp tiles rather than whole blocks share an image. Every
+LM trial count and PCG iteration count is printed next to its time: after convergence float32 noise decides the tail
+length, so time per PCG iteration is the fair comparison.
 """
 
 import argparse
@@ -30,6 +32,10 @@ PROBLEMS: dict[str, tuple[CameraModel, dict[str, object]]] = {
     "fisheye-100": (CameraModel.OPENCV_FISHEYE, {}),
     "full-opencv-100": (CameraModel.FULL_OPENCV, {}),
     "rig-100": (CameraModel.PINHOLE, {"rig_cameras": 2, "sensor_free": True}),
+    "clip007-shape": (
+        CameraModel.PINHOLE,
+        {"n_frames": 524, "n_points": 300000, "rig_cameras": 6, "visible_fraction": 0.5, "frame_window": 1100},
+    ),
 }
 """Problem name -> camera model and `make_problem` arguments over the 100-frame defaults."""
 
