@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import sys
-from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -36,6 +36,9 @@ from fdanyone.vendor.pytorch3d_compat import install_if_needed as install_pytorc
 from fdanyone.video import CanonicalClip, iter_rgb_video, write_lossless_video, write_video
 from fdanyone.views import ViewPlan
 
+if TYPE_CHECKING:
+    from torch import Tensor
+
 LOGGER = logging.getLogger("fdanyone")
 
 
@@ -60,11 +63,15 @@ class Conditioning:
     def load_source_tensor(self):
         return _video_tensor(self.source_video, self.num_frames, crop=self.source_crop)
 
-    def load_skeleton_tensor(self, skeletons: Iterable[SkeletonVideo]):
-        import torch
+    def decode_skeleton_frames(self, skeleton: SkeletonVideo) -> list[Tensor]:
+        """The skeleton video's uint8 ``[height, width, 3]`` frames on the CPU (thread-safe: no CUDA)."""
 
-        videos = [_video_tensor(item.path, self.num_frames, crop=item.crop) for item in skeletons]
-        return torch.cat(videos, dim=0)
+        return _decode_video_frames(skeleton.path, self.num_frames)
+
+    def prepare_skeleton(self, frames: list[Tensor], skeleton: SkeletonVideo) -> Tensor:
+        """Decoded skeleton frames as ``[3, frames, height, width]`` float32 in [-1, 1] on the media-prep device."""
+
+        return _prepare_video_frames(frames, skeleton.crop)
 
     @classmethod
     def load(cls, directory: str | Path) -> Conditioning:
@@ -177,6 +184,32 @@ def _crop_and_normalize(tensor, crop: Crop | None):
     return tensor.mul_(2.0).sub_(1.0)
 
 
+def _decode_video_frames(path: Path, num_frames: int) -> list[Tensor]:
+    import torch
+
+    frames = [torch.from_numpy(frame) for frame in iter_rgb_video(path)]
+    if len(frames) != num_frames:
+        raise FourDAnyoneError(f"Video {path} has {len(frames)} decoded frames, expected {num_frames}.")
+    return frames
+
+
+def _prepare_video_frames(frames: list[Tensor], crop: Crop | None) -> Tensor:
+    """``_video_tensor``'s crop and normalisation, kept on the media-prep device as ``[3, frames, height, width]``.
+
+    A consumer that needs the clip on the GPU skips the float32 round trip through host memory, which costs several
+    times the decode itself.
+    """
+
+    import torch
+
+    device = _media_prep_device()
+    chunks = [
+        _crop_and_normalize(torch.stack(frames[start : start + MEDIA_PREP_CHUNK_FRAMES]).to(device).permute(0, 3, 1, 2), crop)
+        for start in range(0, len(frames), MEDIA_PREP_CHUNK_FRAMES)
+    ]
+    return torch.cat(chunks).permute(1, 0, 2, 3)
+
+
 def _video_tensor(path: Path, num_frames: int, *, crop: Crop | None = None):
     """Decode a whole clip and crop/resize it in GPU batches instead of one CPU bicubic per frame.
 
@@ -185,9 +218,7 @@ def _video_tensor(path: Path, num_frames: int, *, crop: Crop | None = None):
 
     import torch
 
-    frames = [torch.from_numpy(frame) for frame in iter_rgb_video(path)]
-    if len(frames) != num_frames:
-        raise FourDAnyoneError(f"Video {path} has {len(frames)} decoded frames, expected {num_frames}.")
+    frames = _decode_video_frames(path, num_frames)
     device = _media_prep_device()
     output = []
     for start in range(0, num_frames, MEDIA_PREP_CHUNK_FRAMES):

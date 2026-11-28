@@ -17,11 +17,12 @@ class _Skeleton:
 
 
 class _Conditioning:
-    def load_skeleton_tensor(self, skeletons: list[_Skeleton]) -> torch.Tensor:
-        (skeleton,) = skeletons
+    def decode_skeleton_frames(self, skeleton: _Skeleton) -> list[torch.Tensor]:
         time.sleep(random.uniform(0.0, 0.05))  # finish out of order
-        value = float(skeleton.path.stem)
-        return torch.full((1, 3, 4, 2, 2), value, dtype=torch.float32)
+        return [torch.full((2, 2, 3), int(skeleton.path.stem), dtype=torch.uint8) for _ in range(4)]
+
+    def prepare_skeleton(self, frames: list[torch.Tensor], _skeleton: _Skeleton) -> torch.Tensor:
+        return torch.stack(frames).permute(3, 0, 1, 2).float()
 
 
 class _Encoder:

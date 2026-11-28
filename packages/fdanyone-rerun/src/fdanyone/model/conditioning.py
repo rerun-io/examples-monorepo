@@ -281,26 +281,17 @@ def _execute_pose_job(
 
     import torch
 
-    device_index = torch.device(device).index
-
-    def load(skeleton: SkeletonVideo) -> Tensor:
-        if device_index is not None:
-            torch.cuda.set_device(device_index)
-        LOGGER.info("Loading skeleton conditioning from %s", skeleton.path.name)
-        return conditioning.load_skeleton_tensor([skeleton]).to(dtype=torch.bfloat16, device="cpu").contiguous()
-
     video_shape = None
     batch = None
     prefix = pose_encoder.temporal_prefix
-    # The RGB conversion of each decode (swscale) releases the GIL: decoding the batch's videos side by side cuts
-    # this stage from one decode per video to about one decode in total.
+    # Decodes run side by side (the RGB conversion releases the GIL); crop and normalisation stay on the GPU and
+    # write straight into the BF16 batch, without a float32 round trip through host memory.
     with ThreadPoolExecutor(max_workers=len(job.skeletons), thread_name_prefix="skeleton-decode") as pool:
-        loads = [pool.submit(load, skeleton) for skeleton in job.skeletons]
-        for batch_index, (skeleton, future) in enumerate(zip(job.skeletons, loads, strict=True)):
-            decoded = future.result()
-            if decoded.ndim != 5 or decoded.shape[0] != 1:
-                raise FourDAnyoneError(f"Expected one 5D skeleton tensor, got shape {tuple(decoded.shape)}.")
-            current_shape = tuple(decoded.shape[1:])
+        decodes = [pool.submit(conditioning.decode_skeleton_frames, skeleton) for skeleton in job.skeletons]
+        for batch_index, (skeleton, decode) in enumerate(zip(job.skeletons, decodes, strict=True)):
+            LOGGER.info("Loading skeleton conditioning from %s", skeleton.path.name)
+            video = conditioning.prepare_skeleton(decode.result(), skeleton)
+            current_shape = tuple(video.shape)
             if video_shape is None:
                 video_shape = current_shape
                 batch = torch.empty(
@@ -309,14 +300,12 @@ def _execute_pose_job(
                     device=device,
                 ).fill_(-1)
             elif current_shape != video_shape:
-                raise FourDAnyoneError(
-                    f"Skeleton {skeleton.path} has shape {tuple(decoded.shape)}, expected {(1, *video_shape)}."
-                )
+                raise FourDAnyoneError(f"Skeleton {skeleton.path} has shape {current_shape}, expected {video_shape}.")
             # Construct the exact contiguous input previously produced by cat in
             # PoseEncoder. Null slots remain -1, including their temporal prefix.
-            batch[batch_index, :, :prefix].copy_(decoded[0, :, :1])
-            batch[batch_index, :, prefix:].copy_(decoded[0])
-            del decoded
+            batch[batch_index, :, :prefix].copy_(video[:, :1])
+            batch[batch_index, :, prefix:].copy_(video)
+            del video
 
     encoded = _encode_pose_batch(pose_encoder, batch)
     job.builder.store(job, encoded)
