@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from reference.synthetic import make_problem
+from caspar_mojo.reference.synthetic import make_problem
 
 from caspar_mojo.problem import BaOptions, CameraModel
 
@@ -94,7 +94,10 @@ def test_c_abi_matches_python_door() -> None:
     options = BaOptions(solver_iter_max=40)
     expected = solver.solve(problem, options)
 
-    f32 = [np.ascontiguousarray(a, dtype=np.float32) for a in (problem.intrinsics, problem.sensor_from_rig, problem.rig_from_world, problem.points, problem.pixels)]
+    f32 = [
+        np.ascontiguousarray(a, dtype=np.float32)
+        for a in (problem.intrinsics, problem.sensor_from_rig, problem.rig_from_world, problem.points, problem.pixels)
+    ]
     u8 = [np.ascontiguousarray(a, dtype=np.uint8) for a in (problem.intrinsics_free, problem.sensor_free, problem.pose_free, problem.point_free)]
     i32 = [np.ascontiguousarray(a, dtype=np.int32) for a in (problem.observation_frame, problem.observation_camera, problem.observation_point)]
     c_problem = Problem(

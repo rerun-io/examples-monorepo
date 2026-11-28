@@ -10,15 +10,14 @@ from std.time import perf_counter_ns
 
 from max.gpu.host import DeviceContext
 
-from camera_models import Pinhole
-from solver import F32HostIn, F32HostOut, HostProblem, HostState, I32HostIn, Options, Stats, U8HostIn, solve
+from solver import F32HostIn, F32HostOut, HostProblem, HostState, I32HostIn, Options, Stats, U8HostIn, solve_model
 
 comptime ABI_VERSION: Int32 = 1
 comptime OK: Int32 = 0
 comptime ERROR: Int32 = 1
 comptime UNSUPPORTED: Int32 = 2
 
-comptime PINHOLE: Int64 = 0
+comptime NUM_CAMERA_MODELS: Int64 = 4
 
 @fieldwise_init
 struct CProblem(TrivialRegisterPassable):
@@ -86,15 +85,8 @@ def _set_error(message: String, buffer: MutPointer[c_char, MutUntrackedOrigin], 
     buffer[unsafe_offset=n] = 0
 
 
-def _any(mask: U8HostIn, n: Int) -> Bool:
-    for i in range(n):
-        if mask[unsafe_offset=i] != 0:
-            return True
-    return False
-
-
 def _supported(camera_model: Int64) -> Bool:
-    return camera_model == PINHOLE
+    return 0 <= camera_model < NUM_CAMERA_MODELS
 
 
 def _host_problem(p: CProblem) -> HostProblem:
@@ -134,16 +126,7 @@ def _solve(p: CProblem, o: COptions, s: CState) raises -> Stats:
     )
     var result = HostState(s.intrinsics, s.sensor_from_rig, s.rig_from_world, s.points)
     var unused = s.points
-    var refine_intrinsics = _any(problem.intrinsics_free, problem.n_cameras)
-    var refine_rig = _any(problem.sensor_free, problem.n_cameras)
-    var ctx = DeviceContext(device_id=Int(o.device_id))
-    if refine_intrinsics and refine_rig:
-        return solve[Pinhole, True, True](ctx, problem, options, result, unused, unused, False)
-    if refine_intrinsics:
-        return solve[Pinhole, True, False](ctx, problem, options, result, unused, unused, False)
-    if refine_rig:
-        return solve[Pinhole, False, True](ctx, problem, options, result, unused, unused, False)
-    return solve[Pinhole, False, False](ctx, problem, options, result, unused, unused, False)
+    return solve_model(DeviceContext(device_id=Int(o.device_id)), Int(p.camera_model), problem, options, result, unused, unused, False)
 
 
 @export
