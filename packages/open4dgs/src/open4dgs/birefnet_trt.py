@@ -3,7 +3,7 @@
 The engine takes the exact input of the torch model in ``masks.predict_mattes`` (ImageNet-normalised fp16 crops at
 ``MODEL_SIZE``), batches of up to ``MAX_BATCH`` (a shorter batch is zero-padded: the engine is static), and returns the
 last decoder logits, so the two are interchangeable there. ``load_matte_model`` takes the engine when this machine's cache already holds it and the torch model otherwise:
-a run never waits for an engine build (``build_engine`` / the ``open4dgs-birefnet-engine`` task builds it).
+a run never waits for an engine build (``build_engine`` / the ``fdanyone-birefnet-engine`` task builds it).
 
 The snapshot's deformable convolutions (``torchvision.ops.deform_conv2d``, with a modulation mask) export as ONNX
 ``DeformConv`` (opset 19+), which the TensorRT ONNX parser maps onto its ``ModulatedDeformConv2d`` plugin.
