@@ -7,7 +7,7 @@ import sys
 
 
 def caspar() -> None:
-    from colsfm.ba_backend import _caspar_probe_solve
+    from colsfm.ba_capability import _caspar_probe_solve
 
     summary = _caspar_probe_solve("PINHOLE")
     assert summary is not None and summary.is_solution_usable(), summary
