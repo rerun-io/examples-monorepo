@@ -39,11 +39,8 @@ SECOND_SENSOR_TRANSLATION_M: Final[tuple[float, float, float]] = (0.3, 0.0, 0.0)
 def _camera(model: SynthCameraModel, camera_id: int) -> pycolmap.Camera:
     width, height = IMAGE_SIZE_PX
     cx, cy = width / 2.0, height / 2.0
-    params: list[float]
-    if model == "SIMPLE_RADIAL":
-        params = [FOCAL_PX, cx, cy, *DISTORTION[model]]
-    else:
-        params = [FOCAL_PX, FOCAL_PX, cx, cy, *DISTORTION[model]]
+    focals: list[float] = [FOCAL_PX] if model == "SIMPLE_RADIAL" else [FOCAL_PX, FOCAL_PX]
+    params: list[float] = [*focals, cx, cy, *DISTORTION[model]]
     return pycolmap.Camera(camera_id=camera_id, model=getattr(pycolmap.CameraModelId, model), width=width, height=height, params=params)
 
 
@@ -153,7 +150,9 @@ def main(config: Config) -> None:
     Args:
         config: Size, camera model and destination.
     """
-    reconstruction: pycolmap.Reconstruction = synthetic_reconstruction(config.num_frames, config.num_points, config.model, config.num_cameras, config.seed)
+    reconstruction: pycolmap.Reconstruction = synthetic_reconstruction(
+        config.num_frames, config.num_points, config.model, config.num_cameras, config.seed
+    )
     config.output_dir.mkdir(parents=True, exist_ok=True)
     reconstruction.write(config.output_dir)
     reconstruction.update_point_3d_errors()
