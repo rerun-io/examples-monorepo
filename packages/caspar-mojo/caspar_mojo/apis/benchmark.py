@@ -52,6 +52,25 @@ class Config:
     """File to flock around each case's solves (a GPU shared between jobs), not around the problem building."""
 
 
+@dataclass(frozen=True, slots=True)
+class Timing:
+    """One case: the best and median solver time of `Config.runs` solves, with every run's LM and PCG counts."""
+
+    problem: str
+    intrinsics_free: bool
+    observations: int
+    best_s: float
+    median_s: float
+    lm_trials: list[int]
+    pcg_iterations: list[int]
+    best_ms_per_pcg: float
+    """Solver time of the best run over its PCG iterations, everything per LM trial included."""
+    best_ms_per_lm: float
+    median_ms_per_pcg: float
+    final_cost: float
+    exit: str
+
+
 def build(name: str, intrinsics_free: bool) -> BaProblem:
     """The named problem, observations sorted by camera then frame (the order the scatter pre-reduction wants)."""
     model, arguments = PROBLEMS[name]
@@ -68,7 +87,7 @@ def build(name: str, intrinsics_free: bool) -> BaProblem:
     )
 
 
-def time_case(name: str, intrinsics_free: bool, config: Config) -> dict[str, object]:
+def time_case(name: str, intrinsics_free: bool, config: Config) -> Timing:
     """Best and median solver time of one case, with the LM and PCG counts of every run."""
     problem = build(name, intrinsics_free)
     with open(config.lock, "a") if config.lock else contextlib.nullcontext() as lock:
@@ -84,41 +103,40 @@ def time_case(name: str, intrinsics_free: bool, config: Config) -> dict[str, obj
                 del os.environ["CASPAR_MOJO_PROF"]
     seconds = [r.solve_seconds for r in results]
     best = min(range(len(results)), key=lambda i: seconds[i])
-    row: dict[str, object] = {
-        "problem": name,
-        "intrinsics_free": intrinsics_free,
-        "observations": len(problem.pixels),
-        "best_s": seconds[best],
-        "median_s": statistics.median(seconds),
-        "lm_trials": [len(r.trace) for r in results],
-        "pcg_iterations": [r.pcg_iterations for r in results],
-        "best_ms_per_pcg": 1e3 * seconds[best] / results[best].pcg_iterations,
-        "best_ms_per_lm": 1e3 * seconds[best] / len(results[best].trace),
-        "median_ms_per_pcg": statistics.median(1e3 * r.solve_seconds / r.pcg_iterations for r in results),
-        "final_cost": results[best].final_cost,
-        "exit": results[best].exit_reason,
-    }
-    return row
+    return Timing(
+        problem=name,
+        intrinsics_free=intrinsics_free,
+        observations=len(problem.pixels),
+        best_s=seconds[best],
+        median_s=statistics.median(seconds),
+        lm_trials=[len(r.trace) for r in results],
+        pcg_iterations=[r.pcg_iterations for r in results],
+        best_ms_per_pcg=1e3 * seconds[best] / results[best].pcg_iterations,
+        best_ms_per_lm=1e3 * seconds[best] / len(results[best].trace),
+        median_ms_per_pcg=statistics.median(1e3 * r.solve_seconds / r.pcg_iterations for r in results),
+        final_cost=results[best].final_cost,
+        exit=results[best].exit_reason,
+    )
 
 
 def main(config: Config) -> None:
     """Time every case and print one line each."""
-    rows: list[dict[str, object]] = []
+    rows: list[Timing] = []
     for name in config.problems:
         for intrinsics_free in config.intrinsics_free:
             start = time.perf_counter()
             row = time_case(name, intrinsics_free, config)
             rows.append(row)
             print(
-                f"{name:18s} intr={'free ' if intrinsics_free else 'fixed'} obs={row['observations']:>9,} "
-                f"best={1e3 * row['best_s']:7.1f} ms median={1e3 * row['median_s']:7.1f} ms "
-                f"ms/PCG={row['best_ms_per_pcg']:.3f} (median {row['median_ms_per_pcg']:.3f}) ms/LM={row['best_ms_per_lm']:.2f} "
-                f"LM={row['lm_trials']} PCG={row['pcg_iterations']} {row['exit']} ({time.perf_counter() - start:.0f} s)",
+                f"{name:18s} intr={'free ' if intrinsics_free else 'fixed'} obs={row.observations:>9,} "
+                f"best={1e3 * row.best_s:7.1f} ms median={1e3 * row.median_s:7.1f} ms "
+                f"ms/PCG={row.best_ms_per_pcg:.3f} (median {row.median_ms_per_pcg:.3f}) ms/LM={row.best_ms_per_lm:.2f} "
+                f"LM={row.lm_trials} PCG={row.pcg_iterations} {row.exit} ({time.perf_counter() - start:.0f} s)",
                 flush=True,
             )
     if config.output is not None:
         config.output.parent.mkdir(parents=True, exist_ok=True)
-        config.output.write_text(json.dumps(rows, indent=1))
+        config.output.write_text(json.dumps([dataclasses.asdict(row) for row in rows], indent=1))
 
 
 def parse(argv: list[str] | None = None) -> Config:

@@ -38,8 +38,8 @@ select = ["E", "F", "UP", "B", "SIM", "I"]
 ignore = ["E501", "F722", "F821", "UP037", "UP040"]
 
 [tool.vulture]
-paths = ["caspar_mojo", "tests"]
+paths = ["caspar_mojo", "tests", "tools"]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*"]
-ignore_names = ["pytestmark"]
+ignore_names = ["pytestmark", "cost_tried", "iterations", "total_seconds"]
 sort_by_size = true
 min_confidence = 60
