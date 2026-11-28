@@ -54,8 +54,7 @@ register logs an error, and the other extensions still load.
 
 `tools/prepare_rerun.py` checks out the Rerun tag into `target/patch/rerun-<tag>/` and applies the patches, and prepares
 each patched crates.io crate (`PATCHED_CRATES`: wgpu with the WebGPU subgroups patch, web backend only) into
-`target/patch/<crate>-<version>/` (gsplat's web build keeps a staged copy of this code until PR 7 points
-`recipes/gradio-rerun-src` at this build). The Cargo workspace (`rust/`) redirects every Rerun crate
+`target/patch/<crate>-<version>/`. The Cargo workspace (`rust/`) redirects every Rerun crate
 there. The checkout sits outside `rust/` because, inside it, cargo passes re_renderer's sources as relative paths and
 re_renderer's embedded shader lookup breaks.
 

@@ -1,8 +1,8 @@
 [workspace]
 members = ["crates/*"]
-# Keep path dependencies in Brush's and Rerun's own workspaces (the web build's Rerun checkout in target/patch) for
-# inherited package metadata.
-exclude = ["target/brush-src", "target/patch", "crates/gsplat-viewer-web"]
+# Keep Brush's path dependencies in Brush's own workspace for inherited package metadata. crates/gsplat-viewer-web was
+# removed (the canonical viewer is the web build); a checkout that built it keeps its untracked target/ there.
+exclude = ["target/brush-src", "crates/gsplat-viewer-web"]
 resolver = "3"
 
 [workspace.dependencies]
@@ -46,8 +46,8 @@ re_sdk_types = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
 re_tracing = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
 re_types_core = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
 re_video = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
-# Without default features (no analytics): gsplat-viewer's `app` feature and gsplat-viewer-web add `default_web`; the
-# gsplat-cli probe asks for `default`.
+# Without default features (no analytics): gsplat-viewer's `app` feature adds `default_web`; the gsplat-cli probe asks
+# for `default`.
 re_viewer = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0", default-features = false }
 re_viewer_context = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
 egui_kittest = { version = "0.37.0", features = ["wgpu", "eframe"] }

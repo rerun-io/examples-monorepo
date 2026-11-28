@@ -123,7 +123,8 @@ class BuildWebConfig:
     """Build the canonical web viewer and write it in the stock /rerun-viewer/<version>/ layout."""
 
     stock_dir: Path
-    """A stock Rerun web viewer directory of the same release (index.html, npm/index.js, ...) to copy the shell files from."""
+    """A stock Rerun web viewer of the same release to copy the shell files from: a viewer directory (index.html,
+    npm/index.js, ...) or only its npm/ package (the npm tarball's files, as recipes/gradio-rerun-src lays it out)."""
     out_dir: Path
     """Output viewer directory, e.g. .../rerun-viewer/0.44.0-canonical-<sha7>; replaced if it exists."""
     cargo_home: Path = Path(os.environ.get("CARGO_HOME", str(Path.home() / ".cargo")))
@@ -155,9 +156,8 @@ def write_layout(out_dir: Path, stock_dir: Path, js: str, wasm: Path) -> None:
 
 def main(config: BuildWebConfig) -> None:
     """Prepare the patched trees, build, bind, optimise and lay out the web viewer; replace out_dir only when complete."""
-    for shell in ("index.html", "npm/index.js"):
-        if not (config.stock_dir / shell).is_file():
-            raise FileNotFoundError(f"{config.stock_dir} is not a stock web viewer directory: {shell} is missing")
+    if not (config.stock_dir / "npm/index.js").is_file():
+        raise FileNotFoundError(f"{config.stock_dir} is not a stock web viewer directory: npm/index.js is missing")
     prepare_rerun.main(prepare_rerun.PrepareRerunConfig(cargo_home=config.cargo_home))
     prefix: Path = config.toolchain_prefix or Path(os.environ["CONDA_PREFIX"])
     # Without CONDA_BUILD: re_build_tools (re_viewer's build script) treats a conda build as Rerun's own packaging and
