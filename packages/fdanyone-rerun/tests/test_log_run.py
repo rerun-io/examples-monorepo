@@ -1,6 +1,7 @@
 """``fdanyone-log-run --train`` checks the fused SSIM kernel before it logs or mattes anything."""
 
 from pathlib import Path
+
 import pytest
 
 
