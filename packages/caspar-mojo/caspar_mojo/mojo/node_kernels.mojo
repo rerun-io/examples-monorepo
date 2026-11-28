@@ -10,54 +10,12 @@ from max.gpu import global_idx
 
 from layout import ImmTileTensor, MutTileTensor
 
-from factor_kernels import F32In, F64Ptr, I32In, L1, L2, VecIn, reduce_add, tri, tri_index
+from factor_kernels import F32In, F64Ptr, I32In, L1, L2, Vec, VecIn, damped_solve, reduce_add, tri, tri_index
 from camera_models import CameraModel
 from geometry import Pose, retract
 
-comptime Vec = MutTileTensor[DType.float32, L1, MutUntrackedOrigin]
 comptime F32Out = MutTileTensor[DType.float32, L2, MutUntrackedOrigin]
 
-comptime POINT_SOLVE_NEGATE = 0
-"""out_p = -M_pp^-1 x_p (reduce the right-hand side, the Schur matvec)."""
-comptime POINT_SOLVE_BACKSUBSTITUTE = 1
-"""out_p = M_pp^-1 (g_p - x_p) (the point step after the PCG)."""
-
-
-@always_inline
-def damped_solve[D: Int](hblk: VecIn, h: Int, rhs: Array[Float32, D], lam: Float32) -> Array[Float32, D]:
-    comptime assert hblk.flat_rank == 1
-    var a = Array[Float32, D * D](fill=0.0)
-    comptime for i in range(D):
-        comptime for j in range(i, D):
-            var hij = hblk[h + tri_index[D](i, j)][0]
-            a[i * D + j] = hij
-            a[j * D + i] = hij
-        a[i * D + i] = a[i * D + i] * (1.0 + lam) + lam * 1e-6
-    # In-place Cholesky, lower triangle.
-    comptime for j in range(D):
-        var d = a[j * D + j]
-        comptime for k in range(j):
-            d -= a[j * D + k] * a[j * D + k]
-        var l = sqrt(d)
-        a[j * D + j] = l
-        comptime for i in range(j + 1, D):
-            var s = a[i * D + j]
-            comptime for k in range(j):
-                s -= a[i * D + k] * a[j * D + k]
-            a[i * D + j] = s / l
-    var y = Array[Float32, D](fill=0.0)
-    comptime for i in range(D):
-        var s = rhs[i]
-        comptime for k in range(i):
-            s -= a[i * D + k] * y[k]
-        y[i] = s / a[i * D + i]
-    comptime for ii in range(D):
-        comptime i = D - 1 - ii
-        var s = y[i]
-        comptime for k in range(i + 1, D):
-            s -= a[k * D + i] * y[k]
-        y[i] = s / a[i * D + i]
-    return y^
 
 
 @always_inline
@@ -158,21 +116,16 @@ def axpy_kernel(y: Vec, x: VecIn, alpha: Float32, n: Int32):
         y[i] = y[i][0] + alpha * x[i][0]
 
 
-def point_solve_kernel[MODE: Int](
-    x: VecIn, g: VecIn, dst: Vec, hblk: VecIn, point_v: Int32, point_h: Int32, n_points: Int32, lam: Float32
-):
-    """Per free point, with the damped point block M_pp (the Schur H_pp)."""
-    comptime assert x.flat_rank == 1 and g.flat_rank == 1 and dst.flat_rank == 1
+def point_solve_kernel(g: VecIn, dst: Vec, hblk: VecIn, point_v: Int32, point_h: Int32, n_points: Int32, lam: Float32):
+    """dst_p = -M_pp^-1 g_p per free point, with the damped point block M_pp (the Schur H_pp)."""
+    comptime assert g.flat_rank == 1 and dst.flat_rank == 1
     var j = global_idx.x
     if j >= Int(n_points):
         return
     var v = Int(point_v) + 3 * j
     var rhs = Array[Float32, 3](fill=0.0)
     comptime for i in range(3):
-        comptime if MODE == POINT_SOLVE_NEGATE:
-            rhs[i] = -x[v + i][0]
-        else:
-            rhs[i] = g[v + i][0] - x[v + i][0]
+        rhs[i] = -g[v + i][0]
     var sol = damped_solve[3](hblk, Int(point_h) + tri(3) * j, rhs, lam)
     comptime for i in range(3):
         dst[v + i] = sol[i]

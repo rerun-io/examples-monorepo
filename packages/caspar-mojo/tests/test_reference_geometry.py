@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from reference.cameras import FOCAL_AND_EXTRA_COLUMNS, project
-from reference.poses import camera_point, quaternion_matrix, retract_pose
-from reference.synthetic import default_intrinsics
 
 from caspar_mojo.problem import CameraModel
+from caspar_mojo.reference.cameras import FOCAL_AND_EXTRA_COLUMNS, project
+from caspar_mojo.reference.poses import camera_point, quaternion_matrix, retract_pose
+from caspar_mojo.reference.synthetic import default_intrinsics
 
 STEP: float = 1e-6
 POINT_STEP: float = 1e-7
