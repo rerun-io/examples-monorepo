@@ -305,6 +305,12 @@ MOJO_EXTRINSICS_FALLBACK_REASON: Final[str] = (
 )
 """Why a `mojo` solve that refines `sensor_from_rig` ends up on Ceres."""
 
+MOJO_SHARED_RIG_CAMERA_FALLBACK_REASON: Final[str] = (
+    "a camera of this model is a non-reference sensor of more than one rig, and the Mojo solver's array contract holds "
+    "one sensor_from_rig per camera"
+)
+"""Why a `mojo` request ends up on Ceres when one camera serves two rigs (CASPAR keys the extrinsic by rig and sensor)."""
+
 MOJO_MIXED_MODELS_FALLBACK_REASON: Final[str] = "the Mojo solver takes one camera model per solve, and this model holds several"
 """Why a `mojo` request ends up on Ceres when the reconstruction holds more than one camera model."""
 
@@ -378,6 +384,7 @@ def camera_model_fallback(
     *,
     refine_intrinsics: bool = False,
     rig_camera_models: Iterable[frozenset[str]] = (),
+    shared_rig_cameras: Iterable[int] = (),
 ) -> str | None:
     """Why a GPU backend cannot take a reconstruction of these camera models: the one eligibility rule.
 
@@ -391,6 +398,7 @@ def camera_model_fallback(
         refine_intrinsics: Whether the solves free the focal length; CASPAR throws mid-run for a model it projects
             with fixed intrinsics only (FULL_OPENCV).
         rig_camera_models: The camera model names of each rig.
+        shared_rig_cameras: Camera ids that are a non-reference sensor of more than one rig.
 
     Returns:
         The fallback reason, or None when the backend takes the model.
@@ -401,6 +409,8 @@ def camera_model_fallback(
         return unsupported_models_reason(capability.supported_camera_models, unsupported, backend)
     if backend == "mojo" and len(names) > 1:
         return MOJO_MIXED_MODELS_FALLBACK_REASON
+    if backend == "mojo" and any(True for _ in shared_rig_cameras):
+        return MOJO_SHARED_RIG_CAMERA_FALLBACK_REASON
     if any(len(models) > 1 for models in rig_camera_models):
         return MIXED_MODEL_RIG_FALLBACK_REASON
     fixed: frozenset[str] = capability.fixed_intrinsics_only(names) if refine_intrinsics else frozenset()
@@ -456,6 +466,7 @@ class BaExecutionPlan:
         *,
         refine_intrinsics: bool = False,
         rig_camera_models: Iterable[frozenset[str]] = (),
+        shared_rig_cameras: Iterable[int] = (),
     ) -> BaExecutionPlan:
         """The same plan, narrowed by the camera models the reconstruction turned out to hold.
 
@@ -469,6 +480,7 @@ class BaExecutionPlan:
             refine_intrinsics: Whether the solves free the focal length; CASPAR throws
                 mid-run for a model it projects with fixed intrinsics only (FULL_OPENCV).
             rig_camera_models: The camera model names of each rig.
+            shared_rig_cameras: Camera ids that are a non-reference sensor of more than one rig.
 
         Returns:
             This plan when nothing changes, or the Ceres plan with `camera_model_fallback`'s reason.
@@ -476,7 +488,12 @@ class BaExecutionPlan:
         if self.backend == "ceres":
             return self
         reason: str | None = camera_model_fallback(
-            self.backend, self.capability, camera_model_names, refine_intrinsics=refine_intrinsics, rig_camera_models=rig_camera_models
+            self.backend,
+            self.capability,
+            camera_model_names,
+            refine_intrinsics=refine_intrinsics,
+            rig_camera_models=rig_camera_models,
+            shared_rig_cameras=shared_rig_cameras,
         )
         return self if reason is None else replace(self, backend="ceres", ceres_polish=False, fallback_reason=reason)
 

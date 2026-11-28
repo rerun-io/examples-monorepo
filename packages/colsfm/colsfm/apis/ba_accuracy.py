@@ -76,9 +76,10 @@ class AccuracyRow:
     caspar_lm_trials: list[int]
     """Per timed run, in run order; the last run is the solution compared."""
     caspar_pcg_iterations: list[int]
+    """Printed trials only: CASPAR does not print the trial that ends the solve, so the count reads low."""
     caspar_exit: str | None
     caspar_solver_seconds: list[float]
-    """CASPAR's `dt_tot`: the solver loop alone."""
+    """CASPAR's `dt_tot` at its last printed trial: the solver loop without the unprinted final trial, so it reads low."""
     caspar_solve_call_seconds: list[float]
     """`adjuster.solve()`, setup and upload included."""
     mojo_lm_trials: list[int]
@@ -392,7 +393,7 @@ def markdown(table: AccuracyTable) -> str:
         )
     lines += [
         "",
-        "| row | GPU | CASPAR solver-only s | CASPAR solve() s | CASPAR LM/PCG (exit) | Mojo solve_seconds | Mojo call s | Mojo LM/PCG (exit) | commit | date |",
+        "| row | GPU | CASPAR solver-only s (printed trials) | CASPAR solve() s | CASPAR LM/PCG, PCG of printed trials (exit) | Mojo solve_seconds | Mojo call s | Mojo LM/PCG (exit) | commit | date |",
         "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in table.rows:
@@ -400,6 +401,10 @@ def markdown(table: AccuracyTable) -> str:
             f"| {r.row} | {r.gpu} | {_times(r.caspar_solver_seconds)} | {_times(r.caspar_solve_call_seconds)} | {_counts(r.caspar_lm_trials, r.caspar_pcg_iterations)} ({r.caspar_exit}) | "
             f"{_times(r.mojo_solve_seconds)} | {_times(r.mojo_call_seconds)} | {_counts(r.mojo_lm_trials, r.mojo_pcg_iterations)} ({r.mojo_exit}) | {r.commit} | {r.date} |"
         )
+    lines += [
+        "",
+        "CASPAR's solver-only time and PCG count come from its printed trials; its last trial is not printed, so both read low, in CASPAR's favour.",
+    ]
     return "\n".join(lines) + "\n"
 
 

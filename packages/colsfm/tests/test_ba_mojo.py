@@ -254,3 +254,77 @@ def test_solve_with_mojo_matches_caspar_on_a_tiny_pinhole_model() -> None:
     assert summary.num_residuals > 0
     assert comparison.reprojection_relative_difference is not None and comparison.cost_relative_difference is not None
     assert abs(comparison.reprojection_relative_difference) < 0.02 and abs(comparison.cost_relative_difference) < 0.02
+
+
+def test_a_non_finite_result_is_refused_before_anything_is_written() -> None:
+    from caspar_mojo.problem import BaResult
+
+    from colsfm.ba_mojo import apply_result, problem_from_reconstruction
+    from colsfm.solver_report import SolverFailure
+
+    reconstruction = _tiny()
+    bridged = problem_from_reconstruction(reconstruction, _config(reconstruction), _options(refine_intrinsics=True))
+    p = bridged.problem
+    points = p.points + 0.5
+    points[-1] = np.nan
+    result = BaResult(
+        intrinsics=p.intrinsics + 1.0,
+        sensor_from_rig=p.sensor_from_rig.copy(),
+        rig_from_world=p.rig_from_world + 0.1,
+        points=points,
+        initial_cost=2.0,
+        final_cost=1.0,
+        iterations=1,
+        pcg_iterations=1,
+        exit_reason="MAX_ITERATIONS",
+        solve_seconds=0.0,
+        total_seconds=0.0,
+    )
+    before = pycolmap.Reconstruction(reconstruction)
+    with pytest.raises(SolverFailure, match="non-finite points"):
+        apply_result(reconstruction, bridged, result)
+    np.testing.assert_array_equal(reconstruction.camera(1).params, before.camera(1).params)
+    for point3D_id in reconstruction.point3D_ids():
+        np.testing.assert_array_equal(reconstruction.point3D(point3D_id).xyz, before.point3D(point3D_id).xyz)
+    for frame_id in reconstruction.reg_frame_ids():
+        np.testing.assert_array_equal(_matrix(reconstruction.frame(frame_id).rig_from_world), _matrix(before.frame(frame_id).rig_from_world))
+
+
+def test_a_camera_shared_by_two_rigs_is_refused_by_the_bridge_and_planned_onto_ceres() -> None:
+    from colsfm.ba_backend import MOJO_SHARED_RIG_CAMERA_FALLBACK_REASON, CasparCapability, resolve_ba_plan
+    from colsfm.ba_mojo import problem_from_reconstruction
+    from colsfm.mapping import shared_rig_cameras
+
+    reconstruction = _tiny(num_cameras=2)
+    first = reconstruction.camera(1)
+    third = pycolmap.Camera(camera_id=3, model=first.model, width=first.width, height=first.height, params=first.params)
+    reconstruction.add_camera(third)
+    rig = pycolmap.Rig()
+    rig.rig_id = 2
+    rig.add_ref_sensor(pycolmap.sensor_t(pycolmap.SensorType.CAMERA, 3))
+    rig.add_sensor(pycolmap.sensor_t(pycolmap.SensorType.CAMERA, 2), pycolmap.Rigid3d(pycolmap.Rotation3d(), np.array([0.5, 0.0, 0.0])))
+    reconstruction.add_rig(rig)
+    frame = pycolmap.Frame()
+    frame.frame_id = 100
+    frame.rig_id = 2
+    frame.rig_from_world = pycolmap.Rigid3d()
+    for camera_id, image_id in ((3, 101), (2, 102)):
+        frame.add_data_id(pycolmap.data_t(pycolmap.sensor_t(pycolmap.SensorType.CAMERA, camera_id), image_id))
+    reconstruction.add_frame(frame)
+    for camera_id, image_id in ((3, 101), (2, 102)):
+        reconstruction.add_image(pycolmap.Image(name=f"{image_id}.png", camera_id=camera_id, image_id=image_id, frame_id=100))
+    reconstruction.register_frame(100)
+
+    assert shared_rig_cameras(reconstruction) == frozenset({2})
+    with pytest.raises(ValueError, match="camera 2 is a non-reference sensor of rigs 1 and 2"):
+        problem_from_reconstruction(reconstruction, _config(reconstruction), _options())
+    capability = CasparCapability(
+        availability="available",
+        supported_camera_models=frozenset({"PINHOLE"}),
+        probe_errors=(),
+        refines_sensor_from_rig=True,
+        intrinsics_refinable_camera_models=frozenset({"PINHOLE"}),
+    )
+    plan = resolve_ba_plan("mojo", (), ceres_polish=False, optimize_extrinsics=False, capability=capability)
+    narrowed = plan.for_camera_models(["PINHOLE"], shared_rig_cameras=shared_rig_cameras(reconstruction))
+    assert (narrowed.backend, narrowed.fallback_reason) == ("ceres", MOJO_SHARED_RIG_CAMERA_FALLBACK_REASON)
