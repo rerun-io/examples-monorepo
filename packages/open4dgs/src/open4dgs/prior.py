@@ -203,6 +203,14 @@ def prior_terms(
     Masked means over P instead of boolean indexing and a tensor skip flag instead of ``if``: no GPU->CPU sync. A
     skipped camera (P below ``min_valid_fraction``) or an empty normal set gives a differentiable zero.
     """
+    return _gated_terms(depth, alpha, static, prior_depth, prior_normals, K, step >= config.contradiction_start_step, config)
+
+
+def _gated_terms(
+    depth: Tensor, alpha: Tensor, static: Tensor, prior_depth: Tensor, prior_normals: Tensor, K: Tensor, gated: bool, config: PriorConfig
+) -> PriorTerms:
+    """``prior_terms`` with the step reduced to whether the contradiction gate is on: the compiled graph sees a bool (two
+    graphs), not the step (an int dynamo would specialise on, one recompile per step)."""
     weight: Tensor = (static & (alpha.detach() > config.alpha_min)).float()
     count: Tensor = weight.sum(dim=(-2, -1))
     fraction: Tensor = count / (weight.shape[-2] * weight.shape[-1])
@@ -214,7 +222,7 @@ def prior_terms(
     l_depth: Tensor = 1.0 - cov / var
     rendered_normals: Tensor = camera_normals(depth, K)
     normal_weight: Tensor = weight
-    if step >= config.contradiction_start_step:
+    if gated:
         cos: Tensor = (rendered_normals.detach() * prior_normals).sum(dim=-1)
         normal_weight = weight * (cos >= math.cos(math.radians(config.contradiction_deg))).float()
     one_minus_cos: Tensor = (1.0 - (rendered_normals * prior_normals).sum(dim=-1)).clamp(min=0.0)
@@ -228,14 +236,14 @@ def prior_terms(
 _COMPILED_TERMS: list = []
 
 
-def _batch_terms(depth: Tensor):  # noqa: ANN202  # prior_terms or its compiled graph
-    """``prior_terms`` for a camera batch: compiled on CUDA (one graph per image size and gate branch; ~0.35 ms of
+def _batch_terms(depth: Tensor):  # noqa: ANN202  # _gated_terms or its compiled graph
+    """``_gated_terms`` for a camera batch: compiled on CUDA (one graph per image size and gate branch; ~0.35 ms of
     launches instead of ~1 ms eager for six 352x640 cameras, forward + backward), eager elsewhere and while beartype
     checks the process (``PIXI_DEV_MODE``: it cannot check dynamo's fake tensors against jaxtyping hints)."""
     if not depth.is_cuda or os.environ.get("PIXI_DEV_MODE") == "1":
-        return prior_terms
+        return _gated_terms
     if not _COMPILED_TERMS:
-        _COMPILED_TERMS.append(torch.compile(prior_terms, dynamic=None))  # the camera count turns dynamic at its first change
+        _COMPILED_TERMS.append(torch.compile(_gated_terms, dynamic=None))  # the camera count turns dynamic at its first change
     return _COMPILED_TERMS[0]
 
 
@@ -361,7 +369,9 @@ class MonoPriorLoss:
         normals, static, prior_depth = (torch.stack(parts) for parts in zip(*maps, strict=True))
         prior_normals, _ = decode_normals(normals)
         K: Tensor = torch.stack([Ks[c] for c in cams])
-        terms: PriorTerms = _batch_terms(depth)(depth, alphas, static, prior_depth.float(), prior_normals, K, step, self.config)
+        terms: PriorTerms = _batch_terms(depth)(
+            depth, alphas, static, prior_depth.float(), prior_normals, K, step >= self.config.contradiction_start_step, self.config
+        )
         if logged:
             kept: Tensor = (terms.valid_fraction > 0).float()
             row: Tensor = torch.stack([terms.depth.detach(), terms.normal.detach(), terms.valid_fraction, kept]).sum(dim=1)
