@@ -46,6 +46,9 @@ ignore_names = [
     "_camera_group", "add_loss",
     # open4dgs.trigs_trainer: overrides that TRiGS's _render_inputs calls
     "_slice_rowwise_params",
+    # open4dgs.birefnet_trt: the torchvision::deform_conv2d argument list (positional, kept whole) and the engine
+    # builder that fdanyone-rerun's fdanyone-birefnet-engine task calls
+    "use_mask", "build_engine",
 ]
 
 [tool.pytest.ini_options]
