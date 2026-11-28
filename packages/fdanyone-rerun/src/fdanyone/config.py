@@ -49,6 +49,9 @@ class InferenceConfig:
     ``FDANYONE_DIT_NVFP4=ffn`` turns it on for the FFNs."""
     dit_nvfp4_blocks: tuple[int, int] = tuple(int(b) for b in os.environ.get("FDANYONE_DIT_NVFP4_BLOCKS", "3-26").split("-"))  # type: ignore[assignment]
     """Inclusive block range of ``dit_nvfp4_projections`` (inside the FP8 range, blocks 3-26)."""
+    dit_nvfp4_steps: tuple[int, ...] = tuple(int(k) for k in os.environ.get("FDANYONE_DIT_NVFP4_STEPS", ""))
+    """Denoising step indices (digits, e.g. ``3`` for the last of four) at which ``dit_nvfp4_projections`` run NVFP4;
+    the other steps run their FP8 twins. Empty (default) = every step. Late steps amplify the NVFP4 error least."""
     dit_regional_compile: bool = False
     """``torch.compile`` each DiT block in place (static shapes). Off by default: on an RTX 5090 a cold
     max-autotune compile took ~690 s, and with upstream's six-view groups the compiled blocks ran out of the 32 GB

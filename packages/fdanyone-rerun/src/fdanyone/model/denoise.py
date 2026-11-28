@@ -34,6 +34,9 @@ def denoise_group(
 
     import torch
 
+    from fdanyone.model.quantization import select_step_precision
+
+    select_step_precision(denoiser.model, step_index)
     timestep = denoiser.scheduler.timesteps[step_index]
     batched_timestep = timestep.unsqueeze(0).to(dtype=denoiser.dtype, device=latents.device)
     batched_timestep = torch.cat([batched_timestep] * latents.shape[0], dim=0)

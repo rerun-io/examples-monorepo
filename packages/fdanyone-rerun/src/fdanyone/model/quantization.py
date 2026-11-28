@@ -147,22 +147,55 @@ def project_fp8_shared(
     return [out.view(*x.shape[:-1], linear.out_features) for linear, out in zip(linears, outs, strict=True)]
 
 
+class StepPrecisionSwap(torch.nn.Module):
+    """FP8 and NVFP4 twins of the same projections; :meth:`apply` installs the NVFP4 twins for the denoising steps in
+    ``steps`` and the FP8 twins otherwise. Both sets stay registered here, so device moves reach the inactive set."""
+
+    def __init__(self, slots: list[tuple[str, torch.nn.Module, torch.nn.Module]], steps: tuple[int, ...]) -> None:
+        super().__init__()
+        self.fqns: list[str] = [fqn for fqn, _, _ in slots]
+        self.fp8 = torch.nn.ModuleList(fp8 for _, fp8, _ in slots)
+        self.nvfp4 = torch.nn.ModuleList(nv for _, _, nv in slots)
+        self.steps: tuple[int, ...] = steps
+
+    def apply(self, dit: torch.nn.Module, step_index: int) -> None:
+        twins = self.nvfp4 if step_index in self.steps else self.fp8
+        for fqn, module in zip(self.fqns, twins, strict=True):
+            parent_name, _, child_name = fqn.rpartition(".")
+            setattr(dit.get_submodule(parent_name), child_name, module)
+
+
+STEP_SWAP_ATTRIBUTE: str = "nvfp4_step_swap"
+"""Submodule name of a DiT's :class:`StepPrecisionSwap` (present only with a step-restricted NVFP4 policy)."""
+
+
+def select_step_precision(dit: torch.nn.Module, step_index: int) -> None:
+    """Install the projections of a denoising step (no-op without a step-restricted NVFP4 policy)."""
+
+    swap = getattr(dit, STEP_SWAP_ATTRIBUTE, None)
+    if swap is not None:
+        swap.apply(dit, step_index)
+
+
 def quantize_dit_fp8_w8a8(
     dit: torch.nn.Module,
     *,
     nvfp4_projections: tuple[str, ...] | None = None,
     nvfp4_blocks: tuple[int, int] | None = None,
     fp8_edges: bool | None = None,
+    nvfp4_steps: tuple[int, ...] | None = None,
 ) -> FP8W8A8Report:
     """Replace the approved projections (blocks 3-26, every block with ``fp8_edges``) with chunked row-wise FP8 W8A8
     linears; groups in ``nvfp4_projections`` inside the inclusive ``nvfp4_blocks`` range get NVFP4 W4A4 linears
-    instead (defaults: ``InferenceConfig``)."""
+    instead (defaults: ``InferenceConfig``). A non-empty ``nvfp4_steps`` keeps an FP8 twin of every NVFP4 projection
+    and runs NVFP4 only at those denoising steps (:func:`select_step_precision`)."""
 
     from fdanyone.config import INFERENCE
 
     nvfp4_projections = INFERENCE.dit_nvfp4_projections if nvfp4_projections is None else nvfp4_projections
     nvfp4_blocks = INFERENCE.dit_nvfp4_blocks if nvfp4_blocks is None else nvfp4_blocks
     fp8_edges = INFERENCE.dit_fp8_edges if fp8_edges is None else fp8_edges
+    nvfp4_steps = INFERENCE.dit_nvfp4_steps if nvfp4_steps is None else nvfp4_steps
     block_range = (0, 10**6) if fp8_edges else QUANTIZED_BLOCK_RANGE
 
     unknown = set(nvfp4_projections) - set(NVFP4_KINDS)
@@ -175,6 +208,7 @@ def quantize_dit_fp8_w8a8(
         if isinstance(module, torch.nn.Linear) and is_quantizable_dit_projection(fqn, block_range)
     ]
     nvfp4_count = 0
+    twins: list[tuple[str, torch.nn.Module, torch.nn.Module]] = []
     for fqn in selected:
         parent_name, _, child_name = fqn.rpartition(".")
         parent = dit.get_submodule(parent_name)
@@ -183,10 +217,18 @@ def quantize_dit_fp8_w8a8(
         if kind in nvfp4_projections and nvfp4_blocks[0] <= block <= nvfp4_blocks[1]:
             from fdanyone.model.nvfp4 import Nvfp4Linear
 
-            setattr(parent, child_name, Nvfp4Linear(linear))
+            nvfp4 = Nvfp4Linear(linear)
+            if nvfp4_steps:
+                twins.append((fqn, Fp8RowwiseLinear(linear), nvfp4))
+            setattr(parent, child_name, nvfp4)
             nvfp4_count += 1
         else:
             setattr(parent, child_name, Fp8RowwiseLinear(linear))
+    if twins:
+        dit.add_module(STEP_SWAP_ATTRIBUTE, StepPrecisionSwap(twins, nvfp4_steps))
     if nvfp4_count:
-        logging.getLogger(__name__).info("NVFP4 W4A4 DiT: %d projections (%s, blocks %d-%d)", nvfp4_count, ",".join(nvfp4_projections), *nvfp4_blocks)
+        steps = ",".join(map(str, nvfp4_steps)) if nvfp4_steps else "all"
+        logging.getLogger(__name__).info(
+            "NVFP4 W4A4 DiT: %d projections (%s, blocks %d-%d, steps %s)", nvfp4_count, ",".join(nvfp4_projections), *nvfp4_blocks, steps
+        )
     return FP8W8A8Report(module_count=len(selected) - nvfp4_count, nvfp4_count=nvfp4_count)

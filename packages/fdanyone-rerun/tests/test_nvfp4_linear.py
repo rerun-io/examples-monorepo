@@ -132,3 +132,28 @@ def test_shared_projection_equals_separate_projections() -> None:
     x = torch.randn(2, 100, 512, device="cuda", dtype=torch.bfloat16)
     for shared, alone in zip(project_shared(layers, x), (layer(x) for layer in layers), strict=True):
         torch.testing.assert_close(shared, alone, rtol=0, atol=0)
+
+
+def test_step_policy_swaps_nvfp4_and_fp8_twins_per_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    import fdanyone.model.nvfp4 as nvfp4
+    from fdanyone.model.quantization import Fp8RowwiseLinear, select_step_precision
+
+    class Marker(torch.nn.Module):
+        def __init__(self, linear: torch.nn.Linear) -> None:
+            super().__init__()
+            self.in_features = linear.in_features
+
+    monkeypatch.setattr(nvfp4, "Nvfp4Linear", Marker)
+    dit = torch.nn.Module()
+    dit.blocks = torch.nn.ModuleList()
+    for _ in range(4):
+        block = torch.nn.Module()
+        block.ffn = torch.nn.Sequential(torch.nn.Linear(32, 64), torch.nn.GELU(), torch.nn.Linear(64, 32))
+        dit.blocks.append(block)
+    report = quantize_dit_fp8_w8a8(dit.to(torch.bfloat16), nvfp4_projections=("ffn",), nvfp4_blocks=(3, 3), nvfp4_steps=(3,))
+    assert (report.module_count, report.nvfp4_count) == (0, 2)
+    select_step_precision(dit, 0)
+    assert isinstance(dit.blocks[3].ffn[0], Fp8RowwiseLinear) and isinstance(dit.blocks[3].ffn[2], Fp8RowwiseLinear)
+    select_step_precision(dit, 3)
+    assert isinstance(dit.blocks[3].ffn[0], Marker) and isinstance(dit.blocks[3].ffn[2], Marker)
+    select_step_precision(torch.nn.Linear(2, 2), 3)  # no step policy: a no-op
