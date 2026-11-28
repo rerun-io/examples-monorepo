@@ -1,0 +1,81 @@
+--- a/python/src/asog/encode.py
++++ b/python/src/asog/encode.py
+@@ -11,6 +11,8 @@
+ 
+ import logging
+ import time
++from collections.abc import Callable
++from concurrent.futures import Executor, Future
+ from dataclasses import dataclass, field
+ from pathlib import Path
+ 
+@@ -87,21 +89,26 @@
+ 
+ def encode_runtime(source: trigs.TrigsRuntime, dst: str | Path, *, qp: float = 2.0, qa: float = 8.0, prune: float = 0.3,
+                    mbits: int = 14, tbits: int = 11, lsbits: int = 8, shk: int = 65536, level: int = 9,
+-                   audio: str | Path | None = None) -> EncodeStats:
+-    """Encode an in-memory TRiGS runtime (what `trigs.read` returns) to the `.asog` file `dst`; options as `encode`."""
++                   audio: str | Path | None = None, executor: Executor | None = None,
++                   codebook1d: Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]] = quantize.codebook1d) -> EncodeStats:
++    """Encode an in-memory TRiGS runtime (what `trigs.read` returns) to the `.asog` file `dst`; options as `encode`.
++
++    executor:   runs `container.encode_stream` of each stream while the next ones are built; same file.
++    codebook1d: a drop-in for `quantize.codebook1d` (same codebook and indices).
++    """
+     t0 = time.time()
+     n_dyn = int((~source.static).sum())
+     count = source.count - int(round(prune * n_dyn))
+     s = source.take(splat_order(source, count))
+     log.info(f"{source.count} splats, kept {count}, SH coeffs {0 if s.shN is None else s.shN.shape[1]} ({time.time() - t0:.0f} s)")
+     n = count
+-    streams: list[container.Stream] = []
++    streams: list[container.Stream | Future[container.Stream]] = []
+ 
+     def add(name: str, values: np.ndarray, delta: bool | None = None) -> None:
+-        st = container.encode_stream(name, values, delta=delta, level=level)
+-        streams.append(st)
+-        log.info(f"  {name:10s} {st.desc['channels']} ch, {st.desc['planes']} planes, delta {int(st.desc['delta'])}: "
+-                 f"{len(st.data) / n:6.2f} B/splat")
++        if executor is not None:
++            streams.append(executor.submit(container.encode_stream, name, values, delta=delta, level=level))
++        else:
++            streams.append(container.encode_stream(name, values, delta=delta, level=level))
+ 
+     meta: dict = {}
+     # ---- position: SOG log mapping, 16-bit per axis, the low 16 - mbits bits zero
+@@ -122,10 +129,10 @@
+     add("quats", np.clip(np.round((q[mask].reshape(n, 3) / np.sqrt(2) + 0.5) * 255), 0, 255))
+     add("quatmode", big)
+     # ---- scales / sh0: 256-entry codebooks; opacity 8-bit
+-    cb, idx = quantize.codebook1d(s.log_scales)
++    cb, idx = codebook1d(s.log_scales)
+     meta["scales"] = dict(codebook=cb.tolist())
+     add("scales", idx.reshape(n, 3))
+-    cb, idx = quantize.codebook1d(s.sh0)
++    cb, idx = codebook1d(s.sh0)
+     meta["sh0"] = dict(codebook=cb.tolist())
+     add("sh0", idx.reshape(n, 3))
+     add("opacity", np.clip(np.round(s.opacity * 255), 0, 255))
+@@ -134,7 +141,7 @@
+         coeffs = s.shN.shape[1]
+         k = quantize.palette_size(n, shk)
+         centroids, labels = quantize.sh_palette(s.shN.reshape(n, -1), k)
+-        cb, cidx = quantize.codebook1d(centroids)
++        cb, cidx = codebook1d(centroids)
+         meta["shN"] = dict(codebook=cb.tolist(), count=k, coeffs=coeffs)
+         add("shlabels", labels)
+         add("shpalette", cidx.reshape(k, coeffs * 3), delta=False)   # per entry: coefficient-major, then rgb
+@@ -184,7 +191,11 @@
+     if audio is not None:
+         ext = Path(audio).suffix.lstrip(".").lower()
+         sound = (Path(audio).read_bytes(), AUDIO_MIME.get(ext, f"audio/{ext}"))
+-    total = container.write(dst, manifest, streams, sound)
+-    stats = EncodeStats(source.count, n, total, {st.desc["name"]: len(st.data) for st in streams}, time.time() - t0)
++    done = [st.result() if isinstance(st, Future) else st for st in streams]
++    for st in done:
++        log.info(f"  {st.desc['name']:10s} {st.desc['channels']} ch, {st.desc['planes']} planes, delta {int(st.desc['delta'])}: "
++                 f"{len(st.data) / n:6.2f} B/splat")
++    total = container.write(dst, manifest, done, sound)
++    stats = EncodeStats(source.count, n, total, {st.desc["name"]: len(st.data) for st in done}, time.time() - t0)
+     log.info(f"wrote {dst}: {total / 1e6:.1f} MB, {total / n:.2f} B/splat ({stats.seconds:.0f} s)")
+     return stats
