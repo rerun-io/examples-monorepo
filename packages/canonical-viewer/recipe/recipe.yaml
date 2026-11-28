@@ -1,0 +1,102 @@
+# rerun-canonical as a conda package: the stock `rerun` command line with every viewer extension (README).
+# Build from the repo root, with brush-src first (the gsplat Cargo workspace names its crates; rattler-build serves
+# earlier outputs to later recipes from the output directory):
+#   rattler-build build --recipe recipes/brush-src/recipe.yaml --recipe packages/canonical-viewer/recipe/recipe.yaml
+# The recipe has its own directory: rattler-build stores the recipe's directory in the package (info/recipe/), and the
+# package directory holds target/ (tens of GB).
+context:
+  # The Rerun tag of canonical_viewer/apis/prepare_rerun.py (ci/tests/test_rerun_pins.py checks it).
+  rerun_version: "0.44.0"
+
+package:
+  name: rerun-canonical
+  version: ${{ rerun_version }}
+
+# The Cargo workspace (rust/) reaches the extension crates by relative path, so the three packages keep their
+# packages/ layout. The same excludes in each leave out the build trees (tens of GB) and caches: rattler-build reads no
+# .gitignore above a path source, and a recipe has no list variables or YAML anchors.
+source:
+  - path: ..
+    target_directory: canonical-viewer
+    filter:
+      exclude: ["**/target/**", "data/**", ".pixi/**", "**/__pycache__/**", ".pytest_cache/**", ".ruff_cache/**"]
+  - path: ../../gsplat-rust-renderer
+    target_directory: gsplat-rust-renderer
+    filter:
+      exclude: ["**/target/**", "data/**", ".pixi/**", "**/__pycache__/**", ".pytest_cache/**", ".ruff_cache/**"]
+  - path: ../../depth-video-viewer
+    target_directory: depth-video-viewer
+    filter:
+      exclude: ["**/target/**", "data/**", ".pixi/**", "**/__pycache__/**", ".pytest_cache/**", ".ruff_cache/**"]
+
+build:
+  # Raise for every change to the extensions or patches at the same Rerun tag.
+  number: 0
+  script:
+    - mkdir -p gsplat-rust-renderer/target
+    - ln -sfn "$BUILD_PREFIX/share/brush-src" gsplat-rust-renderer/target/brush-src
+    - cd canonical-viewer
+    # prepare_rerun downloads the Rerun tag, wgpu and re_rav1d into target/patch/ and applies patches/.
+    - PYTHONPATH="$PWD" python tools/prepare_rerun.py
+    # re_build_tools treats CONDA_BUILD as Rerun's own packaging and runs `cargo metadata` on the patched crate,
+    # which fails outside Rerun's workspace.
+    - unset CONDA_BUILD
+    - export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+    - cargo build --release --locked --manifest-path rust/Cargo.toml --target-dir target --bin rerun-canonical
+    - install -d "$PREFIX/bin"
+    - install -m 755 target/release/rerun-canonical "$PREFIX/bin/rerun-canonical"
+  dynamic_linking:
+    missing_dso_allowlist:
+      - "*/libSystem.B.dylib"
+      - "*/libobjc.A.dylib"
+      - "*/libc.so*"
+      - "*/libm.so*"
+      - "*/libdl.so*"
+      - "*/libpthread.so*"
+      - "*/librt.so*"
+      - "*/ld-linux-*.so*"
+
+requirements:
+  build:
+    - ${{ compiler('c') }}
+    - ${{ compiler('cxx') }}
+    - rust 1.98.*
+    - brush-src
+    - python 3.12.*
+    - tyro >=0.9.1,<0.10
+    - git
+    - cmake
+    - pkg-config
+    - if: linux and x86_64
+      then: nasm
+  host:
+    - if: linux
+      then:
+        - libudev 257.*
+        - libxkbcommon
+        - wayland
+        - xorg-libx11
+        - xorg-libxcursor
+        - xorg-libxi
+        - xorg-libxinerama
+        - xorg-libxrandr
+  # winit loads the X11 and Wayland libraries at run time (dlopen), so rattler-build's overdepending warnings are expected.
+  run:
+    - if: linux
+      then:
+        - libxkbcommon
+        - wayland
+        - xorg-libx11
+        - xorg-libxcursor
+        - xorg-libxi
+        - xorg-libxinerama
+        - xorg-libxrandr
+
+tests:
+  - script:
+      - rerun-canonical --version
+      - rerun-canonical mcp --help
+
+about:
+  summary: The canonical Rerun viewer, rerun-canonical (the stock rerun command line with every viewer extension)
+  repository: https://github.com/rerun-io/examples-monorepo

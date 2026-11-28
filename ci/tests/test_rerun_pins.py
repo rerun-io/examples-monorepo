@@ -22,6 +22,7 @@ PATCHED_GIT: tuple[str, ...] = (
 CANONICAL_PREPARE: Path = REPO_ROOT / "packages/canonical-viewer/canonical_viewer/apis/prepare_rerun.py"
 # A staged copy of CANONICAL_PREPARE until gsplat's web build moves onto the canonical viewer's web crate.
 WEB_VIEWER_BUILD: Path = REPO_ROOT / "packages/gsplat-rust-renderer/gsplat_rust_renderer/apis/build_web_viewer.py"
+CANONICAL_RECIPE: Path = REPO_ROOT / "packages/canonical-viewer/recipe/recipe.yaml"
 
 
 def _cargo_manifests() -> list[Path]:
@@ -84,6 +85,13 @@ def test_patched_rerun_checkouts_use_the_conda_pin_tag() -> None:
     commits: dict[str, str] = {str(script.relative_to(REPO_ROOT)): _constant(script, "RERUN_COMMIT") for script in scripts}
     assert set(tags.values()) == {_conda_rerun_version()}, f"RERUN_TAG must be the conda rerun-sdk pin: {tags}"
     assert len(set(commits.values())) == 1, f"the copies must check out the same commit: {commits}"
+
+
+def test_canonical_recipe_version_is_the_conda_pin() -> None:
+    # The conda package's version is the Rerun tag it builds, which the SDK's spawn compares with its own version.
+    match: re.Match[str] | None = re.search(r'^  rerun_version: "([^"]+)"$', CANONICAL_RECIPE.read_text(), flags=re.MULTILINE)
+    assert match is not None, "packages/canonical-viewer/recipe/recipe.yaml: context.rerun_version not found"
+    assert match.group(1) == _conda_rerun_version(), f"recipe/recipe.yaml rerun_version {match.group(1)!r} must be the conda rerun-sdk pin"
 
 
 def test_rerun_patch_paths_name_the_conda_pin_tag() -> None:

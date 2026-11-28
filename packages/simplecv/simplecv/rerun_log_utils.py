@@ -1,5 +1,6 @@
 import logging
 import os
+import shutil
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -119,8 +120,9 @@ class RerunTyroConfig:
     (~1 GiB) silently drops the oldest messages on long multi-camera recordings
     (e.g. a 46-min EPFL session), so the viewer shows truncated history. Accepts a
     size (``"4GB"``) or a percentage of RAM (``"25%"``)."""
-    executable_name: str = "rerun"
-    """Executable name passed to ``rerun.spawn`` when launching the viewer."""
+    executable_name: str = field(default_factory=lambda: "rerun-canonical" if shutil.which("rerun-canonical") else "rerun")
+    """Executable name passed to ``rerun.spawn`` when launching the viewer: ``rerun-canonical`` (the stock viewer with
+    every monorepo extension, packages/canonical-viewer) when it is on PATH, else ``rerun``."""
     executable_path: str | None = None
     """Optional absolute or relative path to the Rerun executable."""
 

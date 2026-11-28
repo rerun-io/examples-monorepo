@@ -407,7 +407,8 @@ To bump, in one change:
    (`packages/gsplat-rust-renderer/crates/*/Cargo.toml`), the depth-video viewer
    (`packages/depth-video-viewer/Cargo.toml`) and the canonical viewer (`packages/canonical-viewer/rust/Cargo.toml`,
    its `[patch]` paths, and `RERUN_TAG`/`RERUN_COMMIT` with regenerated patches in
-   `canonical_viewer/apis/prepare_rerun.py` and its staged copy in gsplat's `build_web_viewer.py`); re-lock their Cargo with
+   `canonical_viewer/apis/prepare_rerun.py` and its staged copy in gsplat's `build_web_viewer.py`, and `rerun_version` in
+   its conda `recipe/recipe.yaml`); re-lock their Cargo with
    `cargo update -p <crate>@<old>` for the re_* family, not a blanket update, or the viewer
    silently loses protocol/tooling parity. 0.44.0 is not on crates.io (its egui is unreleased):
    the crates are git dependencies on rerun-io/rerun tag `0.44.0`, with a `[patch.crates-io]` for

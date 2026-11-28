@@ -76,6 +76,26 @@ The AV1 patch comes byte-identical from ai-demos `.github/rerun-source-build/` (
 into its `rerun-sdk` wheels. The stalled-proxy-reader patch from the same place is not in this set while a test decides it
 (Pablo, 2026-11-27).
 
+## Distribution
+
+| Surface | How |
+|---|---|
+| Native, any machine | the conda package `rerun-canonical` (`recipe/recipe.yaml`), installed by the fleet beside stock `rerun`; stock `rerun` stays the catalog server and the SDK's own CLI |
+| Python spawn | `RerunTyroConfig` (simplecv) spawns `rerun-canonical` when it is on PATH, else `rerun`; the SDK warns when the viewer's release differs from its own |
+| Stills, videos, posters | the `rerun-viewer-validation` skill's scripts default to `rerun-canonical` when it is on PATH |
+| Web pages | `canonical-viewer-web-build`, then agent-fleet `rerun_viewer_install <tag>-canonical-<sha7> --from-dir <out> --canonical`: embed.js opens it on every page without an installed `data-version` |
+
+Build the package from the repo root on each platform (linux-64, linux-aarch64, osx-arm64). brush-src builds first:
+the gsplat Cargo workspace names Brush crates, and rattler-build gives later recipes the earlier outputs.
+
+```bash
+rattler-build build --recipe recipes/brush-src/recipe.yaml --recipe packages/canonical-viewer/recipe/recipe.yaml \
+  --output-dir <out> -c https://prefix.dev/conda-forge
+```
+
+The package version is the Rerun tag (`ci/tests/test_rerun_pins.py` checks it), so the SDK's version check still
+applies; raise `build.number` for every extension or patch change at the same tag.
+
 ## Tests
 
 - Rust unit tests (`canonical-viewer-rust-check`): the device-needs merge (features and limits only), unique extension
