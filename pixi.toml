@@ -4421,8 +4421,8 @@ description = "What Animated SOG costs a trained run (--run <run dir>, --setting
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════
 [environments]
-# solve-group "stages": capture_to_splat's stage envs share one version of each package (one family per PR; the pipelines
-# test test_every_step_of_a_profile_runs_in_one_solve_group checks it). Each env keeps its own features.
+# solve-group "stages": capture_to_splat's stage envs share one version of each package (one family per PR;
+# ci/tests/test_flow_solve_groups.py checks it). Each env keeps its own features.
 colsfm = { features = ["common", "cuda", "colsfm", "torchcodec", "ffmpeg"], solve-group = "stages", no-default-feature = true }
 colsfm-dev = { features = ["common", "cuda", "colsfm", "dev", "torchcodec", "ffmpeg"], solve-group = "stages", no-default-feature = true }
 pipelines = { features = ["common", "pipelines", "ffmpeg"], solve-group = "pipelines", no-default-feature = true }

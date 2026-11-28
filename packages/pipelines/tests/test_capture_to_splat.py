@@ -59,17 +59,3 @@ def test_a_step_runs_its_pixi_task_in_a_memory_scope_inside_the_gpu_lock(tmp_pat
         "pixi", "run", "--manifest-path", str(tmp_path / "pixi.toml"), "--frozen", "-e", "slam-rs-cuda", "slam-rs-catalog-layer", "--segment", "s",
     ]
     assert step_command(step, Launch(manifest=tmp_path / "pixi.toml", gpu_lock=None, memory_max=None))[:2] == ["pixi", "run"]
-
-
-def test_every_step_of_a_profile_runs_in_one_solve_group(tmp_path: Path) -> None:
-    """One version of each package across the stages a flow chains (Pablo, study Q3): their envs share a solve group."""
-    import tomllib
-
-    from pipelines.apis.capture_to_splat import WORKSPACE_MANIFEST
-    from pipelines.capture_to_splat import flow_steps
-
-    environments: dict[str, dict[str, object]] = tomllib.loads(WORKSPACE_MANIFEST.read_text())["environments"]
-    for profile in ("insta360", "robocap"):
-        steps = flow_steps(profile, segment=f"{profile}__s", catalog_url="u", output_root=tmp_path)
-        groups: set[object] = {environments[step.environment].get("solve-group") for step in steps}
-        assert len(groups) == 1 and None not in groups, f"{profile}: {groups}"
