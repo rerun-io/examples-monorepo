@@ -2418,8 +2418,8 @@ description = "Build caspar-mojo, then run the package unit tests"
 
 [feature.caspar-mojo-pkg.tasks.tests-integration]
 cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m integration \"$@\" || test $? -eq 5' _"
-depends-on = ["caspar-mojo-build"]
-description = "Build caspar-mojo, then run the package integration tests"
+depends-on = ["caspar-mojo-build", "caspar-mojo-build-c"]
+description = "Build caspar-mojo and its C library, then run the package integration tests"
 
 [feature.caspar-mojo-pkg.tasks.tests-golden]
 cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m golden \"$@\" || test $? -eq 5' _"
@@ -2432,6 +2432,21 @@ cwd = "packages/caspar-mojo"
 description = "Build the caspar-mojo extension (GPU kernels for the local GPU)"
 inputs = ["packages/caspar-mojo/caspar_mojo/mojo/*.mojo"]
 outputs = ["packages/caspar-mojo/caspar_mojo/_caspar_mojo.so"]
+
+# The C ABI for COLMAP's C++ (include/caspar_mojo.h); its RUNPATH points into this env, so the env must stay installed.
+[feature.caspar-mojo.tasks.caspar-mojo-build-c]
+cmd = "mojo build --emit shared-lib -I caspar_mojo/mojo -o caspar_mojo/libcaspar_mojo.so caspar_mojo/mojo/c_api.mojo"
+cwd = "packages/caspar-mojo"
+description = "Build libcaspar_mojo.so, the C-ABI solver library (GPU kernels for the local GPU)"
+inputs = ["packages/caspar-mojo/caspar_mojo/mojo/*.mojo"]
+outputs = ["packages/caspar-mojo/caspar_mojo/libcaspar_mojo.so"]
+
+# A non-Mojo process linking the library, as COLMAP does: needs a GPU and the host C compiler.
+[feature.caspar-mojo.tasks.caspar-mojo-test-c]
+cmd = "mkdir -p build && cc -O1 -Iinclude tests/c/test_c_api.c -Lcaspar_mojo -lcaspar_mojo -Wl,-rpath,$PWD/caspar_mojo -o build/test_c_api && ./build/test_c_api"
+cwd = "packages/caspar-mojo"
+depends-on = ["caspar-mojo-build-c"]
+description = "Compile and run the C test program against libcaspar_mojo.so"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # sam2-streaming — the vendored SAM 2 fork's own lane: its connected-components kernel in Mojo
