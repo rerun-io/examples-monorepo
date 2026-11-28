@@ -78,11 +78,12 @@ The AV1 and stalled-proxy-reader patches come byte-identical from ai-demos `.git
 
 The stalled-proxy-reader patch has two limits:
 
-1. **A stalled web or iPad viewer can miss data, and nothing in that viewer says so.** A reader that falls behind (a
-   browser tab in the background, a sleeping iPad) loses the oldest messages it did not read, and its recording has a
-   gap until the page is reloaded. Only the proxy's log shows it, once: "a receiver stalled for over 1s; it will skip
-   the oldest messages". The native viewer is not affected: with its UI thread frozen for 15 s under gdb while 6000 rows streamed
-   in, the patched and the stock viewer both kept 6000 of 6000.
+1. **A stalled reader can miss data, and nothing in that reader says so.** A reader that stops reading (a web viewer
+   in a background browser tab, a sleeping iPad, a suspended process) loses the oldest messages it did not read once
+   1024 are queued, and its recording has a gap until it reconnects (a page reload). Only the proxy's log shows it,
+   once: "a receiver stalled for over 1s; it will skip the oldest messages". A frozen native UI thread does not stall
+   the reader: with the native viewer's UI thread frozen for 15 s under gdb while 6000 rows streamed in, the patched and
+   the stock viewer both kept 6000 of 6000.
 2. **While a reader is stalled, the byte budget is not enforced.** Only the channel's 1024 message slots bound it
    (`--server-memory-limit` is not), so very large messages can hold extra memory until the reader recovers or
    closes.
