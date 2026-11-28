@@ -19,12 +19,11 @@ RULE: str = (
     "Only packages/canonical-viewer may build a re_viewer App or a viewer binary; register an Extension in "
     "canonical_viewer::EXTENSIONS instead (AGENTS.md, 'One Rerun viewer')"
 )
-# What starts a viewer in Rust: an App value (`App::new`, an egui_kittest harness of App), Rerun's viewer entry points,
-# or eframe's own native loop, in a file that uses re_viewer or the rerun crate's viewer.
-VIEWER_CONSTRUCTION: re.Pattern[str] = re.compile(
-    r"\bApp::new\s*\(|Harness::<\s*re_viewer::App\s*>|\bre_viewer::run_native_app\b|\brerun::run\s*\(|\beframe::run_native\s*\("
-)
-# Cargo features that link a viewer binary: the rerun crate's native and web viewers, re_viewer's web build.
+# Rust: comments and string literals are not code; whitespace around path and generic punctuation carries no meaning.
+COMMENTS_AND_STRINGS: re.Pattern[str] = re.compile(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"', re.S)
+TIGHT_PUNCTUATION: re.Pattern[str] = re.compile(r"\s*(::|[<>,()=])\s*")
+# Cargo: the tables that declare dependencies, and the features that link a native or web viewer binary.
+DEPENDENCY_TABLES: tuple[str, ...] = ("dependencies", "dev-dependencies", "build-dependencies")
 VIEWER_FEATURES: dict[str, frozenset[str]] = {
     "rerun": frozenset({"native_viewer", "web_viewer"}),
     "re_viewer": frozenset({"default_web"}),
@@ -33,59 +32,106 @@ VIEWER_FEATURES: dict[str, frozenset[str]] = {
 
 def _tracked(pattern: str) -> list[str]:
     listed: str = subprocess.run(["git", "ls-files", "-z", "--", pattern], cwd=REPO_ROOT, check=True, capture_output=True, text=True).stdout
-    return [name for name in listed.split("\0") if name and not name.startswith(CANONICAL)]
+    return [name for name in listed.split("\0") if name]
 
 
-def viewer_constructions(name: str, text: str) -> list[str]:
-    """`path:line` of every viewer construction in a Rust file that uses re_viewer or the rerun viewer."""
-    if not re.search(r"\bre_viewer\b|\brerun::run\b", text):
-        return []
-    return [f"{name}:{number}" for number, line in enumerate(text.splitlines(), 1) if VIEWER_CONSTRUCTION.search(line)]
+def viewer_constructions(text: str) -> list[str]:
+    """Every place a Rust source starts a viewer: Rerun's or eframe's native loop, `rerun::run`, or, in a source that names
+    re_viewer, an App (`new`, `with_commands`, an egui_kittest Harness of App, under any `use ... as` or `type` alias)."""
+    code: str = TIGHT_PUNCTUATION.sub(r"\1", " ".join(COMMENTS_AND_STRINGS.sub(" ", text).split()))
+    patterns: list[str] = [r"\brun_native(?:_app)?\(", r"\brerun::run\("]
+    if "re_viewer" in code:
+        names: set[str] = {"App", *re.findall(r"\bApp as (\w+)", code), *re.findall(r"\btype (\w+)=(?:\w+::)*App\b", code)}
+        app: str = "|".join(sorted(names))
+        patterns += [rf"\b(?:{app})::(?:new|with_commands)\(", rf"\bHarness::<(?:\w+::)*(?:{app})\b"]
+    return [match.group(0) for match in re.finditer("|".join(patterns), code)]
 
 
-def viewer_features(name: str, manifest: dict[str, Any]) -> list[str]:
-    """`path: crate/feature` for every viewer feature a Cargo manifest enables: in a dependency entry at any depth
-    (`[dependencies]`, `[target.*.dependencies]`, `[workspace.dependencies]`, ...) or in a `[features]` list."""
+def viewer_features(manifest: dict[str, Any], workspace_packages: dict[str, str]) -> list[str]:
+    """`crate/feature` for every viewer feature a Cargo manifest enables: on a dependency (renamed with `package = ...`,
+    here or in its workspace) or through a `[features]` entry that forwards to one."""
+    tables: list[dict[str, Any]] = [manifest.get(table, {}) for table in DEPENDENCY_TABLES]
+    tables += [target.get(table, {}) for target in manifest.get("target", {}).values() for table in DEPENDENCY_TABLES]
+    tables.append(manifest.get("workspace", {}).get("dependencies", {}))
     found: list[str] = []
-
-    def walk(table: dict[str, Any]) -> None:
-        for key, value in table.items():
-            if not isinstance(value, dict):
-                continue
-            if key in VIEWER_FEATURES and isinstance(value.get("features"), list):
-                found.extend(f"{name}: {key}/{feature}" for feature in value["features"] if feature in VIEWER_FEATURES[key])
-            else:
-                walk(value)
-
-    walk(manifest)
+    packages: dict[str, str] = {}
+    for table in tables:
+        for key, entry in table.items():
+            spec: dict[str, Any] = entry if isinstance(entry, dict) else {}
+            crate: str = spec.get("package") or (workspace_packages.get(key, key) if spec.get("workspace") else key)
+            packages[key] = crate
+            found += [f"{crate}/{feature}" for feature in spec.get("features", []) if feature in VIEWER_FEATURES.get(crate, ())]
     for entries in manifest.get("features", {}).values():
         for entry in entries:
-            crate, _, feature = entry.partition("/")
-            if feature in VIEWER_FEATURES.get(crate.removesuffix("?"), frozenset()):
-                found.append(f"{name}: {entry}")
+            alias, _, feature = entry.partition("/")
+            crate = packages.get(alias.removesuffix("?"), alias.removesuffix("?"))
+            if feature in VIEWER_FEATURES.get(crate, ()):
+                found.append(f"{crate}/{feature} (via {entry})")
     return found
 
 
 def test_only_the_canonical_viewer_constructs_a_viewer() -> None:
-    found: list[str] = [hit for name in _tracked("*.rs") for hit in viewer_constructions(name, (REPO_ROOT / name).read_text(errors="replace"))]
+    found: list[str] = [
+        f"{name}: {hit}"
+        for name in _tracked("*.rs")
+        if not name.startswith(CANONICAL)
+        for hit in viewer_constructions((REPO_ROOT / name).read_text(errors="replace"))
+    ]
     assert not found, f"{RULE}: {found}"
 
 
 def test_only_the_canonical_viewer_links_a_viewer_binary() -> None:
-    found: list[str] = [hit for name in _tracked("*Cargo.toml") for hit in viewer_features(name, tomllib.loads((REPO_ROOT / name).read_text()))]
+    manifests: dict[str, dict[str, Any]] = {name: tomllib.loads((REPO_ROOT / name).read_text()) for name in _tracked("*Cargo.toml")}
+    # `workspace = true` entries take their package from the workspace manifest; a rename there applies to every member.
+    workspace_packages: dict[str, str] = {
+        key: entry["package"]
+        for manifest in manifests.values()
+        for key, entry in manifest.get("workspace", {}).get("dependencies", {}).items()
+        if isinstance(entry, dict) and "package" in entry
+    }
+    found: list[str] = [
+        f"{name}: {hit}"
+        for name, manifest in manifests.items()
+        if not name.startswith(CANONICAL)
+        for hit in viewer_features(manifest, workspace_packages)
+    ]
     assert not found, f"{RULE}: {found}"
 
 
-def test_the_guard_sees_a_viewer_outside_the_canonical_viewer() -> None:
-    planted: str = "use re_viewer::App;\nfn main() {\n    let app = re_viewer::App::new(token, info, env, options, cc, None, rt);\n}\n"
-    assert viewer_constructions("packages/demo/src/main.rs", planted) == ["packages/demo/src/main.rs:3"]
+def test_the_guard_sees_every_spelling_of_a_viewer() -> None:
+    planted: str = """use re_viewer::{App as ViewerApp, external::eframe};
+// A comment may name re_viewer::App::new(...) freely.
+const HELP: &str = "App::new(";
+fn start(cc: &eframe::CreationContext<'_>) {
+    let one = re_viewer::App::new(token, info, env, options, cc, None, rt);
+    let two = ViewerApp::with_commands(
+        token, info, env, options, cc, None, rt, commands,
+    );
+    let harness = egui_kittest::Harness::<
+        re_viewer::App,
+    >::builder();
+}
+type Viewer = re_viewer::App;
+fn three() { Viewer::new(token, info, env, options, cc, None, rt); eframe::run_native("x", options, creator); }
+"""
+    assert viewer_constructions(planted) == [
+        "App::new(",
+        "ViewerApp::with_commands(",
+        "Harness::<re_viewer::App",
+        "Viewer::new(",
+        "run_native(",
+    ]
+    assert viewer_constructions("struct App;\nfn main() { App::new(); }\n") == [], "an App unrelated to re_viewer"
     manifest: dict[str, Any] = tomllib.loads(
+        '[package.metadata.rerun]\nfeatures = ["native_viewer"]\n'
         '[dependencies]\nrerun = { workspace = true, features = ["sdk", "native_viewer"] }\n'
-        '[target.\'cfg(target_arch = "wasm32")\'.dependencies]\nre_viewer = { workspace = true, features = ["default_web"] }\n'
-        '[features]\napp = ["rerun/web_viewer"]\n'
+        'viewer = { package = "re_viewer", features = ["default_web"], optional = true }\n'
+        "[target.'cfg(target_arch = \"wasm32\")'.dependencies]\nweb = { workspace = true }\n"
+        '[features]\napp = ["viewer?/default_web", "web/web_viewer"]\n'
     )
-    assert viewer_features("packages/demo/Cargo.toml", manifest) == [
-        "packages/demo/Cargo.toml: rerun/native_viewer",
-        "packages/demo/Cargo.toml: re_viewer/default_web",
-        "packages/demo/Cargo.toml: rerun/web_viewer",
+    assert viewer_features(manifest, {"web": "rerun"}) == [
+        "rerun/native_viewer",
+        "re_viewer/default_web",
+        "re_viewer/default_web (via viewer?/default_web)",
+        "rerun/web_viewer (via web/web_viewer)",
     ]
