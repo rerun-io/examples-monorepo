@@ -380,3 +380,18 @@ def reference_solve(problem: BaProblem, options: BaOptions, dtype: type = np.flo
 
 def _usable(x: ndarray | float) -> bool:
     return bool(np.isfinite(x) and x > 0)
+
+
+def reference_linearize(problem: BaProblem, dtype: type = np.float64) -> tuple[float, ndarray, list[ndarray]]:
+    """res_jac_first at the problem's start: (cost, flat g = -J^T e, block diagonals of J^T J per group).
+
+    The flat order is [free poses 6 | free sensors 6 | free calibrations K, by model | free points 3]; empty groups
+    are dropped from the block-diagonal list.
+    """
+    groups = make_groups(problem)
+    state = State(
+        problem.rig_from_world.astype(dtype), problem.sensor_from_rig.astype(dtype), problem.intrinsics.astype(dtype), problem.points.astype(dtype)
+    )
+    lin = linearize(problem, state, groups)
+    gradient = np.concatenate([x.ravel() for x in lin.gradient])
+    return lin.cost, gradient, [b for b in lin.block_diagonal if len(b)]
