@@ -9,12 +9,14 @@ from std.math import ceildiv, isfinite
 from std.os import getenv
 from std.time import perf_counter_ns
 
+from max.gpu import WARP_SIZE
 from max.gpu.host import DeviceAttribute, DeviceBuffer, DeviceContext
 from layout import TileTensor, row_major
 
 from camera_models import CameraModel, FullOpenCV, MAX_PARAMS, OpenCVFisheye, Pinhole, SimpleRadial
 from factor_kernels import (
     BLOCK,
+    WARPS,
     GATHER_BACKSUBSTITUTE,
     GATHER_NEGATE,
     POINT_LANES,
@@ -196,6 +198,79 @@ def _by_point(problem: HostProblem) -> ByPoint:
     return ByPoint(start^, frame^, camera^, pixels^)
 
 
+@fieldwise_init
+struct ImageOrder(Movable):
+    """Observation columns re-sorted by (camera, frame), for a caller whose rows come in another order."""
+
+    var frame: List[Int32]
+    var camera: List[Int32]
+    var point: List[Int32]
+    var pixels: List[Float32]
+
+
+def _in_image_order(problem: HostProblem) -> Bool:
+    for n in range(1, problem.n_obs):
+        var camera = problem.obs_camera[unsafe_offset=n]
+        var previous = problem.obs_camera[unsafe_offset=n - 1]
+        if camera < previous or (camera == previous and problem.obs_frame[unsafe_offset=n] < problem.obs_frame[unsafe_offset=n - 1]):
+            return False
+    return True
+
+
+def _counting_order(keys: I32HostIn, n_keys: Int, rows: List[Int]) -> List[Int]:
+    """`rows` stably reordered by keys[row] (a counting sort)."""
+    var start = List[Int](length=n_keys + 1, fill=0)
+    for row in rows:
+        start[Int(keys[unsafe_offset=row]) + 1] += 1
+    for k in range(n_keys):
+        start[k + 1] += start[k]
+    var out = List[Int](length=len(rows), fill=0)
+    for row in rows:
+        var k = Int(keys[unsafe_offset=row])
+        out[start[k]] = row
+        start[k] += 1
+    return out^
+
+
+def _image_order(problem: HostProblem) -> ImageOrder:
+    """Two stable counting sorts (frame, then camera): O(observations + frames + cameras)."""
+    var rows = List[Int](capacity=problem.n_obs)
+    for n in range(problem.n_obs):
+        rows.append(n)
+    rows = _counting_order(problem.obs_frame, problem.n_frames, rows)
+    rows = _counting_order(problem.obs_camera, problem.n_cameras, rows)
+    var order = ImageOrder(
+        List[Int32](capacity=problem.n_obs), List[Int32](capacity=problem.n_obs), List[Int32](capacity=problem.n_obs),
+        List[Float32](capacity=2 * problem.n_obs),
+    )
+    for row in rows:
+        order.frame.append(problem.obs_frame[unsafe_offset=row])
+        order.camera.append(problem.obs_camera[unsafe_offset=row])
+        order.point.append(problem.obs_point[unsafe_offset=row])
+        order.pixels.append(problem.pixels[unsafe_offset=2 * row])
+        order.pixels.append(problem.pixels[unsafe_offset=2 * row + 1])
+    return order^
+
+
+def _warp_tiles(problem: HostProblem) -> List[Int32]:
+    """Rows (first observation, count) of up to WARP_SIZE consecutive observations of one image each, flattened."""
+    var tiles = List[Int32](capacity=2 * (ceildiv(problem.n_obs, WARP_SIZE) + problem.n_frames))
+    var begin = 0
+    for n in range(1, problem.n_obs + 1):
+        var boundary = n == problem.n_obs
+        if not boundary:
+            boundary = (
+                problem.obs_camera[unsafe_offset=n] != problem.obs_camera[unsafe_offset=begin]
+                or problem.obs_frame[unsafe_offset=n] != problem.obs_frame[unsafe_offset=begin]
+                or n - begin == WARP_SIZE
+            )
+        if boundary:
+            tiles.append(Int32(begin))
+            tiles.append(Int32(n - begin))
+            begin = n
+    return tiles^
+
+
 def _grid(n: Int) -> Int:
     return max(ceildiv(n, BLOCK), 1)
 
@@ -263,7 +338,7 @@ def _usable(x: Float64) -> Bool:
 
 def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
     ctx: DeviceContext,
-    problem: HostProblem,
+    var problem: HostProblem,
     options: Options,
     result: HostState,
     linearize_gradient: F32HostOut,
@@ -273,6 +348,14 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
     """Run the LM solve and write the accepted state into `result`, or with `linearize_only` linearise once at the
     given state and write the gradient -J^T e and the packed block diagonal instead."""
     comptime K = Model.NUM_CALIB
+    var image_order = Optional[ImageOrder]()
+    if not _in_image_order(problem):
+        # The warp tiles hold one image each: any order is correct, (camera, frame) order makes them full.
+        image_order = _image_order(problem)
+        problem.obs_frame = I32HostIn(unsafe_from_address=Int(image_order.value().frame.unsafe_ptr()))
+        problem.obs_camera = I32HostIn(unsafe_from_address=Int(image_order.value().camera.unsafe_ptr()))
+        problem.obs_point = I32HostIn(unsafe_from_address=Int(image_order.value().point.unsafe_ptr()))
+        problem.pixels = F32HostIn(unsafe_from_address=Int(image_order.value().pixels.unsafe_ptr()))
     var nf = problem.n_frames
     var nc = problem.n_cameras
     var np = problem.n_points
@@ -307,6 +390,9 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
     var d_by_point_frame = _upload_list(ctx, by_point.frame)
     var d_by_point_camera = _upload_list(ctx, by_point.camera)
     var d_by_point_pixels = _upload_list(ctx, by_point.pixels)
+    var tile_rows = _warp_tiles(problem)
+    var n_warp_tiles = len(tile_rows) // 2
+    var d_warp_tiles = _upload_list(ctx, tile_rows)
     var nt = max(lay.n_tan, 1)
     var d_g = ctx.enqueue_create_buffer[DType.float32](nt)
     var d_r = ctx.enqueue_create_buffer[DType.float32](nt)
@@ -338,6 +424,7 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
     var by_point_frame = TileTensor(d_by_point_frame, row_major((no,))).as_imm()
     var by_point_camera = TileTensor(d_by_point_camera, row_major((no,))).as_imm()
     var by_point_pixels = TileTensor(d_by_point_pixels, row_major((no, 2))).as_imm()
+    var warp_tiles = TileTensor(d_warp_tiles, row_major((n_warp_tiles, 2))).as_imm()
     var g = TileTensor(d_g, row_major((nt,)))
     var r = TileTensor(d_r, row_major((nt,)))
     var z = TileTensor(d_z, row_major((nt,)))
@@ -367,12 +454,13 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
     var launches = 0
     var clock = KernelClock()
     var obs_grid = _grid(no)
-    var n_tiles = ceildiv(no, BLOCK)
+    var n_tiles = ceildiv(n_warp_tiles, WARPS)
     var tiles = max(ceildiv(n_tiles, BLOCKS_PER_SM * ctx.device().get_attribute(DeviceAttribute.MULTIPROCESSOR_COUNT)), 1)
     var tile_grid = max(ceildiv(n_tiles, tiles), 1)
     var cam_blocks = lay.n6 + lay.n_calib
 
     ctx.synchronize()
+    _ = image_order^  # the uploads above read its lists through raw addresses
     var t0 = perf_counter_ns()
     clock.last = perf_counter_ns()
 
@@ -384,7 +472,7 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
         TileTensor(d_poses, row_major((nf, 7))).as_imm(), TileTensor(d_rigs, row_major((nc, 7))).as_imm(),
         TileTensor(d_intr, row_major((nc, MAX_PARAMS))).as_imm(), TileTensor(d_points, row_major((np, 3))).as_imm(),
         t_pose_off, t_rig_off, t_calib_off, t_point_off, obs_frame, obs_camera, obs_point, pixels,
-        d_g.unsafe_ptr(), d_h.unsafe_ptr(), scalars, Int32(SLOT_COST_LINEARIZE), n6, ncal, Int32(tiles),
+        warp_tiles, d_g.unsafe_ptr(), d_h.unsafe_ptr(), scalars, Int32(SLOT_COST_LINEARIZE), n6, ncal, Int32(tiles),
         grid_dim=tile_grid, block_dim=BLOCK,
     )
     clock.tick(ctx, "linearize")
@@ -425,7 +513,7 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
                 TileTensor(d_poses, row_major((nf, 7))).as_imm(), TileTensor(d_rigs, row_major((nc, 7))).as_imm(),
                 TileTensor(d_intr, row_major((nc, MAX_PARAMS))).as_imm(), TileTensor(d_points, row_major((np, 3))).as_imm(),
                 t_pose_off, t_rig_off, t_calib_off, t_point_off, obs_frame, obs_camera, obs_point, pixels,
-                d_g.unsafe_ptr(), d_h.unsafe_ptr(), scalars, Int32(SLOT_COST_LINEARIZE), n6, ncal, Int32(tiles),
+                warp_tiles, d_g.unsafe_ptr(), d_h.unsafe_ptr(), scalars, Int32(SLOT_COST_LINEARIZE), n6, ncal, Int32(tiles),
                 grid_dim=tile_grid, block_dim=BLOCK,
             )
             clock.tick(ctx, "linearize")
@@ -450,7 +538,7 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
         clock.tick(ctx, "point_solve")
         ctx.enqueue_function[cross_points](
             lin_poses, lin_rigs, lin_intr, lin_points, t_pose_off, t_rig_off, t_calib_off, t_point_off, obs_frame, obs_camera, obs_point,
-            z.as_imm(), z.as_imm(), d_r.unsafe_ptr(), Int32(tiles), grid_dim=tile_grid, block_dim=BLOCK,
+            warp_tiles, z.as_imm(), z.as_imm(), d_r.unsafe_ptr(), Int32(tiles), grid_dim=tile_grid, block_dim=BLOCK,
         )
         clock.tick(ctx, "cross_points")
         launches += 2
@@ -480,7 +568,7 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
             clock.tick(ctx, "point_gather")
             ctx.enqueue_function[cross_all](
                 lin_poses, lin_rigs, lin_intr, lin_points, t_pose_off, t_rig_off, t_calib_off, t_point_off, obs_frame, obs_camera, obs_point,
-                p.as_imm(), z.as_imm(), d_w.unsafe_ptr(), Int32(tiles), grid_dim=tile_grid, block_dim=BLOCK,
+                warp_tiles, p.as_imm(), z.as_imm(), d_w.unsafe_ptr(), Int32(tiles), grid_dim=tile_grid, block_dim=BLOCK,
             )
             clock.tick(ctx, "cross_points")
             ctx.enqueue_function[dot_kernel](
