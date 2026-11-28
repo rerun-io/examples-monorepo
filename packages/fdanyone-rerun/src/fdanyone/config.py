@@ -34,6 +34,11 @@ class InferenceConfig:
     turbo. Activations are quantized in row chunks of at most 1 GiB of temporaries, so a six-view group fits beside
     the resident DiT (the FP8 weights free 4.5 GiB). On by default; ``FDANYONE_DIT_FP8=0`` turns it off. RTX 5090, six-view example (busy host, load ~10):
     denoise 112 -> 86 s, peak 29.2 -> 24.5 GB reserved, mean per-view SSIM vs the BF16 build 0.917."""
+    dit_fused_glue: bool = os.environ.get("FDANYONE_DIT_FUSED", "1") != "0"
+    """Fused Triton kernels (``fdanyone.model.fused``) for the DiT's memory-bound glue: RMSNorm + RoPE, LayerNorm +
+    modulation (written frame-major for the multiview attention), gated residuals, and one FP8 row quantization per
+    projection input (GELU folded into the FFN's). Same BF16 rounding points as the eager code; the FP8 path is
+    bit-exact. RTX 5090, six-view group: one forward 20 -> 11.6 s. ``FDANYONE_DIT_FUSED=0`` runs the eager code."""
     dit_regional_compile: bool = False
     """``torch.compile`` each DiT block in place (static shapes). Off by default: on an RTX 5090 a cold
     max-autotune compile took ~690 s, and with upstream's six-view groups the compiled blocks ran out of the 32 GB

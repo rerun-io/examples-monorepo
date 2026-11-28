@@ -17,6 +17,8 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 
 from fdanyone.attention import resolve_attention_backend
+from fdanyone.model import fused
+from fdanyone.model.quantization import Fp8RowwiseLinear, project_fp8_shared
 
 try:
     import flash_attn_interface
@@ -79,10 +81,14 @@ def attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, num_heads: int,
         if isinstance(output, tuple):
             output = output[0]
         return rearrange(output, "b s n d -> b s (n d)", n=num_heads)
+    if backend == "sageattention":
+        # Token-major views straight into the kernels: the output comes back token-major, no permute copy.
+        heads = [t.unflatten(-1, (num_heads, -1)) for t in (q, k, v)]
+        return sageattn(*heads, tensor_layout="NHD").flatten(-2)
     q = rearrange(q, "b s (n d) -> b n s d", n=num_heads)
     k = rearrange(k, "b s (n d) -> b n s d", n=num_heads)
     v = rearrange(v, "b s (n d) -> b n s d", n=num_heads)
-    output = sageattn(q, k, v) if backend == "sageattention" else F.scaled_dot_product_attention(q, k, v)
+    output = F.scaled_dot_product_attention(q, k, v)
     return rearrange(output, "b n s d -> b s (n d)", n=num_heads)
 
 
@@ -112,6 +118,8 @@ def normalized_modulation(
 
     if torch.is_grad_enabled():
         return modulate(norm(x), shift, scale)
+    if fused.active(x) and x.dtype == torch.bfloat16 and x.is_contiguous():
+        return fused.layer_norm_modulation(x, shift, scale, norm.eps)
 
     output = torch.empty_like(x)
     fp32_bytes_per_batch = x[0].numel() * torch.empty((), dtype=torch.float32).element_size()
@@ -260,11 +268,28 @@ class SelfAttention(nn.Module):
         self.norm_k = RMSNorm(dim, eps=eps)
 
     def forward(self, x: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
+        if fused.active(x):
+            return self._forward_fused(x, freqs)
         q = self.norm_q.forward_inplace(self.q(x))
         k = self.norm_k.forward_inplace(self.k(x))
         v = self.v(x)
         q = rope_apply(q, freqs, self.num_heads)
         k = rope_apply(k, freqs, self.num_heads)
+        return self.o(attention(q, k, v, self.num_heads, self.attention_backend))
+
+
+    def _project_qkv(self, x: torch.Tensor) -> list[torch.Tensor]:
+        projections = (self.q, self.k, self.v)
+        if all(isinstance(p, Fp8RowwiseLinear) for p in projections):
+            return project_fp8_shared(projections, x)
+        return [projection(x) for projection in projections]
+
+    def _forward_fused(self, x: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
+        q, k, v = self._project_qkv(x)
+        del x
+        tables = fused.rope_tables(freqs)
+        q = fused.rms_norm_rope_(q, self.norm_q.weight, self.norm_q.eps, tables)
+        k = fused.rms_norm_rope_(k, self.norm_k.weight, self.norm_k.eps, tables)
         return self.o(attention(q, k, v, self.num_heads, self.attention_backend))
 
 
@@ -281,7 +306,8 @@ class CrossAttention(nn.Module):
         self.norm_k = RMSNorm(dim, eps=eps)
 
     def forward(self, x: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
-        q = self.norm_q.forward_inplace(self.q(x))
+        q = self.q(x)
+        q = fused.rms_norm_rope_(q, self.norm_q.weight, self.norm_q.eps, None) if fused.active(q) else self.norm_q.forward_inplace(q)
         k = self.norm_k.forward_inplace(self.k(context))
         v = self.v(context)
         return self.o(attention(q, k, v, self.num_heads, self.attention_backend))
@@ -315,8 +341,15 @@ class DiTBlock(nn.Module):
         # token slab for the equally shaped second-projection output.
         if not torch.is_grad_enabled():
             del x
+            if isinstance(self.ffn[2], Fp8RowwiseLinear):
+                return self.ffn[2].forward_gelu(hidden)
         hidden = gelu_tanh(hidden)
         return self.ffn[2](hidden)
+
+    def _norm3(self, x: torch.Tensor) -> torch.Tensor:
+        if fused.active(x) and x.is_contiguous():
+            return fused.layer_norm_affine(x, self.norm3.weight, self.norm3.bias, self.norm3.eps)
+        return self.norm3(x)
 
     @staticmethod
     def _add_residual(x: torch.Tensor, branch: torch.Tensor, gate: torch.Tensor | None = None) -> torch.Tensor:
@@ -329,6 +362,8 @@ class DiTBlock(nn.Module):
 
         if torch.is_grad_enabled():
             return x + (branch if gate is None else gate * branch)
+        if gate is not None and fused.active(x) and x.is_contiguous() and branch.is_contiguous():
+            return fused.gated_residual_(x, branch, gate)
         if gate is not None:
             branch.mul_(gate)
         return x.add_(branch)
@@ -383,13 +418,18 @@ class DiTBlock(nn.Module):
             self.modulation_mvs.to(dtype=time_modulation.dtype, device=time_modulation.device)
             + time_modulation[:, :3, :]
         ).chunk(3, dim=1)
-        x = self._add_residual(
-            x,
-            self._multiview_attention(x, shift_mvs, scale_mvs, multiview_freqs, shape),
-            gate_mvs,
-        )
+        if fused.active(x):
+            frames = shape[1]
+            tokens = fused.layer_norm_modulation(x, shift_mvs, scale_mvs, self.norm1_mvs.eps, frames=frames)
+            x = fused.gated_residual_(x, self.self_attn_mvs(tokens, multiview_freqs), gate_mvs, frames=frames)
+        else:
+            x = self._add_residual(
+                x,
+                self._multiview_attention(x, shift_mvs, scale_mvs, multiview_freqs, shape),
+                gate_mvs,
+            )
 
-        x = self._add_residual(x, self.cross_attn(self.norm3(x), repeat(context, "1 l c -> v l c", v=x.shape[0])))
+        x = self._add_residual(x, self.cross_attn(self._norm3(x), repeat(context, "1 l c -> v l c", v=x.shape[0])))
 
         residual = self._feed_forward(normalized_modulation(self.norm2, x, shift_mlp, scale_mlp))
         return self._add_residual(x, residual, gate_mlp)
