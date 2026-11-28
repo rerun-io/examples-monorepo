@@ -55,6 +55,13 @@ source:
   - path: ../../packages/gsplat-rust-renderer/gsplat_rust_renderer/apis/build_web_viewer.py
     target_directory: gsplat-rust-renderer/gsplat_rust_renderer/apis
     use_gitignore: false
+  # gsplat-viewer depends on the canonical viewer's extension contract crate, which inherits from that workspace's root.
+  - path: ../../packages/canonical-viewer/rust/Cargo.toml
+    target_directory: canonical-viewer/rust
+    use_gitignore: false
+  - path: ../../packages/canonical-viewer/rust/crates/extension
+    target_directory: canonical-viewer/rust/crates/extension
+    use_gitignore: false
   # The stock @rerun-io/web-viewer 0.44.0 package: the shell around our re_viewer.js / re_viewer_bg.wasm.
   - url: https://registry.npmjs.org/@rerun-io/web-viewer/-/web-viewer-0.44.0.tgz
     sha256: 2a4802e337c3c1eb7b6d7df5687723b927f52cfeb996a3b3fde0e0355c1ea558
