@@ -266,7 +266,10 @@ def resample_masks(
     dtype: torch.dtype,
 ) -> Float32[Tensor, "t h3 w3"] | Float16[Tensor, "t h3 w3"]:
     """Stored-grid 8-bit mattes to [0, 1] on the clip grid (``resample_images``), ``RESAMPLE_CHUNK`` frames at a time on
-    ``compute_device``; the result lands on ``device`` as ``dtype``."""
+    ``compute_device``; the result lands on ``device`` as ``dtype``. Without a lens at the stored size the resample is the
+    identity, and the conversion alone runs where the result lands (no round trip through ``compute_device``)."""
+    if grid is None and (stored.shape[2], stored.shape[1]) == target_wh:
+        return (stored.to(device).float() / 255.0).clamp(0.0, 1.0).to(dtype).contiguous()
     return torch.cat(
         [
             resample_images(stored[start : start + RESAMPLE_CHUNK, None].to(compute_device).float() / 255.0, grid, target_wh)[:, 0]

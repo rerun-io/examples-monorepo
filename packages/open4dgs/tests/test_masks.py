@@ -273,3 +273,18 @@ def test_predict_mattes_equals_the_per_frame_loop(batch_size: int) -> None:
     assert got.device.type == "cpu" and got.dtype == torch.uint8
     assert torch.equal(got, _per_frame_mattes(_BoxMatte(), frames, boxes, batch_size))
     assert not got[2].any()
+
+
+def test_identity_mask_resample_is_the_8bit_conversion() -> None:
+    """No lens and the stored size: resample_masks is the 8-bit -> [0, 1] conversion alone, on the output device, with the
+    bytes of the general path (resample_images on the compute device)."""
+    from open4dgs.catalog_clip import RESAMPLE_CHUNK, resample_images
+    from open4dgs.masks import resample_masks
+
+    stored = _soft_mattes(RESAMPLE_CHUNK + 3, 30, 40)
+    cpu = torch.device("cpu")
+    expected = resample_images(stored[:, None].float() / 255.0, None, (40, 30))[:, 0].clamp(0.0, 1.0)
+    got = resample_masks(stored, None, (40, 30), torch.device("meta"), cpu, torch.float32)  # never touches the compute device
+    assert got.device == cpu and got.is_contiguous()
+    assert torch.equal(got, expected)
+    assert torch.equal(resample_masks(stored, None, (40, 30), torch.device("meta"), cpu, torch.float16), expected.half())
