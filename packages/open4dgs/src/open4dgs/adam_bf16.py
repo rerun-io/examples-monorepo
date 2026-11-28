@@ -27,9 +27,8 @@ def _round_bf16_stochastic(x, rand):
 
 
 @triton.jit
-def _adam_bf16_kernel(p_ptr, g_ptr, m_ptr, v_ptr, n, beta1, beta2, eps, step_size, bc2_sqrt, seed, BLOCK: tl.constexpr):
-    offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    mask = offs < n
+def _adam_bf16_update(p_ptr, g_ptr, m_ptr, v_ptr, offs, mask, beta1, beta2, eps, step_size, bc2_sqrt, seed):
+    """The Adam update of the elements ``offs`` of one parameter (both kernels' body, so their results stay bit-identical)."""
     p = tl.load(p_ptr + offs, mask=mask)
     g = tl.load(g_ptr + offs, mask=mask)
     m = tl.load(m_ptr + offs, mask=mask).to(tl.float32)
@@ -41,6 +40,12 @@ def _adam_bf16_kernel(p_ptr, g_ptr, m_ptr, v_ptr, n, beta1, beta2, eps, step_siz
     r = tl.randint4x(seed, offs)
     tl.store(m_ptr + offs, _round_bf16_stochastic(m, r[0].to(tl.uint32, bitcast=True)), mask=mask)
     tl.store(v_ptr + offs, _round_bf16_stochastic(v, r[1].to(tl.uint32, bitcast=True)), mask=mask)
+
+
+@triton.jit
+def _adam_bf16_kernel(p_ptr, g_ptr, m_ptr, v_ptr, n, beta1, beta2, eps, step_size, bc2_sqrt, seed, BLOCK: tl.constexpr):
+    offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    _adam_bf16_update(p_ptr, g_ptr, m_ptr, v_ptr, offs, offs < n, beta1, beta2, eps, step_size, bc2_sqrt, seed)
 
 
 @triton.jit
@@ -64,18 +69,7 @@ def _adam_bf16_multi_kernel(table_ptr, block_tensor_ptr, block_first_ptr, BLOCK:
     step_size = tl.load(scalars + 3)
     bc2_sqrt = tl.load(scalars + 4)
     offs = (pid - tl.load(block_first_ptr + t)) * BLOCK + tl.arange(0, BLOCK)
-    mask = offs < n
-    p = tl.load(p_ptr + offs, mask=mask)
-    g = tl.load(g_ptr + offs, mask=mask)
-    m = tl.load(m_ptr + offs, mask=mask).to(tl.float32)
-    v = tl.load(v_ptr + offs, mask=mask).to(tl.float32)
-    m = m + (g - m) * (1.0 - beta1)
-    v = v * beta2 + g * g * (1.0 - beta2)
-    p = p - step_size * m / (tl.sqrt(v) / bc2_sqrt + eps)
-    tl.store(p_ptr + offs, p, mask=mask)
-    r = tl.randint4x(seed, offs)
-    tl.store(m_ptr + offs, _round_bf16_stochastic(m, r[0].to(tl.uint32, bitcast=True)), mask=mask)
-    tl.store(v_ptr + offs, _round_bf16_stochastic(v, r[1].to(tl.uint32, bitcast=True)), mask=mask)
+    _adam_bf16_update(p_ptr, g_ptr, m_ptr, v_ptr, offs, offs < n, beta1, beta2, eps, step_size, bc2_sqrt, seed)
 
 
 TABLE_COLS: tl.constexpr = tl.constexpr(9)
@@ -156,25 +150,30 @@ def _block_map(device: torch.device, sizes: tuple[int, ...]) -> tuple[Tensor, Te
 def fused_step(optimizers: Sequence[AdamBf16]) -> None:
     """``opt.step(); opt.zero_grad(set_to_none=True)`` for every optimizer, as ONE kernel launch over all their parameters
     with a gradient (the per-parameter launches and the optimizers' Python step wrappers cost host time every step).
-    Bit-identical to the per-optimizer steps: same arithmetic, same per-parameter seeds and offsets."""
+    Bit-identical to the per-optimizer steps: same arithmetic, same per-parameter seeds and offsets. Parameters shared
+    between optimizers or spread over devices step one optimizer after the other (the first one clears a shared
+    parameter's gradient, so the next skips it); every parameter is checked before any state advances."""
+    todo: list[tuple[AdamBf16, dict, Tensor]] = [
+        (opt, group, p) for opt in optimizers for group in opt.param_groups for p in group["params"] if p.grad is not None
+    ]
+    for _, _, p in todo:
+        if p.dtype != torch.float32 or not p.is_contiguous() or not p.grad.is_contiguous():  # pyrefly: ignore[missing-attribute]
+            raise ValueError("AdamBf16 needs contiguous float32 parameters and gradients")
+    if len({id(p) for _, _, p in todo}) != len(todo) or len({p.device for _, _, p in todo}) > 1:
+        for opt in optimizers:
+            opt.step()
+            opt.zero_grad(set_to_none=True)
+        return
     rows: list[tuple[int, ...]] = []
     scalars: list[tuple[float, ...]] = []
-    sizes: list[int] = []
-    device: torch.device | None = None
-    for opt in optimizers:
-        for group in opt.param_groups:
-            beta1, beta2 = group["betas"]
-            for p in group["params"]:
-                if p.grad is None:
-                    continue
-                if p.dtype != torch.float32 or not p.is_contiguous() or not p.grad.is_contiguous():
-                    raise ValueError("AdamBf16 needs contiguous float32 parameters and gradients")
-                state, step_size, bc2_sqrt, seed = opt._advance(p, group)
-                rows.append((p.data_ptr(), p.grad.data_ptr(), state["exp_avg"].data_ptr(), state["exp_avg_sq"].data_ptr(), p.numel(), seed))
-                scalars.append((beta1, beta2, group["eps"], step_size, bc2_sqrt, 0.0))
-                sizes.append(p.numel())
-                device = p.device
-    if device is not None:
+    for opt, group, p in todo:
+        beta1, beta2 = group["betas"]
+        state, step_size, bc2_sqrt, seed = opt._advance(p, group)
+        rows.append((p.data_ptr(), p.grad.data_ptr(), state["exp_avg"].data_ptr(), state["exp_avg_sq"].data_ptr(), p.numel(), seed))  # pyrefly: ignore[missing-attribute]
+        scalars.append((beta1, beta2, group["eps"], step_size, bc2_sqrt, 0.0))
+    if todo:
+        device: torch.device = todo[0][2].device
+        sizes: list[int] = [p.numel() for _, _, p in todo]
         table: np.ndarray = np.zeros((len(rows), int(TABLE_COLS)), dtype=np.int64)
         table[:, :6] = rows
         table[:, 6:].view(np.float32)[:] = scalars
