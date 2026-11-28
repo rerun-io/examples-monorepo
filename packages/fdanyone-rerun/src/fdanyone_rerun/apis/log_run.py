@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from open4dgs.trigs_adapter import require_fused_ssim
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from fdanyone_rerun.assets import model_dir
@@ -31,6 +32,8 @@ class Config:
 
 def main(config: Config) -> RunMetadata:
     """Log the run (and, with ``--train``, its 4D person)."""
+    if config.train:
+        require_fused_ssim()  # before logging and mattes, which would otherwise run first
     output_dir: Path = config.output_dir.expanduser().resolve()
     recording = config.rr_config.rec_stream
     metadata: RunMetadata = log_run(output_dir, config.video, model_dir(), recording)

@@ -20,7 +20,10 @@ Prior maps and their catalog layer ``moge2_prior``: ``open4dgs.prior_layer``.
 """
 
 import dataclasses
+import functools
 import math
+import os
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -119,10 +122,12 @@ def decode_normals(coded: UInt8[Tensor, "... 3"]) -> tuple[Float32[Tensor, "... 
     return torch.where(valid[..., None], normals, torch.zeros_like(normals)), valid
 
 
-def camera_normals(depth: Float32[Tensor, "h w"], K: Float32[Tensor, "3 3"]) -> Float32[Tensor, "h w 3"]:
-    """Camera-frame normals of a z-depth map (gsplat ``depth_to_normal`` with an identity pose; 1-px zero border)."""
-    eye: Tensor = torch.eye(4, dtype=depth.dtype, device=depth.device)
-    return depth_to_normal(depth[None, :, :, None], eye[None], K.to(depth)[None])[0]
+def camera_normals(depth: Float32[Tensor, "*b h w"], K: Float32[Tensor, "*b 3 3"]) -> Float32[Tensor, "*b h w 3"]:
+    """Camera-frame normals of z-depth maps (gsplat ``depth_to_normal`` with an identity pose; 1-px zero border)."""
+    if depth.ndim == 2:
+        return camera_normals(depth[None], K[None])[0]
+    eye: Tensor = torch.eye(4, dtype=depth.dtype, device=depth.device).expand(*depth.shape[:-2], 4, 4)
+    return depth_to_normal(depth[..., None], eye, K.to(depth))
 
 
 def pearson_loss(depth: Float32[Tensor, " n"], prior: Float32[Tensor, " n"]) -> Float32[Tensor, ""]:
@@ -168,54 +173,79 @@ def static_valid(mask: Float32[Tensor, "h w"], prior_depth: Float32[Tensor, "h w
 
 
 def _masked_mean(values: Tensor, weight: Tensor, count: Tensor) -> Tensor:
-    return (values * weight).sum() / count.clamp(min=1.0)
+    """Mean of ``values`` over each image's (last two axes) weighted pixels."""
+    return (values * weight).sum(dim=(-2, -1)) / count.clamp(min=1.0)
 
 
 @dataclass(frozen=True, slots=True)
 class PriorTerms:
-    """Unweighted terms of one camera at one frame; 0-d tensors, so nothing here waits for the GPU."""
+    """Unweighted terms of one camera at one frame (0-d) or of a camera batch (one per camera); tensors, so nothing here
+    waits for the GPU."""
 
-    depth: Float32[Tensor, ""]
-    normal: Float32[Tensor, ""]
-    valid_fraction: Float32[Tensor, ""]
+    depth: Float32[Tensor, "*b"]
+    normal: Float32[Tensor, "*b"]
+    valid_fraction: Float32[Tensor, "*b"]
     """Share of the image in P (0 when the camera was skipped)."""
 
 
 def prior_terms(
-    depth: Float32[Tensor, "h w"],
-    alpha: Float32[Tensor, "h w"],
-    static: Bool[Tensor, "h w"],
-    prior_depth: Float32[Tensor, "h w"],
-    prior_normals: Float32[Tensor, "h w 3"],
-    K: Float32[Tensor, "3 3"],
+    depth: Float32[Tensor, "*b h w"],
+    alpha: Float32[Tensor, "*b h w"],
+    static: Bool[Tensor, "*b h w"],
+    prior_depth: Float32[Tensor, "*b h w"],
+    prior_normals: Float32[Tensor, "*b h w 3"],
+    K: Float32[Tensor, "*b 3 3"],
     step: int,
     config: PriorConfig,
 ) -> PriorTerms:
-    """Both prior terms of one rendered camera (differentiable in ``depth``), ``static`` from ``static_valid``.
+    """Both prior terms of one rendered camera, or of a batch of same-size cameras (leading axis ``b``, terms per camera),
+    differentiable in ``depth``, ``static`` from ``static_valid``.
 
     Masked means over P instead of boolean indexing and a tensor skip flag instead of ``if``: no GPU->CPU sync. A
     skipped camera (P below ``min_valid_fraction``) or an empty normal set gives a differentiable zero.
     """
+    return _gated_terms(depth, alpha, static, prior_depth, prior_normals, K, step >= config.contradiction_start_step, config)
+
+
+def _gated_terms(
+    depth: Tensor, alpha: Tensor, static: Tensor, prior_depth: Tensor, prior_normals: Tensor, K: Tensor, gated: bool, config: PriorConfig
+) -> PriorTerms:
+    """``prior_terms`` with the step reduced to whether the contradiction gate is on: the compiled graph sees a bool (two
+    graphs), not the step (an int dynamo would specialise on, one recompile per step)."""
     weight: Tensor = (static & (alpha.detach() > config.alpha_min)).float()
-    count: Tensor = weight.sum()
-    fraction: Tensor = count / weight.numel()
+    count: Tensor = weight.sum(dim=(-2, -1))
+    fraction: Tensor = count / (weight.shape[-2] * weight.shape[-1])
     keep: Tensor = (fraction >= config.min_valid_fraction).float()
-    d: Tensor = depth - _masked_mean(depth, weight, count)
-    p: Tensor = prior_depth - _masked_mean(prior_depth, weight, count)
+    d: Tensor = depth - _masked_mean(depth, weight, count)[..., None, None]
+    p: Tensor = prior_depth - _masked_mean(prior_depth, weight, count)[..., None, None]
     cov: Tensor = _masked_mean(d * p, weight, count)
     var: Tensor = (_masked_mean(d.pow(2), weight, count) * _masked_mean(p.pow(2), weight, count)).clamp(min=1e-12).sqrt()
     l_depth: Tensor = 1.0 - cov / var
     rendered_normals: Tensor = camera_normals(depth, K)
     normal_weight: Tensor = weight
-    if step >= config.contradiction_start_step:
+    if gated:
         cos: Tensor = (rendered_normals.detach() * prior_normals).sum(dim=-1)
         normal_weight = weight * (cos >= math.cos(math.radians(config.contradiction_deg))).float()
     one_minus_cos: Tensor = (1.0 - (rendered_normals * prior_normals).sum(dim=-1)).clamp(min=0.0)
     if config.normal_form == "spirula":
         half: Tensor = one_minus_cos / 2.0
         one_minus_cos = half + (half + 1e-8).sqrt()
-    l_normal: Tensor = _masked_mean(one_minus_cos, normal_weight, normal_weight.sum())
+    l_normal: Tensor = _masked_mean(one_minus_cos, normal_weight, normal_weight.sum(dim=(-2, -1)))
     return PriorTerms(depth=l_depth * keep, normal=l_normal * keep, valid_fraction=fraction * keep)
+
+
+@functools.cache
+def _compiled_gated_terms() -> Callable[..., PriorTerms]:
+    return torch.compile(_gated_terms, dynamic=None)  # the camera count turns dynamic at its first change
+
+
+def _batch_terms(depth: Tensor) -> Callable[..., PriorTerms]:
+    """``_gated_terms`` for a camera batch: compiled on CUDA (one graph per image size and gate branch; ~0.35 ms of
+    launches instead of ~1 ms eager for six 352x640 cameras, forward + backward), eager elsewhere and while beartype
+    checks the process (``PIXI_DEV_MODE``: it cannot check dynamo's fake tensors against jaxtyping hints)."""
+    if not depth.is_cuda or os.environ.get("PIXI_DEV_MODE") == "1":
+        return _gated_terms
+    return _compiled_gated_terms()
 
 
 @dataclass
@@ -274,34 +304,61 @@ class MonoPriorLoss:
         self._step = -1
 
     def __call__(self, *, step: int, frame_idx: int, cam_idx: int, colors: Tensor, alphas: Tensor, info: dict, cameras: object) -> Tensor:
+        """The per-camera hook: ``batch`` of one camera (zero for a camera without maps). A strided step
+        (TrainConfig.pixel_stride) renders a pixel subset: the maps are scored at the same pixels and intrinsics."""
         del colors, cameras
+        depth: Tensor = info["render_depth"][..., 0]
+        if cam_idx not in self.positions:
+            return depth.sum() * 0.0
+        loss: Tensor | None = self.batch(
+            step=step, frame_idx=frame_idx, cams=(cam_idx,), draws=(1,), depth=depth, alphas=alphas[..., 0], offset=info.get("stride_offset")
+        )
+        assert loss is not None  # the camera has maps
+        return loss[0]
+
+    def batch(
+        self,
+        *,
+        step: int,
+        frame_idx: int,
+        cams: Sequence[int],
+        draws: Sequence[int],
+        depth: Float32[Tensor, "b h w"],
+        alphas: Float32[Tensor, "b h w"],
+        offset: tuple[int, int] | None,
+    ) -> Float32[Tensor, " b"] | None:
+        """The prior losses of the same-size cameras ``cams`` of one step at once (``depth``/``alphas`` their renders, one
+        per camera; ``draws`` how many times the step drew each, which weights its logged terms as the per-draw loop
+        would): one loss per camera, or None when a camera has no maps (the caller then calls per camera)."""
+        if any(c not in self.positions for c in cams):
+            return None
         if step != self._step:
             self._flush()
             self._step = step
-        depth_rendered: Tensor = info["render_depth"][0, ..., 0]
         weight: float = self.config.ramp(step)
         logged: bool = step % self.config.log_every == 0
-        if cam_idx not in self.positions or (weight == 0.0 and not logged):
-            return depth_rendered.sum() * 0.0
-        if self._device != depth_rendered.device:
-            self._to_device(depth_rendered.device)
+        if weight == 0.0 and not logged:
+            return depth.sum(dim=(-2, -1)) * 0.0
+        if self._device != depth.device:
+            self._to_device(depth.device)
         assert self._K is not None
-        slot: int = self.positions.index(cam_idx)
-        normals, static, prior_depth, K = (
-            self._normals[slot][frame_idx],
-            self._static[slot][frame_idx],
-            self._depth[slot][frame_idx],
-            self._K[cam_idx],
-        )
-        # A strided step (TrainConfig.pixel_stride) renders a pixel subset: score the maps at the same pixels and intrinsics.
-        offset: tuple[int, int] | None = info.get("stride_offset")
+        slots: list[int] = [self.positions.index(c) for c in cams]
+        Ks: Tensor = self._K if offset is None else self._K_strided[offset]
+        maps: list[tuple[Tensor, Tensor, Tensor]] = [
+            (self._normals[s][frame_idx], self._static[s][frame_idx], self._depth[s][frame_idx]) for s in slots
+        ]
         if offset is not None:
-            normals, static, prior_depth = (strided_pixels(x, offset) for x in (normals, static, prior_depth))
-            K = self._K_strided[offset][cam_idx]
+            maps = [(strided_pixels(n, offset), strided_pixels(v, offset), strided_pixels(d, offset)) for n, v, d in maps]
+        normals, static, prior_depth = (torch.stack(parts) for parts in zip(*maps, strict=True))
         prior_normals, _ = decode_normals(normals)
-        terms: PriorTerms = prior_terms(depth_rendered, alphas[0, ..., 0], static, prior_depth.float(), prior_normals, K, step, self.config)
+        K: Tensor = torch.stack([Ks[c] for c in cams])
+        terms: PriorTerms = _batch_terms(depth)(
+            depth, alphas, static, prior_depth.float(), prior_normals, K, step >= self.config.contradiction_start_step, self.config
+        )
         if logged:
             kept: Tensor = (terms.valid_fraction > 0).float()
-            row: Tensor = torch.stack([terms.depth.detach(), terms.normal.detach(), terms.valid_fraction, kept])
+            per_cam: Tensor = torch.stack([terms.depth.detach(), terms.normal.detach(), terms.valid_fraction, kept])
+            # Python-int weights: a host tensor of the draws would be a blocking copy.
+            row: Tensor = sum((k * per_cam[:, j] for j, k in enumerate(draws)), torch.zeros_like(per_cam[:, 0]))
             self._sums = row if self._sums is None else self._sums + row
         return weight * (self.config.lambda_depth * terms.depth + self.config.lambda_normal * terms.normal)

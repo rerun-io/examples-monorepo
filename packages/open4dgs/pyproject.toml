@@ -46,11 +46,19 @@ ignore_names = [
     "_camera_group", "add_loss",
     # open4dgs.trigs_trainer: overrides that TRiGS's _render_inputs calls
     "_slice_rowwise_params",
+    # open4dgs.trigs_trainer.CameraLosses: read by the recipe's camera-losses seam (patch 0010) in the TRiGS train loop
+    "rgb_sum", "alpha_outside_sum", "alpha_mask_sum", "gamma_sum", "cam_idx_log", "render_log", "camera_losses",
+    # recipe seam (patch 0012)
+    "_optimizer_step", "_core_regularisers",
+    # tests: run by name in a clean child interpreter (the compiled-graph parity checks)
+    "check_compiled_render_inputs_on_cuda", "check_compiled_core_regularisers_on_cuda",
     # open4dgs.birefnet_trt: the torchvision::deform_conv2d argument list (positional, kept whole) and the engine
     # builder that fdanyone-rerun's fdanyone-birefnet-engine task calls
     "build_engine",
     # open4dgs.birefnet_trt: imported for a dotted annotation string, which beartype resolves by importing the module
     "trtkit",
+    # open4dgs.trigs_trainer: an assignment to torch._inductor.config (a framework setting, not dead)
+    "quiesce_async_compile_pool",
 ]
 
 [tool.pytest.ini_options]

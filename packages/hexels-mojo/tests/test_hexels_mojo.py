@@ -104,6 +104,16 @@ def test_fused_ssim_valid_padding_crops_the_map() -> None:
     assert img1.grad is not None and img1.grad.shape == img1.shape
 
 
+def test_fused_ssim_per_image_is_each_images_fused_ssim() -> None:
+    pytest.importorskip("hexels_mojo._hexels_mojo", reason="build the Mojo kernels first (hexels-mojo-build)")
+    from hexels_mojo.fused_ssim import fused_ssim, fused_ssim_per_image
+
+    img1, img2 = torch.rand(3, 3, 40, 50, device="cuda"), torch.rand(3, 3, 40, 50, device="cuda")
+    per_image = fused_ssim_per_image(img1, img2, padding="valid")
+    assert per_image.shape == (3,)
+    torch.testing.assert_close(per_image, torch.stack([fused_ssim(img1[i : i + 1], img2[i : i + 1], padding="valid") for i in range(3)]))
+
+
 @pytest.mark.parametrize("entity", entities("/distcuda2"))
 def test_dist_cuda2(entity: str) -> None:
     pytest.importorskip("hexels_mojo._hexels_mojo", reason="build the Mojo kernels first (hexels-mojo-build)")
