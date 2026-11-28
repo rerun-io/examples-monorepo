@@ -18,6 +18,17 @@ pixi run -e canonical-viewer --frozen rerun-canonical -- recording.rrd       # a
 pixi run -e canonical-viewer-web --frozen canonical-viewer-web-build <stock-0.44.0-dir> <out-dir>
 ```
 
+`viewer-probe` (`rust/crates/viewer-probe`, built by `canonical-viewer-build`) times complete headless frames of the
+same viewer and reports the gsplat extension's counters. It needs a recording with one 3D view, and writes its camera
+path and a PNG beside the JSON report:
+
+```bash
+packages/canonical-viewer/target/release/viewer-probe recording.rrd --out frames.json --window-size 1920x1080
+```
+
+`--storage-binding-limit N` exercises the capacity fallback, and `--require-motion` rejects held views. The timing
+protocol: `packages/gsplat-rust-renderer/docs/architecture.md`.
+
 `rust/crates/web` is the web entry point: it installs the same hooks before JavaScript constructs the stock `WebHandle`,
 so pages keep the stock `@rerun-io/web-viewer` API. gsplat's page flags still work: `force_no_subgroups=1`,
 `profile=1`. The web build is 17.8 MB brotli (stock 0.44.0: 10.6 MB); depth video adds 0.3 MB of it.

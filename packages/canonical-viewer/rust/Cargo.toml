@@ -3,7 +3,7 @@
 # never reach the extension crates' home workspaces.
 [workspace]
 resolver = "3"
-members = ["crates/app", "crates/extension", "crates/web"]
+members = ["crates/app", "crates/extension", "crates/viewer-probe", "crates/web"]
 
 [workspace.package]
 version = "0.1.0"
@@ -15,10 +15,19 @@ canonical-viewer-extension = { path = "crates/extension" }
 # Extension crates, beside their domain packages. Without default features: their own apps stay out of this build.
 depth-video-viewer = { path = "../../depth-video-viewer", default-features = false }
 gsplat-viewer = { path = "../../gsplat-rust-renderer/crates/gsplat-viewer", default-features = false }
+# viewer-probe's report types: the camera spec and the source provenance.
+gsplat-core = { path = "../../gsplat-rust-renderer/crates/gsplat-core", features = ["serde", "provenance"] }
 anyhow = "1.0"
+clap = { version = "4", features = ["derive"] }
+# viewer-probe's headless harness; patched below to the egui revision of Rerun 0.44.0.
+egui_kittest = { version = "0.37.0", features = ["wgpu", "eframe"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.50", features = ["macros", "rt-multi-thread"] }
 # Rerun 0.44.0 is not on crates.io: its release tag, redirected below to the patched checkout.
 re_build_info = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
 re_error = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
+re_grpc_server = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
 re_log = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
 re_memory = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
 re_video = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
@@ -220,6 +229,7 @@ re_build_info = { path = "../target/patch/rerun-0.44.0/crates/utils/re_build_inf
 re_byte_size = { path = "../target/patch/rerun-0.44.0/crates/utils/re_byte_size" }
 re_error = { path = "../target/patch/rerun-0.44.0/crates/utils/re_error" }
 re_format = { path = "../target/patch/rerun-0.44.0/crates/utils/re_format" }
+re_grpc_server = { path = "../target/patch/rerun-0.44.0/crates/data_flow/re_grpc_server" }
 re_log = { path = "../target/patch/rerun-0.44.0/crates/utils/re_log" }
 re_memory = { path = "../target/patch/rerun-0.44.0/crates/utils/re_memory" }
 re_tracing = { path = "../target/patch/rerun-0.44.0/crates/utils/re_tracing" }

@@ -32,7 +32,9 @@ pub fn install_hooks() {
     }
 }
 
-fn request_device_needs(
+/// Rerun's device descriptor with every extension's device needs applied: the device every canonical viewer requests
+/// (also viewer-probe's headless harness, which builds its own wgpu setup).
+pub fn request_device_needs(
     adapter: &wgpu::Adapter,
     rerun_descriptor: wgpu::DeviceDescriptor<'static>,
 ) -> wgpu::DeviceDescriptor<'static> {

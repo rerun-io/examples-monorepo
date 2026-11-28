@@ -1,4 +1,4 @@
-"""One orbit per scene, derived from its capture cameras and shared by the viewer, `gsplat probe` and `gsplat speed`."""
+"""One orbit per scene, derived from its capture cameras and shared by the viewer, `viewer-probe` and `gsplat speed`."""
 
 from dataclasses import dataclass
 from pathlib import Path

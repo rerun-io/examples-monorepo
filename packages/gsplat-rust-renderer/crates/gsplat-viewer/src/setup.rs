@@ -4,8 +4,7 @@
 use crate::visualizer;
 use canonical_viewer_extension::Extension;
 use re_sdk_types::View as _;
-use re_viewer::external::{eframe, re_renderer, re_sdk_types, re_viewer_context};
-use std::sync::Arc;
+use re_viewer::external::{re_sdk_types, re_viewer_context};
 
 /// The gsplat extension of the canonical viewer: the compute splat renderer, its visualizers and its device needs.
 pub const EXTENSION: Extension = Extension {
@@ -53,47 +52,6 @@ pub fn register_compute_splats(viewer: &mut re_viewer::App) -> anyhow::Result<()
         register_splat_system,
     )?;
     Ok(())
-}
-
-/// Request compute capabilities when the adapter supports the splat kernels.
-pub fn compute_wgpu_setup() -> eframe::egui_wgpu::WgpuSetup {
-    eframe::egui_wgpu::WgpuSetup::CreateNew(eframe::egui_wgpu::WgpuSetupCreateNew {
-        instance_descriptor: re_renderer::device_caps::instance_descriptor(None),
-        native_adapter_selector: Some(Arc::new(move |adapters, surface| {
-            re_renderer::device_caps::select_adapter(
-                adapters,
-                re_renderer::device_caps::instance_descriptor(None).backends,
-                surface,
-            )
-            // egui_wgpu's adapter selector returns `Result<_, String>`.
-            .map_err(|err| err.to_string())
-        })),
-        device_descriptor: compute_device_descriptor(gsplat_core::subgroups_allowed()),
-        ..eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle()
-    })
-}
-
-/// Rerun's device descriptor plus the limits the splat kernels need, when the adapter has them.
-///
-/// `SUBGROUP` is requested when the adapter offers it and `allow_subgroups` is set; without it the
-/// splat kernels take their workgroup-memory variant (the web viewer's `?force_no_subgroups=1`).
-pub fn compute_device_descriptor(
-    allow_subgroups: bool,
-) -> Arc<dyn Fn(&wgpu::Adapter) -> wgpu::DeviceDescriptor<'static> + Send + Sync> {
-    Arc::new(move |adapter| {
-        let mut descriptor =
-            re_renderer::device_caps::DeviceCaps::from_adapter_without_validation(adapter)
-                .device_descriptor();
-        descriptor.label = Some("Gaussian compute viewer");
-        descriptor.memory_hints = wgpu::MemoryHints::MemoryUsage;
-        apply_compute_needs(
-            &adapter.features(),
-            &adapter.limits(),
-            allow_subgroups,
-            &mut descriptor,
-        );
-        descriptor
-    })
 }
 
 /// Add the splat kernels' features and limits to `descriptor`, out of what the adapter offers.
