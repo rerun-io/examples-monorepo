@@ -3,7 +3,6 @@
 use crate::camera::*;
 use crate::common::project;
 use glam::Mat4;
-use glam::Vec3;
 use gsplat_core::CameraModel;
 
 #[test]
