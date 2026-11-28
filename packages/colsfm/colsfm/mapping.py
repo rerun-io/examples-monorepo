@@ -209,13 +209,17 @@ __all__ = [
     "RoundStats",
     "bundle_adjustment_options",
     "ceres_polish_options",
+    "default_gauge_frame_id",
     "filter_degenerate_points",
     "filter_projection_failures",
+    "global_ba_config",
     "load_correspondences",
     "pixel_error_schedule",
     "projection_sanity_bound_px",
+    "refinement_options",
     "registered_image_ids",
     "run_mapping",
+    "select_backend",
     "solve_bundle_adjustment",
     "triangulator_options",
 ]
@@ -371,17 +375,7 @@ def bundle_adjustment_options(ba_config: BundleAdjustmentConfig, options: Mappin
         KeyError: When the configuration names a loss pycolmap does not have.
         ValueError: When a CASPAR plan without the rig capability meets `optimize_extrinsics`.
     """
-    ba_options: pycolmap.BundleAdjustmentOptions = pycolmap.BundleAdjustmentOptions()
-    ba_options.refine_focal_length = options.refine_focal_length
-    ba_options.refine_principal_point = False
-    # CASPAR takes the focal only together with the distortion block; Ceres follows, so both backends refine one model.
-    ba_options.refine_extra_params = options.refine_focal_length
-    ba_options.refine_rig_from_world = True
-    ba_options.refine_sensor_from_rig = options.optimize_extrinsics
-    ba_options.refine_points3D = True
-    # pycolmap defaults this to True, which prints a full Ceres report per round.
-    ba_options.print_summary = False
-
+    ba_options: pycolmap.BundleAdjustmentOptions = refinement_options(options.refine_focal_length, options.optimize_extrinsics)
     num_threads: int = ba_config.num_threads if options.num_threads is None else options.num_threads
     ba_options.ceres.loss_function_type = LOSS_FUNCTION_BY_NAME[ba_config.loss_type]
     ba_options.ceres.loss_function_scale = ba_config.reprojection_error_standard_deviation * ba_config.loss_function_scale
@@ -399,20 +393,57 @@ def bundle_adjustment_options(ba_config: BundleAdjustmentConfig, options: Mappin
     solver_options.minimizer_progress_to_stdout = False
 
     plan: BaExecutionPlan = options.ba_plan
-    ba_options.backend = BUNDLE_ADJUSTMENT_BACKEND[plan.backend]
-    # `mojo` reads the same CASPAR block (`colsfm.ba_mojo.mojo_options`), so both GPU backends take it.
-    if plan.backend != "ceres":
-        # The plan keeps a solve that frees `sensor_from_rig` on the GPU only when the probe refined a rig
-        # (`resolve_backend`); a plan that breaks that would hold a requested rig refinement fixed without a word.
-        if options.optimize_extrinsics and not plan.capability.refines_sensor_from_rig:
-            raise ValueError(f"a {plan.backend} plan cannot free sensor_from_rig on this build: {EXTRINSICS_FALLBACK_REASON}")
-        # `-1` is COLMAP's own pick, which is what `use_gpu` off means everywhere else
-        # in this dataclass. Both were measured to solve on the 5090.
-        ba_options.caspar.gpu_index = "0" if options.use_gpu else "-1"
-        # The reduced camera system (recipes/colmap-src) is off in COLMAP's defaults; `--caspar-option` may turn it off.
-        ba_options.caspar.reduced_camera_system = True
-        apply_caspar_options(ba_options.caspar, plan.caspar_options)
+    # The plan keeps a solve that frees `sensor_from_rig` on the GPU only when the probe refined a rig
+    # (`resolve_backend`); a plan that breaks that would hold a requested rig refinement fixed without a word.
+    if plan.backend != "ceres" and options.optimize_extrinsics and not plan.capability.refines_sensor_from_rig:
+        raise ValueError(f"a {plan.backend} plan cannot free sensor_from_rig on this build: {EXTRINSICS_FALLBACK_REASON}")
+    select_backend(ba_options, plan.backend, use_gpu=options.use_gpu, caspar_options=plan.caspar_options)
     return ba_options
+
+
+def refinement_options(refine_intrinsics: bool, refine_sensor_from_rig: bool) -> pycolmap.BundleAdjustmentOptions:
+    """Which parameter blocks every colsfm bundle adjustment frees, on pycolmap's defaults otherwise.
+
+    Shared with the standalone benchmarks (`colsfm.apis.caspar_baseline`), so they time the solve the mapper runs.
+
+    Args:
+        refine_intrinsics: Free the focal length and the distortion block together.
+        refine_sensor_from_rig: Free the non-reference `sensor_from_rig`.
+
+    Returns:
+        Options on pycolmap's default (Ceres) backend.
+    """
+    ba_options: pycolmap.BundleAdjustmentOptions = pycolmap.BundleAdjustmentOptions()
+    ba_options.refine_focal_length = refine_intrinsics
+    ba_options.refine_principal_point = False
+    # CASPAR takes the focal only together with the distortion block; Ceres follows, so both backends refine one model.
+    ba_options.refine_extra_params = refine_intrinsics
+    ba_options.refine_rig_from_world = True
+    ba_options.refine_sensor_from_rig = refine_sensor_from_rig
+    ba_options.refine_points3D = True
+    # pycolmap defaults this to True, which prints a full Ceres report per round.
+    ba_options.print_summary = False
+    return ba_options
+
+
+def select_backend(ba_options: pycolmap.BundleAdjustmentOptions, backend: BaBackend, *, use_gpu: bool, caspar_options: CasparOptions) -> None:
+    """Point the options at a backend and, on a GPU backend, set the CASPAR block both GPU solvers read.
+
+    Args:
+        ba_options: Modified in place.
+        backend: The solver.
+        use_gpu: GPU 0, or COLMAP's own pick.
+        caspar_options: Validated `--caspar-option` overrides.
+    """
+    ba_options.backend = BUNDLE_ADJUSTMENT_BACKEND[backend]
+    if backend == "ceres":
+        return
+    # `-1` is COLMAP's own pick, which is what `use_gpu` off means everywhere else
+    # in this dataclass. Both were measured to solve on the 5090.
+    ba_options.caspar.gpu_index = "0" if use_gpu else "-1"
+    # The reduced camera system (recipes/colmap-src) is off in COLMAP's defaults; `--caspar-option` may turn it off.
+    ba_options.caspar.reduced_camera_system = True
+    apply_caspar_options(ba_options.caspar, caspar_options)
 
 
 def ceres_polish_options(ba_config: BundleAdjustmentConfig, options: MappingOptions) -> pycolmap.BundleAdjustmentOptions:
@@ -502,6 +533,42 @@ class BundleAdjustmentSolve:
         return self.num_diverged + self.num_past_pole
 
 
+def default_gauge_frame_id(reconstruction: pycolmap.Reconstruction) -> int:
+    """cuSFM's constant keyframe (spec §6.3): the frame owning the lowest registered image id.
+
+    Args:
+        reconstruction: A model with at least one registered image.
+
+    Returns:
+        The frame id.
+    """
+    return reconstruction.image(min(registered_image_ids(reconstruction))).frame_id
+
+
+def global_ba_config(
+    reconstruction: pycolmap.Reconstruction, gauge_frame_id: int, fixed_camera_params_id: int | None = None
+) -> pycolmap.BundleAdjustmentConfig:
+    """Every registered image, one constant rig frame, and optionally one camera's extrinsic held: the global solve's config.
+
+    Args:
+        reconstruction: The model.
+        gauge_frame_id: Frame whose `rig_from_world` stays constant.
+        fixed_camera_params_id: Camera whose `sensor_from_rig` stays constant, or None; ignored for the reference sensor.
+
+    Returns:
+        The config.
+    """
+    config: pycolmap.BundleAdjustmentConfig = pycolmap.BundleAdjustmentConfig()
+    for image_id in registered_image_ids(reconstruction):
+        config.add_image(image_id)
+    config.set_constant_rig_from_world_pose(gauge_frame_id)
+    if fixed_camera_params_id is not None:
+        fixed_sensor: pycolmap.sensor_t = camera_sensor_id(fixed_camera_params_id)
+        if not reconstruction.rig(RIG_ID).is_ref_sensor(fixed_sensor):
+            config.set_constant_sensor_from_rig_pose(fixed_sensor)
+    return config
+
+
 def solve_bundle_adjustment(
     reconstruction: pycolmap.Reconstruction,
     ba_options: pycolmap.BundleAdjustmentOptions,
@@ -554,14 +621,7 @@ def solve_bundle_adjustment(
     # Before the adjuster is built: Ceres evaluates every observation it is handed, and one at a rational pole is
     # infinite there or within a finite-difference step of it.
     num_past_pole_before: int = filter_past_rational_pole(observation_manager, reconstruction)
-    config: pycolmap.BundleAdjustmentConfig = pycolmap.BundleAdjustmentConfig()
-    for image_id in registered_image_ids(reconstruction):
-        config.add_image(image_id)
-    config.set_constant_rig_from_world_pose(gauge_frame_id)
-    if fixed_camera_params_id is not None:
-        fixed_sensor: pycolmap.sensor_t = camera_sensor_id(fixed_camera_params_id)
-        if not reconstruction.rig(RIG_ID).is_ref_sensor(fixed_sensor):
-            config.set_constant_sensor_from_rig_pose(fixed_sensor)
+    config: pycolmap.BundleAdjustmentConfig = global_ba_config(reconstruction, gauge_frame_id, fixed_camera_params_id)
     summary: pycolmap.BundleAdjustmentSummary
     seconds: float
     if (backend or backend_name(ba_options)) == "mojo":
@@ -781,7 +841,7 @@ def run_mapping(
     image_ids: list[int] = registered_image_ids(reconstruction)
     if not image_ids:
         raise ValueError("The reconstruction has no registered frames to map")
-    resolved_gauge_frame_id: int = reconstruction.image(min(image_ids)).frame_id if gauge_frame_id is None else gauge_frame_id
+    resolved_gauge_frame_id: int = default_gauge_frame_id(reconstruction) if gauge_frame_id is None else gauge_frame_id
     fixed_camera_params_id: int | None = None
     if resolved_options.optimize_extrinsics:
         _check_extrinsics_are_refinable(model)

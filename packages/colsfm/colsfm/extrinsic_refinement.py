@@ -126,7 +126,7 @@ from colsfm.mapping import (
     MappingOptions,
     MappingResult,
     bundle_adjustment_options,
-    registered_image_ids,
+    default_gauge_frame_id,
     run_mapping,
     solve_bundle_adjustment,
 )
@@ -361,7 +361,7 @@ def refine_extrinsics(
     base_options: MappingOptions = dataclasses.replace(mapping_options, optimize_extrinsics=False, ba_plan=mapping.ba_plan)
     # The same gauge `run_mapping` picked for the mapping pass: the frame owning the
     # lowest registered image id, which is cuSFM's own choice (spec §6.3).
-    gauge_frame_id: int = reconstruction.image(min(registered_image_ids(reconstruction))).frame_id
+    gauge_frame_id: int = default_gauge_frame_id(reconstruction)
     ba_options: pycolmap.BundleAdjustmentOptions = bundle_adjustment_options(ba_config, base_options)
     # Which image saw which point, and so which cameras co-observed, changes only when a
     # solve's post-solve guards remove observations; both are rebuilt then, and only then.

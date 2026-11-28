@@ -204,10 +204,12 @@ def test_refined_principal_point_is_rejected() -> None:
 
 def test_compare_solutions_of_identical_and_moved_models() -> None:
     from colsfm.ba_compare import compare_solutions
+    from colsfm.ba_mojo import problem_from_reconstruction
 
     a = _tiny(num_cameras=2)
     residuals, _ = _pinhole_residuals(a)
-    same = compare_solutions(a, pycolmap.Reconstruction(a), _config(a), _options())
+    bridged = problem_from_reconstruction(a, _config(a), _options())
+    same = compare_solutions(a, pycolmap.Reconstruction(a), bridged)
     assert np.isclose(same.cost_a, 0.5 * np.sum(residuals**2), rtol=1e-9) and same.cost_relative_difference == 0.0
     assert same.rotation_difference_max_deg < 1e-6 and same.center_difference_max == 0.0 and same.point_difference_max == 0.0
     assert same.registered_images_a == same.registered_images_b == 12
@@ -217,7 +219,7 @@ def test_compare_solutions_of_identical_and_moved_models() -> None:
     pose = frame.rig_from_world
     assert pose is not None
     frame.rig_from_world = pycolmap.Rigid3d(pycolmap.Rotation3d(np.deg2rad([0.0, 1.0, 0.0])) * pose.rotation, np.asarray(pose.translation))
-    moved = compare_solutions(a, b, _config(a), _options())
+    moved = compare_solutions(a, b, bridged)
     assert np.isclose(moved.rotation_difference_max_deg, 1.0, atol=1e-6) and moved.rotation_difference_median_deg < 1e-6
     assert moved.cost_b > moved.cost_a and moved.reprojection_relative_difference > 0
 
@@ -240,7 +242,7 @@ def test_solve_with_mojo_matches_caspar_on_a_tiny_pinhole_model() -> None:
         pytest.skip("caspar_mojo.solver.solve is not written yet")
     from colsfm.apis.caspar_baseline import caspar_options
     from colsfm.ba_compare import compare_solutions
-    from colsfm.ba_mojo import solve_with_mojo
+    from colsfm.ba_mojo import problem_from_reconstruction, solve_with_mojo
 
     start = _tiny()
     caspar, mojo = pycolmap.Reconstruction(start), pycolmap.Reconstruction(start)
@@ -250,6 +252,6 @@ def test_solve_with_mojo_matches_caspar_on_a_tiny_pinhole_model() -> None:
         summary = solve_with_mojo(mojo, _config(mojo), options)
     except (RuntimeError, ValueError) as error:
         pytest.skip(f"no GPU answered: {error}")
-    comparison = compare_solutions(caspar, mojo, _config(start), options)
+    comparison = compare_solutions(caspar, mojo, problem_from_reconstruction(start, _config(start), options))
     assert summary.num_residuals > 0
     assert abs(comparison.reprojection_relative_difference) < 0.02 and abs(comparison.cost_relative_difference) < 0.02

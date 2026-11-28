@@ -15,14 +15,15 @@ import re
 import statistics
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import IO, Final
 
 import pycolmap
 
-from colsfm.ba_backend import BUNDLE_ADJUSTMENT_BACKEND
+from colsfm.mapping import default_gauge_frame_id, global_ba_config, refinement_options, select_backend
 
 _PROGRESS_LINE: Final[re.Pattern[str]] = re.compile(
     r"solver_iter:\s*(\d+)\s+pcg_iter:\s*(\d+)\s+score_current:\s*(\S+)\s+score_best:\s*(\S+).*dt_tot:\s*(\S+)"
@@ -82,7 +83,7 @@ class CasparBaseline:
 
 
 def caspar_options(refine_intrinsics: bool = False, refine_sensor_from_rig: bool = False) -> pycolmap.BundleAdjustmentOptions:
-    """colsfm's CASPAR options (`colsfm.mapping.bundle_adjustment_options`) for a standalone solve.
+    """The mapper's CASPAR options (`colsfm.mapping.bundle_adjustment_options` without the Ceres settings) on GPU 0.
 
     Args:
         refine_intrinsics: Refine focal length and distortion together.
@@ -91,22 +92,13 @@ def caspar_options(refine_intrinsics: bool = False, refine_sensor_from_rig: bool
     Returns:
         Options on the CASPAR backend, reduced camera system on, GPU 0.
     """
-    options = pycolmap.BundleAdjustmentOptions()
-    options.backend = BUNDLE_ADJUSTMENT_BACKEND["caspar"]
-    options.print_summary = False
-    options.refine_focal_length = refine_intrinsics
-    options.refine_extra_params = refine_intrinsics
-    options.refine_principal_point = False
-    options.refine_rig_from_world = True
-    options.refine_sensor_from_rig = refine_sensor_from_rig
-    options.refine_points3D = True
-    options.caspar.gpu_index = "0"
-    options.caspar.reduced_camera_system = True
+    options: pycolmap.BundleAdjustmentOptions = refinement_options(refine_intrinsics, refine_sensor_from_rig)
+    select_backend(options, "caspar", use_gpu=True, caspar_options={})
     return options
 
 
 def gauge_config(reconstruction: pycolmap.Reconstruction) -> pycolmap.BundleAdjustmentConfig:
-    """Every registered image, the smallest registered frame constant: colsfm's global solve.
+    """The mapper's global solve: every registered image, its gauge frame constant (`colsfm.mapping.default_gauge_frame_id`).
 
     Args:
         reconstruction: The model.
@@ -114,31 +106,39 @@ def gauge_config(reconstruction: pycolmap.Reconstruction) -> pycolmap.BundleAdju
     Returns:
         The config.
     """
-    config = pycolmap.BundleAdjustmentConfig()
-    for image_id in sorted(reconstruction.reg_image_ids()):
-        config.add_image(image_id)
-    config.set_constant_rig_from_world_pose(min(reconstruction.reg_frame_ids()))
-    return config
+    return global_ba_config(reconstruction, default_gauge_frame_id(reconstruction))
 
 
-def _captured_output(run: Callable[[], None]) -> str:
-    """Run `run` with the process's stdout and stderr (C's included) sent to a file, and return what was written."""
+@contextmanager
+def _native_output_into(sink: IO[bytes]) -> Iterator[None]:
+    """COLMAP's VLOG(2) on and the process's stdout and stderr (C's included) sent to `sink` for the block.
+
+    Each restoration is registered before the change it undoes, so a failure anywhere in the block or in the setup
+    leaves logging and both descriptors as they were.
+    """
     libc = ctypes.CDLL(None)
-    saved: list[int] = [os.dup(1), os.dup(2)]
-    with tempfile.TemporaryFile(mode="w+b") as sink:
+    with ExitStack() as restore:
+        saved_logging: tuple[int, bool] = (pycolmap.logging.verbose_level, pycolmap.logging.logtostderr)
+        restore.callback(setattr, pycolmap.logging, "logtostderr", saved_logging[1])
+        restore.callback(setattr, pycolmap.logging, "verbose_level", saved_logging[0])
+        pycolmap.logging.verbose_level = 2
+        pycolmap.logging.logtostderr = True
         libc.fflush(None)
-        os.dup2(sink.fileno(), 1)
-        os.dup2(sink.fileno(), 2)
-        try:
-            run()
-        finally:
-            libc.fflush(None)
-            os.dup2(saved[0], 1)
-            os.dup2(saved[1], 2)
-            for fd in saved:
-                os.close(fd)
-        sink.seek(0)
-        return sink.read().decode(errors="replace")
+        for fd in (1, 2):
+            saved: int = os.dup(fd)
+            restore.callback(os.close, saved)
+            restore.callback(os.dup2, saved, fd)
+            os.dup2(sink.fileno(), fd)
+        # Last registered, so it runs first: what the solver buffered lands in the sink, not on the restored terminal.
+        restore.callback(libc.fflush, None)
+        yield
+
+
+def _timed_solve(adjuster: pycolmap.BundleAdjuster) -> tuple[pycolmap.BundleAdjustmentSummary, float]:
+    """`adjuster.solve()` and its wall time: the one definition of a timed CASPAR solve in the benchmarks."""
+    started: float = time.perf_counter()
+    summary: pycolmap.BundleAdjustmentSummary = adjuster.solve()
+    return summary, time.perf_counter() - started
 
 
 def parse_trace(text: str) -> CasparTrace:
@@ -181,22 +181,13 @@ def traced_solve(
     Returns:
         The trace and the wall time of `adjuster.solve()`.
     """
-    saved: tuple[int, bool] = (pycolmap.logging.verbose_level, pycolmap.logging.logtostderr)
-    pycolmap.logging.verbose_level = 2
-    pycolmap.logging.logtostderr = True
-    adjuster: pycolmap.BundleAdjuster = pycolmap.create_default_bundle_adjuster(options, config, reconstruction)
-    seconds: list[float] = []
-
-    def run() -> None:
-        started: float = time.perf_counter()
-        adjuster.solve()
-        seconds.append(time.perf_counter() - started)
-
-    try:
-        text: str = _captured_output(run)
-    finally:
-        pycolmap.logging.verbose_level, pycolmap.logging.logtostderr = saved
-    return parse_trace(text), seconds[0]
+    with tempfile.TemporaryFile(mode="w+b") as sink:
+        with _native_output_into(sink):
+            adjuster: pycolmap.BundleAdjuster = pycolmap.create_default_bundle_adjuster(options, config, reconstruction)
+            _, seconds = _timed_solve(adjuster)
+        sink.seek(0)
+        text: str = sink.read().decode(errors="replace")
+    return parse_trace(text), seconds
 
 
 def trace_caspar(reconstruction: pycolmap.Reconstruction, options: pycolmap.BundleAdjustmentOptions) -> CasparTrace:
@@ -228,24 +219,21 @@ def run_baseline(model_dir: Path, runs: int, options: pycolmap.BundleAdjustmentO
     original.update_point_3d_errors()
     before: float = original.compute_mean_reprojection_error()
     seconds: list[float] = []
-    summary: pycolmap.BundleAdjustmentSummary | None = None
-    after: float = float("nan")
+    summaries: list[pycolmap.BundleAdjustmentSummary] = []
+    copy: pycolmap.Reconstruction = original
     for _ in range(runs):
         copy = pycolmap.Reconstruction(original)
-        adjuster: pycolmap.BundleAdjuster = pycolmap.create_default_bundle_adjuster(options, gauge_config(copy), copy)
-        started: float = time.perf_counter()
-        summary = adjuster.solve()
-        seconds.append(time.perf_counter() - started)
-        copy.update_point_3d_errors()
-        after = copy.compute_mean_reprojection_error()
-    assert summary is not None
+        summary, elapsed = _timed_solve(pycolmap.create_default_bundle_adjuster(options, gauge_config(copy), copy))
+        summaries.append(summary)
+        seconds.append(elapsed)
+    copy.update_point_3d_errors()
     return CasparBaseline(
         model_dir=model_dir,
         seconds=tuple(seconds),
-        num_residuals=summary.num_residuals,
-        termination=summary.termination_type.name,
+        num_residuals=summaries[-1].num_residuals,
+        termination=summaries[-1].termination_type.name,
         reprojection_before_px=before,
-        reprojection_after_px=after,
+        reprojection_after_px=copy.compute_mean_reprojection_error(),
         trace=trace_caspar(original, options),
     )
 
@@ -261,6 +249,10 @@ class Config:
     refine_sensor_from_rig: bool = False
     gpu_label: str = ""
     """Names the GPU in the printed table row."""
+
+    def __post_init__(self) -> None:
+        if self.runs < 1:
+            raise ValueError(f"runs must be at least 1, got {self.runs}")
 
 
 def main(config: Config) -> None:

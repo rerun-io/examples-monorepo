@@ -34,6 +34,9 @@ from colsfm.ba_mojo import BridgedProblem, apply_result, mojo_options, problem_f
 
 PACKAGE_DIR: Path = Path(__file__).resolve().parents[2]
 
+PARITY_BAR: float = 0.02
+"""PLAN §5: final cost and reprojection error within 2 % of CASPAR's, with the same registered images."""
+
 
 @serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
@@ -41,7 +44,7 @@ class AccuracyRow:
     """One model and option set solved by both solvers from the same start."""
 
     row: str
-    """Model directory name plus the refinements and the perturbation."""
+    """Display name: model directory name plus the refinements and the perturbation (`_row_name`)."""
     gpu: str
     commit: str
     """`git rev-parse HEAD` of the checkout that ran (it carries caspar-mojo/port merged)."""
@@ -50,12 +53,12 @@ class AccuracyRow:
     reprojection_before_px: float
     reprojection_caspar_px: float
     reprojection_mojo_px: float
-    reprojection_relative_difference: float
-    """(Mojo - CASPAR) / CASPAR: the 2 % bar."""
+    reprojection_relative_difference: float | None
+    """(Mojo - CASPAR) / CASPAR: the 2 % bar; None when CASPAR's is zero and Mojo's is not."""
     cost_before: float
     cost_caspar: float
     cost_mojo: float
-    cost_relative_difference: float
+    cost_relative_difference: float | None
     rotation_difference_max_deg: float
     rotation_difference_median_deg: float
     center_difference_max: float
@@ -81,6 +84,43 @@ class AccuracyRow:
     """`BaResult.solve_seconds`: the solver loop on the GPU."""
     mojo_call_seconds: list[float]
     """`BaResult.total_seconds`: the `caspar_mojo.solver.solve` call, host arrays in and out."""
+    model_dir: str = ""
+    """Resolved model directory; empty in rows written before it was recorded, which `case_key` keys by `row`."""
+    refine_intrinsics: bool = False
+    refine_sensor_from_rig: bool = False
+    perturb_seed: int | None = None
+    perturb_translation: float | None = None
+    """None when the start was not perturbed."""
+    perturb_rotation_deg: float | None = None
+    perturb_point: float | None = None
+
+    def case_key(self) -> tuple[object, ...]:
+        """What makes two rows the same experiment: the GPU and every resolved input; a later row of the same case replaces it.
+
+        Returns:
+            The key; rows from before the inputs were recorded are keyed by their display name.
+        """
+        if not self.model_dir:
+            return (self.gpu, self.row)
+        return (
+            self.gpu,
+            self.model_dir,
+            self.refine_intrinsics,
+            self.refine_sensor_from_rig,
+            self.perturb_seed,
+            self.perturb_translation,
+            self.perturb_rotation_deg,
+            self.perturb_point,
+        )
+
+    def within_parity(self) -> bool:
+        """Whether the row meets the 2 % bar on cost and reprojection and registers the same images (`PARITY_BAR`).
+
+        Returns:
+            False when a relative difference is undefined (`colsfm.ba_compare.relative_difference`).
+        """
+        relatives: tuple[float | None, float | None] = (self.reprojection_relative_difference, self.cost_relative_difference)
+        return all(r is not None and abs(r) <= PARITY_BAR for r in relatives) and self.registered_images_caspar == self.registered_images_mojo
 
 
 @serde(deny_unknown_fields=True)
@@ -123,13 +163,23 @@ def perturb(
         reconstruction.point3D(point3D_id).xyz = np.asarray(reconstruction.point3D(point3D_id).xyz) + point * direction / np.linalg.norm(direction)
 
 
-def _row_name(model_dir: Path, refine_intrinsics: bool, refine_sensor_from_rig: bool, perturb_seed: int | None) -> str:
+def _row_name(config: Config) -> str:
+    perturbation: str = ""
+    if config.perturb_seed is not None:
+        magnitudes: tuple[float, float, float] = (config.perturb_translation, config.perturb_rotation_deg, config.perturb_point)
+        # The default magnitudes keep the short name of the rows measured before the magnitudes were recorded.
+        shown: str = "" if magnitudes == DEFAULT_PERTURBATION else f"; {magnitudes[0]:g} m, {magnitudes[1]:g} deg, {magnitudes[2]:g} m"
+        perturbation = f" perturbed(seed {config.perturb_seed}{shown})"
     return (
-        model_dir.name
-        + (" +intrinsics" if refine_intrinsics else "")
-        + (" +rig" if refine_sensor_from_rig else "")
-        + (f" perturbed(seed {perturb_seed})" if perturb_seed is not None else "")
+        config.model_dir.name
+        + (" +intrinsics" if config.refine_intrinsics else "")
+        + (" +rig" if config.refine_sensor_from_rig else "")
+        + perturbation
     )
+
+
+DEFAULT_PERTURBATION: tuple[float, float, float] = (0.02, 0.1, 0.02)
+"""`Config`'s translation, rotation (deg) and point magnitudes."""
 
 
 @dataclass(frozen=True)
@@ -141,15 +191,19 @@ class Config:
     gpu: str
     """Names the GPU in the row."""
     output: Path
-    """JSON table (`AccuracyTable`) the row is added to; a row with the same name and GPU is replaced."""
+    """JSON table (`AccuracyTable`) the row is added to; a row of the same case (`AccuracyRow.case_key`) is replaced."""
     runs: int = 5
     refine_intrinsics: bool = False
     refine_sensor_from_rig: bool = False
     perturb_seed: int | None = None
     """Perturb the start (`perturb`) with this seed; None solves the model as stored."""
-    perturb_translation: float = 0.02
-    perturb_rotation_deg: float = 0.1
-    perturb_point: float = 0.02
+    perturb_translation: float = DEFAULT_PERTURBATION[0]
+    perturb_rotation_deg: float = DEFAULT_PERTURBATION[1]
+    perturb_point: float = DEFAULT_PERTURBATION[2]
+
+    def __post_init__(self) -> None:
+        if self.runs < 1:
+            raise ValueError(f"runs must be at least 1, got {self.runs}")
 
 
 def measure(config: Config) -> AccuracyRow:
@@ -176,19 +230,29 @@ def measure(config: Config) -> AccuracyRow:
     cost_before: float = problem_cost(start, bridged)
     traces: list[CasparTrace] = []
     call_seconds: list[float] = []
-    mojo_results: list[BaResult] = []
+    mojo_lm: list[int] = []
+    mojo_pcg: list[int] = []
+    mojo_solve: list[float] = []
+    mojo_call: list[float] = []
     caspar = start
+    result: BaResult | None = None
     for _ in range(config.runs):
         caspar = pycolmap.Reconstruction(start)
         trace, seconds = traced_solve(caspar, gauge_config(caspar), options)
         traces.append(trace)
         call_seconds.append(seconds)
-        mojo_results.append(solve(bridged.problem, mojo_options(options)))
-    apply_result(mojo, bridged, mojo_results[-1])
-    comparison: SolveComparison = compare_solutions(caspar, mojo, ba_config, options)
+        result = solve(bridged.problem, mojo_options(options))
+        mojo_lm.append(result.iterations)
+        mojo_pcg.append(result.pcg_iterations)
+        mojo_solve.append(result.solve_seconds)
+        mojo_call.append(result.total_seconds)
+    assert result is not None, "Config refuses runs < 1"
+    apply_result(mojo, bridged, result)
+    comparison: SolveComparison = compare_solutions(caspar, mojo, bridged)
     head: str = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=PACKAGE_DIR, capture_output=True, text=True, check=True).stdout.strip()
+    perturbed: bool = config.perturb_seed is not None
     return AccuracyRow(
-        row=_row_name(config.model_dir, config.refine_intrinsics, config.refine_sensor_from_rig, config.perturb_seed),
+        row=_row_name(config),
         gpu=config.gpu,
         commit=head,
         date=datetime.datetime.now().isoformat(timespec="minutes"),
@@ -214,11 +278,18 @@ def measure(config: Config) -> AccuracyRow:
         caspar_exit=traces[-1].exit_reason,
         caspar_solver_seconds=[t.solver_seconds for t in traces],
         caspar_solve_call_seconds=call_seconds,
-        mojo_lm_trials=[r.iterations for r in mojo_results],
-        mojo_pcg_iterations=[r.pcg_iterations for r in mojo_results],
-        mojo_exit=mojo_results[-1].exit_reason,
-        mojo_solve_seconds=[r.solve_seconds for r in mojo_results],
-        mojo_call_seconds=[r.total_seconds for r in mojo_results],
+        mojo_lm_trials=mojo_lm,
+        mojo_pcg_iterations=mojo_pcg,
+        mojo_exit=result.exit_reason,
+        mojo_solve_seconds=mojo_solve,
+        mojo_call_seconds=mojo_call,
+        model_dir=str(config.model_dir.resolve()),
+        refine_intrinsics=config.refine_intrinsics,
+        refine_sensor_from_rig=config.refine_sensor_from_rig,
+        perturb_seed=config.perturb_seed,
+        perturb_translation=config.perturb_translation if perturbed else None,
+        perturb_rotation_deg=config.perturb_rotation_deg if perturbed else None,
+        perturb_point=config.perturb_point if perturbed else None,
     )
 
 
@@ -235,22 +306,26 @@ def read_table(path: Path) -> AccuracyTable:
 
 
 def merged(table: AccuracyTable, rows: list[AccuracyRow]) -> AccuracyTable:
-    """The table with `rows` added, each replacing a row of the same name and GPU.
+    """The table with `rows` added, each replacing a row of the same case (`AccuracyRow.case_key`).
 
     Args:
         table: Existing rows.
         rows: New rows.
 
     Returns:
-        The merged table, sorted by GPU then row.
+        The merged table, sorted by GPU then display name.
     """
-    keyed: dict[tuple[str, str], AccuracyRow] = {(r.gpu, r.row): r for r in table.rows}
-    keyed.update({(r.gpu, r.row): r for r in rows})
-    return AccuracyTable(rows=[keyed[key] for key in sorted(keyed)])
+    keyed: dict[tuple[object, ...], AccuracyRow] = {r.case_key(): r for r in table.rows}
+    keyed.update({r.case_key(): r for r in rows})
+    return AccuracyTable(rows=sorted(keyed.values(), key=lambda r: (r.gpu, r.row)))
 
 
 def _times(seconds: list[float]) -> str:
     return f"{min(seconds):.3f} / {statistics.median(seconds):.3f}"
+
+
+def _relative(value: float | None) -> str:
+    return "undefined" if value is None else f"{value:+.2e}"
 
 
 def _counts(lm: list[int], pcg: list[int]) -> str:
@@ -270,16 +345,17 @@ def markdown(table: AccuracyTable) -> str:
         "# CASPAR vs Mojo from the identical start",
         "",
         "rel = (Mojo - CASPAR) / CASPAR. Differences of centres and points are over the scene extent. "
-        "Times: best / median of the runs, seconds. LM/PCG per run in run order (the last run is the compared solution).",
+        "Times: best / median of the runs, seconds. LM/PCG per run in run order (the last run is the compared solution). "
+        "A bold >2 % marks a row outside the bar: cost or reprojection more than 2 % apart, or different registered images.",
         "",
         "| row | GPU | obs | px before | px CASPAR | px Mojo | px rel | cost rel | rot max / med deg | centre max / med | point med | reg C / M |",
         "|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in table.rows:
-        flag: str = " **>2 %**" if abs(r.reprojection_relative_difference) > 0.02 else ""
+        flag: str = "" if r.within_parity() else " **>2 %**"
         lines.append(
             f"| {r.row} | {r.gpu} | {r.observations:,} | {r.reprojection_before_px:.4f} | {r.reprojection_caspar_px:.6f} | {r.reprojection_mojo_px:.6f} | "
-            f"{r.reprojection_relative_difference:+.2e}{flag} | {r.cost_relative_difference:+.2e} | {r.rotation_difference_max_deg:.2e} / {r.rotation_difference_median_deg:.2e} | "
+            f"{_relative(r.reprojection_relative_difference)}{flag} | {_relative(r.cost_relative_difference)} | {r.rotation_difference_max_deg:.2e} / {r.rotation_difference_median_deg:.2e} | "
             f"{r.center_difference_max:.2e} / {r.center_difference_median:.2e} | {r.point_difference_median:.2e} | {r.registered_images_caspar} / {r.registered_images_mojo} |"
         )
     lines += [
