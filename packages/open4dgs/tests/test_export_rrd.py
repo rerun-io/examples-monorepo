@@ -7,6 +7,7 @@ The contracts themselves are pinned in packages/gsplat-rust-renderer/tests.
 """
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pytest
@@ -16,6 +17,9 @@ pytest.importorskip("asog", reason="asog-src is in the open4dgs environments onl
 pytest.importorskip("trigs", reason="open4dgs-trigs-src is in the open4dgs environments only")
 
 from test_asog import FPS, NUM_FRAMES, synthetic_params  # noqa: E402
+
+if TYPE_CHECKING:
+    from open4dgs.apis.export import ExportFormat
 
 FRAME_START: int = 100
 
@@ -132,12 +136,30 @@ def test_per_frame_export_is_the_old_default(tmp_path: Path, capsys: pytest.Capt
     run: Path = tiny_run(tmp_path)
     summary = main(Config(run=run, register=False, format="per-frame"))
 
-    # Pinned from the per-frame default before --format asog existed (34adf304e): same entities, one row per frame.
+    # Pinned from the per-frame default before --format asog existed (34adf304e): same entities, one row per frame, plus
+    # the layer's run record.
     assert entity_rows(run / "splats.rrd") == {
         "/__properties": 1,
+        "/__properties/run_splats": 1,
         "/world": 1,
         "/world/cameras/train/rig_00/cam_00": 1,
         "/world/person/splats": NUM_FRAMES,
     }
     assert (summary["frames"], summary["gaussians_min"], summary["gaussians_max"], summary["rows"]) == (30, 478, 512, 512)
     assert STOCK_VIEWER_LINE not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(("format", "file", "layer"), [("asog", "asog.rrd", "asog"), ("per-frame", "splats.rrd", "splats")])
+def test_each_export_layer_carries_the_run_record_of_this_export(tmp_path: Path, format: "ExportFormat", file: str, layer: str) -> None:
+    """A flow runner reads the layer's record from the catalog to tell this export from an older one."""
+    from rerun.chunk import RrdReader
+
+    from open4dgs.apis.export import Config, main
+
+    run: Path = tiny_run(tmp_path)
+    main(Config(run=run, register=False, format=format))
+    cells: dict[str, object] = {}
+    for chunk in RrdReader(run / file).stream().filter(content=f"/__properties/run_{layer}", is_static=True).to_chunks():
+        batch = chunk.to_record_batch()
+        cells |= {name: batch.column(name).to_pylist()[0] for name in batch.schema.names if not name.startswith("rerun.")}
+    assert (cells["layer"], cells["segment"]) == ([layer], [run.name]) and str(run) in str(cells["config"]), "the export's own Config"
