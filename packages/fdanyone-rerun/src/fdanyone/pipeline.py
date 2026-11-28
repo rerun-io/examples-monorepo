@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 from threading import Event
 
@@ -146,8 +147,11 @@ def _run_worker(
     worker_python: str,
     cancel: Event | None,
     started: subprocess.Popen | None = None,
+    while_running: Callable[[], None] | None = None,
 ) -> None:
     """Run one worker entry point, as a subprocess or (inline) in this process.
+
+    ``while_running`` is called once the worker has its request (inline: before it runs), in this thread.
 
     The subprocess is this call's own (``started``, from ``_start_worker``, or a new one): when ``cancel`` is set (or
     this thread raises), it gets SIGTERM, then SIGKILL after 10 s, and it is reaped before the error propagates
@@ -169,6 +173,8 @@ def _run_worker(
                     child.stdin.close()
                 except BrokenPipeError:
                     pass  # the worker already exited: its return code below is the error
+            if while_running is not None:
+                while_running()
             while child.poll() is None:
                 if stop.wait(0.25):
                     raise RunCancelled(f"stopped during {module}")
@@ -188,6 +194,8 @@ def _run_worker(
 
     import torch
 
+    if while_running is not None:
+        while_running()
     importlib.import_module(module).main(str(request_path))
     gc.collect()
     if torch.cuda.is_available():
@@ -240,6 +248,7 @@ def _build_conditioning(
     worker_python: str,
     cancel: Event | None,
     started: subprocess.Popen | None = None,
+    while_running: Callable[[], None] | None = None,
 ):
     from fdanyone.skeleton.pipeline import Conditioning
 
@@ -259,7 +268,7 @@ def _build_conditioning(
         },
     )
     try:
-        _run_worker("fdanyone.skeleton.worker", request_path, worker_python, cancel, started)
+        _run_worker("fdanyone.skeleton.worker", request_path, worker_python, cancel, started, while_running)
     finally:
         request_path.unlink(missing_ok=True)
     return Conditioning.load(output_dir)
@@ -408,7 +417,6 @@ def run_pipeline(
             from fdanyone.model.inference import generate_views
             from fdanyone.output_writer import write_output
 
-            PROGRESS.info("Building foreground masks and skeletons", extra={"fraction": 0.30})
             if len(devices) == 1:
                 # Conditioning runs in a worker process; load the DiT and VAE here meanwhile.
                 from fdanyone.model.loader import GenerationPrefetch
@@ -433,6 +441,8 @@ def run_pipeline(
                 worker_python=worker_python,
                 cancel=cancel,
                 started=skeleton_worker,
+                # The stage's observers (the body rebuild and its Rerun log, ~2 s) run while the worker works.
+                while_running=lambda: PROGRESS.info("Building foreground masks and skeletons", extra={"fraction": 0.30}),
             )
             if conditioning.num_frames != len(clip.frames) or (
                 conditioning.fps_num,

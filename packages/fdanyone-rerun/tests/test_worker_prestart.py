@@ -78,3 +78,33 @@ def test_a_started_worker_that_fails_still_raises(waiter: Path) -> None:
     child = pipeline._start_worker("failer", sys.executable)
     with pytest.raises(subprocess.CalledProcessError):
         pipeline._run_worker("failer", waiter / "request.json", sys.executable, threading.Event(), child)
+
+
+def test_while_running_runs_once_the_worker_has_its_request(waiter: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WAITER_SLEEP", "1")
+    child = pipeline._start_worker("waiter", sys.executable)
+    request: Path = waiter / "request.json"
+    seen: list[bool] = []
+
+    def while_running() -> None:
+        deadline: float = time.monotonic() + 20.0
+        while not (request.is_file() and request.read_text()) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        seen.append(child is not None and child.poll() is None)  # the worker has the request and is still running
+
+    pipeline._run_worker("waiter", request, sys.executable, threading.Event(), child, while_running)
+    assert seen == [True]
+
+
+def test_an_error_in_while_running_stops_the_worker(waiter: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WAITER_SLEEP", "60")
+    child = pipeline._start_worker("waiter", sys.executable)
+    assert child is not None
+
+    def while_running() -> None:
+        raise RunCancelled("stopped in an observer")
+
+    started: float = time.perf_counter()
+    with pytest.raises(RunCancelled):
+        pipeline._run_worker("waiter", waiter / "request.json", sys.executable, threading.Event(), child, while_running)
+    assert child.returncode is not None and time.perf_counter() - started < 15.0
