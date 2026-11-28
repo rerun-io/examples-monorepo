@@ -123,6 +123,17 @@ def test_dit_swap_covers_exactly_the_interior_projections() -> None:
     assert dit.get_buffer("blocks.3.ffn.2.weight").dtype is FP8_DTYPE
 
 
+def test_dit_swap_with_fp8_edges_covers_every_block() -> None:
+    from fdanyone.vendor.diffsynth.models.wan_video_dit import FourDAnyoneDiT
+
+    with torch.device("meta"):
+        dit = FourDAnyoneDiT(attention_backend="sdpa").to(torch.bfloat16)
+    report = quantize_dit_fp8_w8a8(dit, fp8_edges=True)
+    assert report.module_count == 30 * 14
+    assert isinstance(dit.get_submodule("blocks.0.self_attn.q"), Fp8RowwiseLinear)
+    assert isinstance(dit.get_submodule("blocks.29.ffn.2"), Fp8RowwiseLinear)
+
+
 def test_prepare_on_device_keeps_fp8_weights_after_acceleration() -> None:
     from fdanyone.model.loader import Denoiser
 

@@ -40,14 +40,14 @@ def projection_kind(fqn: str) -> tuple[int, str] | None:
     return int(match.group("block")), fqn.split(".")[2]
 
 
-def is_quantizable_dit_projection(fqn: str) -> bool:
-    """Return whether an FQN is an attention or FFN projection inside ``QUANTIZED_BLOCK_RANGE``."""
+def is_quantizable_dit_projection(fqn: str, block_range: tuple[int, int] = QUANTIZED_BLOCK_RANGE) -> bool:
+    """Return whether an FQN is an attention or FFN projection inside the inclusive ``block_range``."""
 
     match: re.Match[str] | None = _DIT_PROJECTION_PATTERN.fullmatch(fqn)
     if match is None:
         return False
     block_index: int = int(match.group("block"))
-    first_block, last_block = QUANTIZED_BLOCK_RANGE
+    first_block, last_block = block_range
     return first_block <= block_index <= last_block
 
 
@@ -148,15 +148,22 @@ def project_fp8_shared(
 
 
 def quantize_dit_fp8_w8a8(
-    dit: torch.nn.Module, *, nvfp4_projections: tuple[str, ...] | None = None, nvfp4_blocks: tuple[int, int] | None = None
+    dit: torch.nn.Module,
+    *,
+    nvfp4_projections: tuple[str, ...] | None = None,
+    nvfp4_blocks: tuple[int, int] | None = None,
+    fp8_edges: bool | None = None,
 ) -> FP8W8A8Report:
-    """Replace the approved projections with chunked row-wise FP8 W8A8 linears; groups in ``nvfp4_projections``
-    inside the inclusive ``nvfp4_blocks`` range get NVFP4 W4A4 linears instead (defaults: ``InferenceConfig``)."""
+    """Replace the approved projections (blocks 3-26, every block with ``fp8_edges``) with chunked row-wise FP8 W8A8
+    linears; groups in ``nvfp4_projections`` inside the inclusive ``nvfp4_blocks`` range get NVFP4 W4A4 linears
+    instead (defaults: ``InferenceConfig``)."""
 
     from fdanyone.config import INFERENCE
 
     nvfp4_projections = INFERENCE.dit_nvfp4_projections if nvfp4_projections is None else nvfp4_projections
     nvfp4_blocks = INFERENCE.dit_nvfp4_blocks if nvfp4_blocks is None else nvfp4_blocks
+    fp8_edges = INFERENCE.dit_fp8_edges if fp8_edges is None else fp8_edges
+    block_range = (0, 10**6) if fp8_edges else QUANTIZED_BLOCK_RANGE
 
     unknown = set(nvfp4_projections) - set(NVFP4_KINDS)
     if unknown:
@@ -165,7 +172,7 @@ def quantize_dit_fp8_w8a8(
     selected: list[str] = [
         fqn
         for fqn, module in dit.named_modules()
-        if isinstance(module, torch.nn.Linear) and is_quantizable_dit_projection(fqn)
+        if isinstance(module, torch.nn.Linear) and is_quantizable_dit_projection(fqn, block_range)
     ]
     nvfp4_count = 0
     for fqn in selected:

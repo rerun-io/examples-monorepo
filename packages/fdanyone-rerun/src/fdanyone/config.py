@@ -39,6 +39,10 @@ class InferenceConfig:
     modulation (written frame-major for the multiview attention), gated residuals, and one FP8 row quantization per
     projection input (GELU folded into the FFN's). Same BF16 rounding points as the eager code; the FP8 path is
     bit-exact. RTX 5090, six-view group: one forward 20 -> 11.6 s. ``FDANYONE_DIT_FUSED=0`` runs the eager code."""
+    dit_fp8_edges: bool = os.environ.get("FDANYONE_DIT_FP8_EDGES", "0") == "1"
+    """Also run the boundary blocks 0-2 and 27-29 (BF16 otherwise) with FP8 W8A8 projections. Off by default;
+    ``FDANYONE_DIT_FP8_EDGES=1`` turns it on. RTX 5090 step-0 capture: about 0.6 s per forward faster, predicted velocity
+    0.068 rel L2 from the shipped FP8 policy and 0.079 from BF16 (the shipped policy: 0.084 from BF16)."""
     dit_nvfp4_projections: tuple[str, ...] = tuple(filter(None, os.environ.get("FDANYONE_DIT_NVFP4", "").split(",")))
     """Projection groups of the FP8 blocks that run NVFP4 W4A4 instead (cuBLASLt block-scaled FP4 GEMM, Triton
     activation quantization): any of ``ffn``, ``self_attn``, ``self_attn_mvs``, ``cross_attn``. Off by default;
