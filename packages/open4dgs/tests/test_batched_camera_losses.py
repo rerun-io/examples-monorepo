@@ -127,7 +127,7 @@ def _one_step(
     def counted(self, *x, **k):
         out = camera_losses(self, *x, **k) if batched else None
         calls["batched"] += out is not None
-        calls["most_draws"] = max(calls.get("most_draws", 0), *self._draws[0])
+        calls["most_draws"] = max(calls.get("most_draws", 0), *self._batches[0].draws)
         return out
 
     monkeypatch.setattr(SharedTimeGroup, "camera_losses", counted)

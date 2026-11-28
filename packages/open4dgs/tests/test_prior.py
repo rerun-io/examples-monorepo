@@ -457,8 +457,8 @@ def test_batched_terms_equal_per_camera_terms(step: int) -> None:
 
 @pytest.mark.parametrize("offset", [None, (1, 0)])
 def test_hook_batch_equals_per_camera_calls(offset: tuple[int, int] | None) -> None:
-    """MonoPriorLoss.batch: the per-camera hook calls of one step at once (values, gradients, logged rows); a camera
-    without maps sends the caller back to the per-camera calls."""
+    """MonoPriorLoss.batch: the per-camera hook calls of one step at once (values, gradients, logged rows, a camera drawn
+    twice logged twice); a camera without maps sends the caller back to the per-camera calls."""
     from open4dgs.prior import ClipPriors, MonoPriorLoss, PriorConfig, encode_normals
 
     spheres = [_sphere(torch.tensor([0.1 * i, 0.0, 3.0]), 0.8) for i in range(2)]
@@ -485,11 +485,13 @@ def test_hook_batch_equals_per_camera_calls(offset: tuple[int, int] | None) -> N
             for i, c in enumerate((2, 0))
         ]
     )
+    # Camera 2 drawn a second time: the per-draw loop logs it twice.
+    per_cam(step=4, frame_idx=1, cam_idx=2, colors=torch.zeros(1), alphas=alphas[0][None, ..., None], info=info[0], cameras=None)
     per_cam.finish()
 
     batch = MonoPriorLoss(config, priors, masks, (2, 0), K)
     batched = rendered.clone().requires_grad_(True)
-    new = batch.batch(step=4, frame_idx=1, cams=[2, 0], depth=batched, alphas=alphas, offset=offset)
+    new = batch.batch(step=4, frame_idx=1, cams=[2, 0], draws=[2, 1], depth=batched, alphas=alphas, offset=offset)
     batch.finish()
     assert new is not None
     torch.testing.assert_close(new, ref, rtol=1e-5, atol=1e-7)
@@ -499,6 +501,8 @@ def test_hook_batch_equals_per_camera_calls(offset: tuple[int, int] | None) -> N
     torch.testing.assert_close(batched.grad, single.grad, rtol=1e-4, atol=1e-8)
     assert batch.rows.keys() == per_cam.rows.keys()
     for name, rows in per_cam.rows.items():
+        assert [v for _, v in batch.rows[name]] == pytest.approx([v for _, v in rows], rel=1e-5), name
+    for name, rows in per_cam.rows.items():
         assert [s for s, _ in batch.rows[name]] == [s for s, _ in rows], name
         assert [v for _, v in batch.rows[name]] == pytest.approx([v for _, v in rows], rel=1e-5), name
-    assert batch.batch(step=5, frame_idx=1, cams=[2, 1], depth=batched, alphas=alphas, offset=offset) is None
+    assert batch.batch(step=5, frame_idx=1, cams=[2, 1], draws=[1, 1], depth=batched, alphas=alphas, offset=offset) is None

@@ -54,3 +54,11 @@ def fused_ssim(
     """Mean SSIM of img1 against img2; `padding="valid"` drops the 5-pixel border of the map before the mean."""
     ssim_map: Tensor = FusedSSIMMap.apply(C1, C2, img1, img2, padding, train)  # pyrefly: ignore[bad-assignment]
     return ssim_map.mean()
+
+
+def fused_ssim_per_image(
+    img1: Float32[Tensor, "b c h w"], img2: Float32[Tensor, "b c h w"], padding: Literal["same", "valid"] = "same", train: bool = True
+) -> Float32[Tensor, " b"]:
+    """``fused_ssim`` of each image of the batch (one launch for all ``b``) instead of their mean."""
+    ssim_map: Tensor = FusedSSIMMap.apply(C1, C2, img1, img2, padding, train)  # pyrefly: ignore[bad-assignment]
+    return ssim_map.mean(dim=(1, 2, 3))
