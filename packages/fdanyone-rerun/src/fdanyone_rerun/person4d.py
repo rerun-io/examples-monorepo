@@ -75,6 +75,10 @@ class PersonConfig:
     """MoGe-2 depth + normal prior on every view (MoGe-2 runs first, 16-22 images/s; open4dgs' default); off = no extra estimator model."""
     prior_config: PriorConfig = field(default_factory=PriorConfig)
     """Prior weights and schedule (fractions of ``train.steps``)."""
+    prior_resolution_level: int = 9
+    """MoGe-2 detail level 0-9 of the prior maps (9: 3,600 tokens). RTX 5090, six 704x1280 views: level 9 takes 18.0 s,
+    6 (2,800 tokens) 13.8 s, 3 (2,000 tokens) 9.3 s; against level 9, level 6 moves the normals 2.9 deg on average
+    (affine-aligned depth p95 11 %). A lower level has no engine until one is built on that machine (else torch)."""
     asog: AsogSettings = field(default_factory=AsogSettings)
     """ASOG encoder preset (``band-safe``: held-out PSNR within 1 % of the uncompressed model)."""
     samples_per_person: int = 8_000
@@ -89,6 +93,8 @@ class PersonConfig:
     def __post_init__(self) -> None:
         if self.report_every < 1:
             raise ValueError(f"report_every must be at least 1 (it is also the trainer's log_every), got {self.report_every}")
+        if not 0 <= self.prior_resolution_level <= 9:
+            raise ValueError(f"prior_resolution_level must be within [0, 9], got {self.prior_resolution_level}")
 
     def with_steps(self, steps: int) -> "PersonConfig":
         """This config with ``train.steps`` replaced and the schedule spanning them (the app's step presets)."""
@@ -210,9 +216,12 @@ def _prior_loss(clip: MultiViewClip, masks: tuple[Tensor, ...], config: PersonCo
     from open4dgs.prior_layer import compute_clip_priors
 
     width, height = clip.sizes[0]
-    trt: MoGeV2TrtPredictor = MoGeV2TrtPredictor(encoder="vitl", heads="geometry")
+    level: int = config.prior_resolution_level
+    trt: MoGeV2TrtPredictor = MoGeV2TrtPredictor(encoder="vitl", heads="geometry", resolution_level=level)
     engine: bool = trt.has_engine((height, width))
-    predictor: MoGeV2TrtPredictor | MoGeV2TorchPredictor = trt if engine else MoGeV2TorchPredictor(encoder="vitl", heads="geometry")
+    predictor: MoGeV2TrtPredictor | MoGeV2TorchPredictor = (
+        trt if engine else MoGeV2TorchPredictor(encoder="vitl", heads="geometry", resolution_level=level)
+    )
     report(f"MoGe-2 depth + normal prior on every view ({'TensorRT' if engine else 'torch'})")
     priors: ClipPriors = compute_clip_priors(clip, clip.camera_names, predictor)
     del predictor, trt

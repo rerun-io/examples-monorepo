@@ -14,3 +14,12 @@ def test_default_trains_20k_steps_of_the_25k_schedule_and_with_steps_spans_the_n
     app = PersonConfig().with_steps(5_000)
     assert (app.train.steps, app.train.horizon) == (5_000, 5_000)
     assert PersonConfig().with_steps(40_000).train.horizon == 40_000
+
+
+def test_prior_resolution_level_defaults_to_nine_and_rejects_levels_outside_zero_to_nine() -> None:
+    from fdanyone_rerun.person4d import PersonConfig
+
+    assert PersonConfig().prior_resolution_level == 9
+    assert PersonConfig(prior_resolution_level=6).prior_resolution_level == 6
+    with pytest.raises(ValueError, match="prior_resolution_level"):
+        PersonConfig(prior_resolution_level=10)
