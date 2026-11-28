@@ -71,11 +71,16 @@ source:
     # Hook only: the train loop's optimizer steps go through TrigsTrainer._optimizer_step (default: each optimizer's
     # step + zero_grad(set_to_none=True)); packages/open4dgs (open4dgs.adam_bf16.fused_step) runs every AdamBf16 in one launch.
     - patches/0012-optimizer-step-seam.patch
+    # Hook only: the train loop's motion, rigid, opacity, sigma-floor and scale terms go through
+    # TrigsTrainer._core_regularisers (default None = the loop's own code, unchanged); the rigidity-graph refresh runs just
+    # before them instead of between the motion and rigid terms (it reads none of them). packages/open4dgs
+    # (open4dgs.fused_regularisers) computes them in one compiled pass.
+    - patches/0013-core-regularisers-seam.patch
 
 build:
   # Bump with every patch or build script change: the build string hash does not follow the recipe content, and the
   # shared rattler package cache would otherwise hand an older build to the next install.
-  number: 12
+  number: 13
   noarch: python
   script:
     # pixi-build reuses the host prefix between rebuilds: clear the target first.
