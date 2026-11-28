@@ -128,6 +128,7 @@ def galileo_input_dir() -> Path:
 def galileo_input_meta(galileo_input_dir: Path) -> Path:
     """The 226-keyframe input metadata shipped with r2b_galileo."""
     from colsfm.frames_meta import FRAMES_META_NAME
+
     path = galileo_input_dir / FRAMES_META_NAME
     if not path.is_file():
         pytest.skip(f"r2b_galileo asset absent: {path} (pixi run -e colsfm colsfm-download-galileo)")
