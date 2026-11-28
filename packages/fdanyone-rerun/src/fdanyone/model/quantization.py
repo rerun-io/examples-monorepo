@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 
@@ -147,10 +148,15 @@ def project_fp8_shared(
 
 
 def quantize_dit_fp8_w8a8(
-    dit: torch.nn.Module, *, nvfp4_projections: tuple[str, ...] = (), nvfp4_blocks: tuple[int, int] = QUANTIZED_BLOCK_RANGE
+    dit: torch.nn.Module, *, nvfp4_projections: tuple[str, ...] | None = None, nvfp4_blocks: tuple[int, int] | None = None
 ) -> FP8W8A8Report:
     """Replace the approved projections with chunked row-wise FP8 W8A8 linears; groups in ``nvfp4_projections``
-    inside the inclusive ``nvfp4_blocks`` range get NVFP4 W4A4 linears instead."""
+    inside the inclusive ``nvfp4_blocks`` range get NVFP4 W4A4 linears instead (defaults: ``InferenceConfig``)."""
+
+    from fdanyone.config import INFERENCE
+
+    nvfp4_projections = INFERENCE.dit_nvfp4_projections if nvfp4_projections is None else nvfp4_projections
+    nvfp4_blocks = INFERENCE.dit_nvfp4_blocks if nvfp4_blocks is None else nvfp4_blocks
 
     unknown = set(nvfp4_projections) - set(NVFP4_KINDS)
     if unknown:
@@ -174,4 +180,6 @@ def quantize_dit_fp8_w8a8(
             nvfp4_count += 1
         else:
             setattr(parent, child_name, Fp8RowwiseLinear(linear))
+    if nvfp4_count:
+        logging.getLogger(__name__).info("NVFP4 W4A4 DiT: %d projections (%s, blocks %d-%d)", nvfp4_count, ",".join(nvfp4_projections), *nvfp4_blocks)
     return FP8W8A8Report(module_count=len(selected) - nvfp4_count, nvfp4_count=nvfp4_count)

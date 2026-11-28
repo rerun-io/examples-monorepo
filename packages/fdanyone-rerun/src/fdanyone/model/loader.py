@@ -52,10 +52,8 @@ class Denoiser:
             if INFERENCE.dit_fp8_w8a8:
                 from fdanyone.model.quantization import quantize_dit_fp8_w8a8
 
-                report = quantize_dit_fp8_w8a8(
-                    self.model, nvfp4_projections=INFERENCE.dit_nvfp4_projections, nvfp4_blocks=INFERENCE.dit_nvfp4_blocks
-                )
-                LOGGER.info("FP8 W8A8 DiT: %d projections (row-wise, chunked), NVFP4 W4A4: %d", report.module_count, report.nvfp4_count)
+                report = quantize_dit_fp8_w8a8(self.model)
+                LOGGER.info("FP8 W8A8 DiT: %d projections (row-wise, chunked)", report.module_count)
             if INFERENCE.dit_regional_compile:
                 # Module.compile swaps only each block's call; parameter names and identity survive.
                 for block in self.model.blocks:
