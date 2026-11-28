@@ -153,27 +153,27 @@ def fused_step(optimizers: Sequence[AdamBf16]) -> None:
     Bit-identical to the per-optimizer steps: same arithmetic, same per-parameter seeds and offsets. Parameters shared
     between optimizers or spread over devices step one optimizer after the other (the first one clears a shared
     parameter's gradient, so the next skips it); every parameter is checked before any state advances."""
-    todo: list[tuple[AdamBf16, dict, Tensor]] = [
-        (opt, group, p) for opt in optimizers for group in opt.param_groups for p in group["params"] if p.grad is not None
+    todo: list[tuple[AdamBf16, dict, Tensor, Tensor]] = [
+        (opt, group, p, g) for opt in optimizers for group in opt.param_groups for p in group["params"] if (g := p.grad) is not None
     ]
-    for _, _, p in todo:
-        if p.dtype != torch.float32 or not p.is_contiguous() or not p.grad.is_contiguous():  # pyrefly: ignore[missing-attribute]
+    for _, _, p, g in todo:
+        if p.dtype != torch.float32 or not p.is_contiguous() or not g.is_contiguous():
             raise ValueError("AdamBf16 needs contiguous float32 parameters and gradients")
-    if len({id(p) for _, _, p in todo}) != len(todo) or len({p.device for _, _, p in todo}) > 1:
+    if len({id(p) for _, _, p, _ in todo}) != len(todo) or len({p.device for _, _, p, _ in todo}) > 1:
         for opt in optimizers:
             opt.step()
             opt.zero_grad(set_to_none=True)
         return
     rows: list[tuple[int, ...]] = []
     scalars: list[tuple[float, ...]] = []
-    for opt, group, p in todo:
+    for opt, group, p, g in todo:
         beta1, beta2 = group["betas"]
         state, step_size, bc2_sqrt, seed = opt._advance(p, group)
-        rows.append((p.data_ptr(), p.grad.data_ptr(), state["exp_avg"].data_ptr(), state["exp_avg_sq"].data_ptr(), p.numel(), seed))  # pyrefly: ignore[missing-attribute]
+        rows.append((p.data_ptr(), g.data_ptr(), state["exp_avg"].data_ptr(), state["exp_avg_sq"].data_ptr(), p.numel(), seed))
         scalars.append((beta1, beta2, group["eps"], step_size, bc2_sqrt, 0.0))
     if todo:
         device: torch.device = todo[0][2].device
-        sizes: list[int] = [p.numel() for _, _, p in todo]
+        sizes: list[int] = [p.numel() for _, _, p, _ in todo]
         table: np.ndarray = np.zeros((len(rows), int(TABLE_COLS)), dtype=np.int64)
         table[:, :6] = rows
         table[:, 6:].view(np.float32)[:] = scalars

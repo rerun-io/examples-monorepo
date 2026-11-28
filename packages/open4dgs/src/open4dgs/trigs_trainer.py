@@ -41,7 +41,7 @@ backpropagates into a zero tensor of the whole batch) and the row gather is ``in
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Literal, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 import torch
 from jaxtyping import Float32, Float64, Int64
@@ -392,7 +392,7 @@ class Open4dgsTrainer(TrigsTrainer):
         *,
         gt_images_per_frame: dict[int, list[Tensor]],
         gt_alphas_per_frame: dict[int, list[Tensor]],
-        **kwargs: object,  # the rest of TrigsTrainer.train_from_params, passed through
+        **kwargs: Any,  # the rest of TrigsTrainer.train_from_params, passed through
     ) -> TrigsTrainingResult:
         """Lever 4: with ``pixel_stride=2`` the train loop reads every frame and mask through ``strided_frames``."""
         if self.pixel_stride > 1:
