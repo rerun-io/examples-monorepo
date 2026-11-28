@@ -63,12 +63,12 @@ def _fuse_conv_bn(conv: nn.Conv2d, bn: nn.BatchNorm2d) -> nn.Conv2d:
         groups=conv.groups,
         bias=True,
     ).to(device)
-    if bn.running_mean is None or bn.running_var is None:
+    running_var: Float[torch.Tensor, "c_out"] | None = bn.running_var
+    running_mean: Float[torch.Tensor, "c_out"] | None = bn.running_mean
+    if running_mean is None or running_var is None:
         raise ValueError("BatchNorm without running statistics cannot be fused")
     if bn.weight is None or bn.bias is None:
         raise ValueError("BatchNorm without affine parameters cannot be fused")
-    running_var: Float[torch.Tensor, "c_out"] = bn.running_var
-    running_mean: Float[torch.Tensor, "c_out"] = bn.running_mean
     bn_weight: Float[torch.Tensor, "c_out"] = bn.weight
     bn_bias: Float[torch.Tensor, "c_out"] = bn.bias
     std: Float[torch.Tensor, "c_out"] = (running_var + bn.eps).sqrt()

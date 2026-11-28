@@ -9,5 +9,5 @@ rerun-canonical recording.rrd
 rerun-canonical recording.rrd --headless --port 9877
 ```
 
-For complete headless frame timings, use `gsplat probe` (the `gsplat-cli` `probe` feature);
+For complete headless frame timings, use the canonical viewer's `viewer-probe` (`packages/canonical-viewer`);
 see the [CLI reference](../gsplat-cli/README.md) for flags and [architecture](../../docs/architecture.md) for viewer limits.
