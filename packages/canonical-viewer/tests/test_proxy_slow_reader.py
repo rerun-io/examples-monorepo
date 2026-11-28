@@ -59,12 +59,15 @@ def size(path: Path) -> int:
 def test_stalled_reader_does_not_block_the_logger(canonical_viewer: Path, tmp_path: Path) -> None:
     proxy_port: int = free_port()
     url: str = f"rerun+http://127.0.0.1:{proxy_port}/proxy"
-    logs: list[Path] = [tmp_path / name for name in ("proxy.log", "stalled.log", "late.log")]
+    logs: list[Path] = []
     processes: list[subprocess.Popen[bytes]] = []
 
-    def start(log: Path, *args: str) -> subprocess.Popen[bytes]:
+    def start(name: str, *args: str) -> subprocess.Popen[bytes]:
+        """Start rerun-canonical with its output in tmp_path/<name>.log, which failures show."""
+        log: Path = tmp_path / f"{name}.log"
         with log.open("w") as stream:
             process = subprocess.Popen([canonical_viewer, *args], stdout=stream, stderr=subprocess.STDOUT)
+        logs.append(log)
         processes.append(process)
         return process
 
@@ -72,10 +75,10 @@ def test_stalled_reader_does_not_block_the_logger(canonical_viewer: Path, tmp_pa
         return float(subprocess.run([sys.executable, "-c", PRODUCER, url, str(count)], check=True, capture_output=True, text=True, timeout=120).stdout)
 
     try:
-        start(logs[0], "--serve-grpc", "--port", str(proxy_port), "--server-memory-limit", "200MB")
+        start("proxy", "--serve-grpc", "--port", str(proxy_port), "--server-memory-limit", "200MB")
         wait_for(lambda: accepts(proxy_port), "the proxy did not listen", logs)
         stalled_rrd: Path = tmp_path / "stalled.rrd"
-        reader = start(logs[1], url, "--save", str(stalled_rrd), "--port", str(free_port()))
+        reader = start("stalled", url, "--save", str(stalled_rrd), "--port", str(free_port()))
         # The reader is subscribed once it has saved the first 1 MB message; only then is freezing it a stall.
         produce(1)
         wait_for(lambda: size(stalled_rrd) > 1_000_000, "the reader did not save the first message", logs)
@@ -84,9 +87,9 @@ def test_stalled_reader_does_not_block_the_logger(canonical_viewer: Path, tmp_pa
         assert flushed < 10.0, f"the logger took {flushed:.1f} s with a stalled reader (stock Rerun: about 27 s)"
         # The proxy keeps the last 200 MB (its budget) for readers that connect later.
         late_rrd: Path = tmp_path / "late.rrd"
-        late = start(logs[2], url, "--save", str(late_rrd), "--port", str(free_port()))
+        late = start("late", url, "--save", str(late_rrd), "--port", str(free_port()))
         wait_for(lambda: late.poll() is not None or size(late_rrd) > 100_000_000, "a reader that connects later did not receive the history", logs)
-        assert size(late_rrd) > 100_000_000, "the late reader exited early\n" + logs[2].read_text()
+        assert size(late_rrd) > 100_000_000, "the late reader exited early\n" + logs[-1].read_text()
     finally:
         for process in processes:
             if process.poll() is None:
