@@ -17,7 +17,7 @@ pytestmark = pytest.mark.integration
 
 
 def _one_step(
-    kind: str, monkeypatch: pytest.MonkeyPatch, batch: int = 4
+    kind: str, monkeypatch: pytest.MonkeyPatch, batch: int = 4, variant: str = "plain", hook_calls: list[int] | None = None
 ) -> tuple[list[torch.Tensor], dict[str, torch.Tensor], tuple[int, int], int, dict]:
     from gsplat import rasterization
     from trigs.core.camera import CameraConfig
@@ -64,12 +64,21 @@ def _one_step(
     }
     params, sh_degree, scene_extent = build_canonical_from_npz(keyframes, fps=FPS, keyframe_stride=3, device=dev)
     config = TrigsTrainingConfig(n_steps=1, fps=FPS, keyframe_stride=3, holdout_views=(), psnr_eval_every=0, tb_log_every=1, tb_stats_every=0,
-                                 viewer_snapshot_every=0, train_seed=0, batch_cameras=batch)
+                                 viewer_snapshot_every=0, train_seed=0, batch_cameras=batch,
+                                 **({"masked_rgb_loss": True, "masked_rgb_composite": True, "masked_rgb_random_bg": True} if variant == "random_bg" else {}))
     renders: list[torch.Tensor] = []
     grads: dict[str, torch.Tensor] = {}
     from open4dgs.trigs_trainer import Open4dgsTrainer
 
     trainer = TrigsTrainer(device=dev) if kind == "stock" else Open4dgsTrainer(device=dev, batch_cameras=kind == "batched")
+    if variant == "hook":  # a stateful per-camera hook without a batch entry: called once per draw
+
+        def hook(*, cam_idx: int, colors: torch.Tensor, **_: object) -> torch.Tensor:
+            assert hook_calls is not None
+            hook_calls.append(cam_idx)
+            return 0.1 * colors.mean() * (len(hook_calls) % 3)
+
+        trainer.camera_loss_hook = hook
     render_inputs, photometric, rasterize = trainer._render_inputs, trainer._photometric_losses, trainer._rasterize_inputs
     used = {"inputs": 0, "rasterize": 0, "cameras": 0}
     reloc: dict = {}
@@ -142,14 +151,18 @@ def test_open4dgs_trainer_step_matches_the_stock_per_camera_step(kind: str, call
         assert float((g_fast[name] - g).abs().max()) <= 1e-4 * scale, name
 
 
-def test_a_camera_drawn_twice_renders_once_with_the_gradients_and_relocation_cue_of_the_duplicates(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("variant", ["plain", "random_bg", "hook"])
+def test_a_camera_drawn_twice_renders_once_with_the_gradients_and_relocation_cue_of_the_duplicates(variant: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """5 cameras drawn with replacement from 5 (TRiGS's official sampler caps the batch at the training cameras): the
     batched group rasterizes each distinct camera once, and the step's gradients and relocation accumulators match the
-    stock trainer, which renders every draw."""
+    stock trainer, which renders every draw; a random background is drawn and a stateful hook called once per draw."""
     if not torch.cuda.is_available():
         pytest.skip("needs a CUDA GPU (gsplat rasterization)")
-    r_fast, g_fast, _, cams_fast, reloc_fast = _one_step("batched", monkeypatch, batch=5)
-    r_cam, g_cam, _, cams_cam, reloc_cam = _one_step("stock", monkeypatch, batch=5)
+    calls_fast: list[int] = []
+    calls_cam: list[int] = []
+    r_fast, g_fast, _, cams_fast, reloc_fast = _one_step("batched", monkeypatch, batch=5, variant=variant, hook_calls=calls_fast)
+    r_cam, g_cam, _, cams_cam, reloc_cam = _one_step("stock", monkeypatch, batch=5, variant=variant, hook_calls=calls_cam)
+    assert calls_fast == calls_cam and len(calls_cam) == (5 if variant == "hook" else 0)
     assert len(r_fast) == len(r_cam) == cams_cam == 5
     assert cams_fast < 5  # the seed-0 draw repeats a camera
     for a, b in zip(r_fast, r_cam, strict=True):
