@@ -121,6 +121,8 @@ tests:
       imports:
         - gradio_rerun
       pip_check: false
+      # gradio's pydub fails to import on the newest Python the solver picks (Python 3.15: no audioop module).
+      python_version: "3.12.*"
 
 about:
   homepage: https://github.com/rerun-io/gradio-rerun-viewer
