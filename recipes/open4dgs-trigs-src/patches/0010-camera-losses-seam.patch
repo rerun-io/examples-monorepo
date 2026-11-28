@@ -1,0 +1,39 @@
+diff --git a/src/trigs/core/trainer.py b/src/trigs/core/trainer.py
+--- a/src/trigs/core/trainer.py
++++ b/src/trigs/core/trainer.py
+@@ -5386,7 +5386,22 @@
+             group = self._camera_group(
+                 params, cameras, cam_group, frame_idx, gt_times_per_frame, offset_active, sh_degree, config, step,
+             )
+-            for group_i, cam_idx in enumerate(cam_group):
++            # Seam: the group may compute every camera's losses in one pass (None: the per-camera loop below).
++            group_losses = (
++                group.camera_losses(gt_images, gt_alphas_per_frame, frame_idx, config, step)
++                if group is not None else None
++            )
++            if group_losses is not None:
++                rgb_loss_sum = group_losses.rgb_sum
++                alpha_outside_sum = group_losses.alpha_outside_sum
++                alpha_mask_sum = group_losses.alpha_mask_sum
++                gamma = group_losses.gamma_sum
++                active_parts.append(group_losses.active_idx)
++                cam_idx_log = group_losses.cam_idx_log
++                render_log = group_losses.render_log
++                gt_rgb = group_losses.gt_rgb
++                info = group_losses.info
++            for group_i, cam_idx in enumerate(cam_group if group_losses is None else ()):
+                 if gt_times_per_frame is not None and gt_times_per_frame[frame_idx][cam_idx] is not None:
+                     t_base = gt_times_per_frame[frame_idx][cam_idx]
+                 else:
+@@ -5474,8 +5489,10 @@
+                 + config.lambda_alpha_outside_mask * alpha_outside_loss
+                 + config.lambda_alpha_mask * alpha_mask_loss
+             )
++            # One camera, or every camera rendered the same active rows (a camera group): unique() would only re-sort them,
++            # with a host sync.
+             step_active_idx = (
+-                active_parts[0] if n_group == 1
++                active_parts[0] if all(p is active_parts[0] for p in active_parts)
+                 else torch.unique(torch.cat(active_parts))
+             )
+             cam_idx = cam_idx_log

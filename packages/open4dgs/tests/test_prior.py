@@ -426,3 +426,79 @@ def test_prior_layer_records_the_reader_that_made_the_clip() -> None:
     selfcap = layer_properties(clip, "src", 640, 9, reader="selfcap", predictor="p")
     assert catalog.loader == "open4dgs.catalog_clip.read_catalog_clip (undistorted)"
     assert selfcap.loader == "open4dgs.selfcap_clip.read_timed_clip"
+
+
+@pytest.mark.parametrize("step", [0, 10_000])
+def test_batched_terms_equal_per_camera_terms(step: int) -> None:
+    """prior_terms over a camera batch (leading axis) gives each camera's per-camera terms and the same depth gradients."""
+    from open4dgs.prior import PriorConfig, prior_terms, static_valid
+
+    config = PriorConfig(depth_edge_max=1.0, contradiction_deg=5.0)
+    g = torch.Generator().manual_seed(3)
+    cams = [_sphere(torch.tensor([0.1 * i, 0.0, 3.0 + 0.2 * i]), 0.8) for i in range(3)]
+    rendered = torch.stack([d + 0.05 * _rays()[..., 0] + 0.01 * torch.rand(H, W, generator=g) for d, _, _ in cams])
+    prior_depth = torch.stack([torch.where(hit, 1.3 * d + 0.2, torch.zeros_like(d)) for d, _, hit in cams])
+    alpha = torch.stack([hit.float() * torch.rand(H, W, generator=g) for _, _, hit in cams])
+    static = torch.stack([static_valid(hit.float(), prior_depth[i], config) for i, (_, _, hit) in enumerate(cams)])
+    normals = torch.stack([n for _, n, _ in cams])
+    K = _K().expand(3, 3, 3) * torch.tensor([1.0, 1.1, 0.9])[:, None, None]
+    K[:, 2, 2] = 1.0
+    single = rendered.clone().requires_grad_(True)
+    batched = rendered.clone().requires_grad_(True)
+    ref = [prior_terms(single[i], alpha[i], static[i], prior_depth[i], normals[i], K[i], step, config) for i in range(3)]
+    new = prior_terms(batched, alpha, static, prior_depth, normals, K, step, config)
+    for name in ("depth", "normal", "valid_fraction"):
+        torch.testing.assert_close(getattr(new, name), torch.stack([getattr(r, name) for r in ref]), rtol=1e-5, atol=1e-7)
+    sum(r.depth + 2.0 * r.normal for r in ref).backward()
+    (new.depth + 2.0 * new.normal).sum().backward()
+    assert single.grad is not None and batched.grad is not None and float(single.grad.abs().max()) > 0.0
+    torch.testing.assert_close(batched.grad, single.grad, rtol=1e-4, atol=1e-7)
+
+
+@pytest.mark.parametrize("offset", [None, (1, 0)])
+def test_hook_batch_equals_per_camera_calls(offset: tuple[int, int] | None) -> None:
+    """MonoPriorLoss.batch: the per-camera hook calls of one step at once (values, gradients, logged rows); a camera
+    without maps sends the caller back to the per-camera calls."""
+    from open4dgs.prior import ClipPriors, MonoPriorLoss, PriorConfig, encode_normals
+
+    spheres = [_sphere(torch.tensor([0.1 * i, 0.0, 3.0]), 0.8) for i in range(2)]
+    priors = ClipPriors(
+        ("a", "b"),
+        torch.tensor([0, 1]),
+        tuple(torch.stack([d, 1.1 * d]).half() for d, _, _ in spheres),
+        tuple(torch.stack([encode_normals(n, hit)] * 2) for _, n, hit in spheres),
+    )
+    masks = tuple(torch.stack([hit.float()] * 2) for _, _, hit in spheres)
+    config = PriorConfig(start_step=0, ramp_end_step=0, log_every=1, depth_edge_max=1.0)
+    rendered = torch.stack([(d + 0.1 * _rays()[..., 0]) for d, _, _ in spheres])
+    alphas = torch.stack([hit.float() for _, _, hit in spheres])
+    if offset is not None:
+        rendered, alphas = rendered[:, offset[0] :: 2, offset[1] :: 2], alphas[:, offset[0] :: 2, offset[1] :: 2]
+    K = _K().expand(3, 3, 3).contiguous()
+
+    per_cam = MonoPriorLoss(config, priors, masks, (2, 0), K)
+    single = rendered.clone().requires_grad_(True)
+    info = [{"render_depth": single[i][None, ..., None], "stride_offset": offset} for i in range(2)]
+    ref = torch.stack(
+        [
+            per_cam(step=4, frame_idx=1, cam_idx=c, colors=torch.zeros(1), alphas=alphas[i][None, ..., None], info=info[i], cameras=None)
+            for i, c in enumerate((2, 0))
+        ]
+    )
+    per_cam.finish()
+
+    batch = MonoPriorLoss(config, priors, masks, (2, 0), K)
+    batched = rendered.clone().requires_grad_(True)
+    new = batch.batch(step=4, frame_idx=1, cams=[2, 0], depth=batched, alphas=alphas, offset=offset)
+    batch.finish()
+    assert new is not None
+    torch.testing.assert_close(new, ref, rtol=1e-5, atol=1e-7)
+    ref.sum().backward()
+    new.sum().backward()
+    assert single.grad is not None and batched.grad is not None
+    torch.testing.assert_close(batched.grad, single.grad, rtol=1e-4, atol=1e-8)
+    assert batch.rows.keys() == per_cam.rows.keys()
+    for name, rows in per_cam.rows.items():
+        assert [s for s, _ in batch.rows[name]] == [s for s, _ in rows], name
+        assert [v for _, v in batch.rows[name]] == pytest.approx([v for _, v in rows], rel=1e-5), name
+    assert batch.batch(step=5, frame_idx=1, cams=[2, 1], depth=batched, alphas=alphas, offset=offset) is None

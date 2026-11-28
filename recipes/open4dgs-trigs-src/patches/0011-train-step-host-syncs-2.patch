@@ -1,0 +1,197 @@
+diff --git a/src/trigs/core/trainer.py b/src/trigs/core/trainer.py
+--- a/src/trigs/core/trainer.py
++++ b/src/trigs/core/trainer.py
+@@ -1244,8 +1244,8 @@
+ # =============================================================================
+ 
+ @torch.no_grad()
+-def _enforce_relocation_class_invariants(params: dict) -> int:
+-    """Returns the number of rows demoted dynamic -> static.
++def _enforce_relocation_class_invariants(params: dict, count: bool = True) -> int:
++    """Returns the number of rows demoted dynamic -> static (0, not read on the host, when ``count`` is False).
+ 
+     A nonzero return means row activity semantics changed (static rows are
+     active at every t); callers holding a temporal hierarchy must invalidate
+@@ -1270,11 +1270,11 @@
+ 
+     # Any non-static row outside dynamic_allowed is illegal. Demote to static.
+     illegal_dynamic = (~is_static) & (~dynamic_allowed)
+-    n_demoted = int(illegal_dynamic.sum().item())
+-    if illegal_dynamic.any():
+-        params["is_static"].data[illegal_dynamic] = 1.0
+-        if "dynamic_protect" in params:
+-            params["dynamic_protect"].data[illegal_dynamic] = 0.0
++    n_demoted = int(illegal_dynamic.sum().item()) if count else 0
++    # Masked fills without an any() guard (no-ops on an all-False mask; the guard read the GPU).
++    params["is_static"].data[illegal_dynamic] = 1.0
++    if "dynamic_protect" in params:
++        params["dynamic_protect"].data[illegal_dynamic] = 0.0
+ 
+     # Re-read after potential demotion above.
+     is_static = params["is_static"].detach().reshape(-1) > 0.5
+@@ -1294,7 +1294,7 @@
+             params[key].data[is_static] = 0.0
+ 
+     if "anchors" in params:
+-        params["anchors"].data[is_static] = params["means"].data[is_static]
++        params["anchors"].data.copy_(torch.where(is_static[:, None], params["means"].data, params["anchors"].data))
+ 
+     return n_demoted
+ 
+@@ -1418,7 +1418,7 @@
+         ):
+             return direct_temporal_active_idx(
+                 params,
+-                t,
++                t if isinstance(t, Tensor) else self._const_tensor(float(t), device, params["times"].dtype),
+                 opacity_threshold=self._effective_temporal_cull_threshold(config),
+                 extra_margin_s=config.temporal_active_extra_margin_s,
+                 include_static=True,
+@@ -3168,10 +3168,10 @@
+         means_t = torch.nan_to_num(means_t, nan=0.0, posinf=0.0, neginf=0.0)
+         quats_t = torch.nan_to_num(quats_t, nan=0.0, posinf=0.0, neginf=0.0)
+         qt_norm_sq = (quats_t * quats_t).sum(dim=-1, keepdim=True)
+-        if (qt_norm_sq < 1e-16).any():
+-            identity = torch.zeros_like(quats_t)
+-            identity[..., 0] = 1.0
+-            quats_t = torch.where(qt_norm_sq < 1e-16, identity, quats_t)
++        # Unconditional: an any() guard would read the GPU on the host every deform.
++        identity = torch.zeros_like(quats_t)
++        identity[..., 0] = 1.0
++        quats_t = torch.where(qt_norm_sq < 1e-16, identity, quats_t)
+ 
+         return means_t, quats_t, gamma
+ 
+@@ -3370,8 +3370,8 @@
+             scales=inputs["scales"],
+             opacities=inputs["opacities"],
+             colors=inputs["colors"],
+-            viewmats=cameras.viewmats[cams[0]:cams[0] + 1] if len(cams) == 1 else cameras.viewmats[cams],
+-            Ks=cameras.Ks[cams[0]:cams[0] + 1] if len(cams) == 1 else cameras.Ks[cams],
++            viewmats=cameras.viewmats[cams[0]:cams[0] + 1] if len(cams) == 1 else torch.stack([cameras.viewmats[c] for c in cams]),
++            Ks=cameras.Ks[cams[0]:cams[0] + 1] if len(cams) == 1 else torch.stack([cameras.Ks[c] for c in cams]),
+             width=cameras.width_for(cams[0]),
+             height=cameras.height_for(cams[0]),
+             sh_degree=inputs["sh_degree"],
+@@ -3380,8 +3380,9 @@
+             **inputs.get("raster_kwargs", {}),
+         )
+         if config.render_depth:
+-            info["render_depth"] = render_colors[..., 3:4]
+-            render_colors = render_colors[..., :3]
++            # One split, not two slices: each slice's backward fills a zero tensor of the whole RGB+ED render and the two
++            # are then added; the split's backward is one concatenation of the two gradients.
++            render_colors, info["render_depth"] = render_colors.split([3, 1], dim=-1)
+ 
+         if info.get("means2d") is not None and info["means2d"].requires_grad:
+             info["means2d"].retain_grad()
+@@ -4594,9 +4595,8 @@
+         if "is_static" not in params:
+             return
+ 
++        # No any() guard: the masked fills below are no-ops without static rows, and the guard read the GPU.
+         static = params["is_static"].data.reshape(-1) > 0.5
+-        if not bool(static.any()):
+-            return
+ 
+         t_max = float(max(n_frames - 1, 0)) / max(float(config.fps), 1e-6)
+         t_mid = 0.5 * t_max
+@@ -4629,9 +4629,8 @@
+         if "is_static" not in params:
+             return
+ 
++        # No any() guard: the masked fills below are no-ops without static rows, and the guard read the GPU.
+         static = params["is_static"].data.reshape(-1) > 0.5
+-        if not bool(static.any()):
+-            return
+ 
+         for name in (
+             "times", "log_durations",
+@@ -4697,9 +4696,10 @@
+             q = params["quats"].data
+             q.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
+             norms = q.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+-            degenerate = (norms < 1e-8).squeeze(-1)
+-            if degenerate.any():
+-                q[degenerate] = torch.tensor([1.0, 0.0, 0.0, 0.0], device=q.device, dtype=q.dtype)
++            degenerate = norms < 1e-8
++            identity = torch.zeros_like(q)
++            identity[..., 0] = 1.0
++            q = torch.where(degenerate, identity, q)  # unconditional: an any() guard read the GPU
+             params["quats"].data.copy_(q / norms)
+ 
+         if config.clamp_mu_t and "times" in params:
+@@ -5243,6 +5243,7 @@
+             return nn_indices, dyn_rows
+ 
+         nn_indices, rigid_loss_rows = _refresh_rigid_knn_for_current_rows()
++        rigid_loss_idx = torch.nonzero(rigid_loss_rows).reshape(-1)  # once per kNN refresh, for index_select
+ 
+         if config.diagnostics and nn_indices is not None:
+             with torch.no_grad():
+@@ -5507,14 +5508,16 @@
+                 getattr(config, "static_exclude_from_motion_losses", True)
+                 or getattr(config, "static_exclude_from_temporal_reg", True)
+             ):
+-                dyn_rows_step = self._dynamic_rows(params)
+-                dyn_rows_step_any = bool(dyn_rows_step.any())
++                # The dynamic rows' index (one host read) for the row gathers below: boolean indexing reads the
++                # GPU in the forward and again in its backward, per tensor.
++                dyn_rows_step = torch.nonzero(self._dynamic_rows(params)).reshape(-1)
++                dyn_rows_step_any = int(dyn_rows_step.numel()) > 0
+             if getattr(config, "static_exclude_from_motion_losses", True) and "is_static" in params:
+                 dyn_rows_for_motion = dyn_rows_step
+                 if dyn_rows_step_any:
+                     motion_loss = bezier_motion_loss(
+-                        c0_full[dyn_rows_for_motion], c1_full[dyn_rows_for_motion],
+-                        c2_full[dyn_rows_for_motion],
++                        c0_full.index_select(0, dyn_rows_for_motion), c1_full.index_select(0, dyn_rows_for_motion),
++                        c2_full.index_select(0, dyn_rows_for_motion),
+                     )
+                 else:
+                     motion_loss = params["means"].new_zeros(())
+@@ -5545,6 +5548,7 @@
+                         and step % config.knn_recompute_every == 0)
+                 ):
+                     nn_indices, rigid_loss_rows = _refresh_rigid_knn_for_current_rows()
++                    rigid_loss_idx = torch.nonzero(rigid_loss_rows).reshape(-1)
+                     rigid_knn_dirty = False
+ 
+                 zeta_base_full = torch.cat([params["zeta_base_t"], params["zeta_base_r"]], dim=-1)
+@@ -5556,7 +5560,7 @@
+                     rigid_loss = params["means"].new_zeros(())
+                 elif getattr(config, "static_exclude_from_motion_losses", True) and "is_static" in params:
+                     rigid_loss = rigid_coherence_loss(
+-                        zeta_base_full[rigid_loss_rows], params["sh0"][rigid_loss_rows],
++                        zeta_base_full.index_select(0, rigid_loss_idx), params["sh0"].index_select(0, rigid_loss_idx),
+                         nn_indices, lambda_c=config.rigid_color_lambda,
+                         detach_color_weight=rigid_color_detach,
+                     )
+@@ -5573,7 +5577,7 @@
+             if getattr(config, "static_exclude_from_temporal_reg", True) and "is_static" in params:
+                 dyn_rows_for_reg = dyn_rows_step
+                 if dyn_rows_step_any:
+-                    reg_loss = (base_opa[dyn_rows_for_reg] * gamma[dyn_rows_for_reg].detach()).mean()
++                    reg_loss = (base_opa.index_select(0, dyn_rows_for_reg) * gamma.index_select(0, dyn_rows_for_reg).detach()).mean()
+                 else:
+                     reg_loss = params["means"].new_zeros(())
+             else:
+@@ -5584,7 +5588,7 @@
+                 dyn_rows_for_sigma = dyn_rows_step
+                 if dyn_rows_step_any:
+                     sigma_floor_loss = torch.clamp(
+-                        sigma_floor_target - sigma_t[dyn_rows_for_sigma], min=0.0,
++                        sigma_floor_target - sigma_t.index_select(0, dyn_rows_for_sigma), min=0.0,
+                     ).pow(2).mean()
+                 else:
+                     sigma_floor_loss = params["means"].new_zeros(())
+@@ -5961,7 +5965,8 @@
+             # Re-pin static rows and enforce class invariants as a final hard clamp
+             # after relocation/static-convert.
+             self._pin_static_background_rows(params, config, n_frames)
+-            if _enforce_relocation_class_invariants(params) > 0:
++            # The count (a host read) matters only to the temporal hierarchy.
++            if _enforce_relocation_class_invariants(params, count=config.temporal_hierarchy_enabled) > 0:
+                 # Demoted rows are now active at every t but still filed under
+                 # their old dynamic segment; the hierarchy must be rebuilt.
+                 self._invalidate_temporal_hierarchy()
