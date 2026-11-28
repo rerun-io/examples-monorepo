@@ -26,7 +26,7 @@ import torch
 from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
-from simplecv.catalog_layers import register_layer, registered_layer_files
+from simplecv.catalog_layers import LENS_MASK_LAYER, register_layer, registered_layer_files
 from simplecv.run_record import RunStart, start_run, write_run_record
 
 from dataforge import paths, schema, writing
@@ -157,20 +157,21 @@ def main(config: Config) -> None:
     """Write the segment's face mask layer from its base, cube and lens mask layers, and register it as ``masks``.
 
     Raises:
-        ValueError: If the catalog lacks one of the three layers as a file, or the output is one of them.
+        ValueError: If the catalog lacks one of the three layers as a file, or the output is another layer's file.
     """
     run: RunStart = start_run(config, source=Path(__file__))
     entry: DatasetEntry = CatalogClient(config.catalog_url).get_dataset(name=config.segment.split("__", 1)[0])
     files: dict[str, Path] = registered_layer_files(entry, config.segment)
-    needed: tuple[str, ...] = (paths.BASE_LAYER, CUBE_LAYER, paths.LENS_MASK_LAYER)
+    needed: tuple[str, ...] = (paths.BASE_LAYER, CUBE_LAYER, LENS_MASK_LAYER)
     missing: list[str] = [layer for layer in needed if layer not in files]
     if missing:
         raise ValueError(f"{config.segment}: the catalog holds no file for layers {missing} (it has {sorted(files)})")
     output: Path = config.output_dir.resolve() / f"{config.segment}.rrd"
-    # The atomic write replaces whatever file is at ``output``; a link to an input counts as the input.
-    if output.exists() and any(os.path.samefile(output, files[layer]) for layer in needed):
-        raise ValueError(f"{output} is an input layer: the face masks would replace it; pass another --output-dir")
-    write_face_masks(files[paths.BASE_LAYER], files[paths.LENS_MASK_LAYER], files[CUBE_LAYER], output, run, device=config.device)
+    # The atomic write replaces whatever file is at ``output``: only this layer's own file may be replaced (links count).
+    taken: list[str] = [layer for layer, path in files.items() if layer != paths.MASKS_LAYER and output.exists() and os.path.samefile(output, path)]
+    if taken:
+        raise ValueError(f"{output} is the file of layer {taken[0]}: the face masks would replace it; pass another --output-dir")
+    write_face_masks(files[paths.BASE_LAYER], files[LENS_MASK_LAYER], files[CUBE_LAYER], output, run, device=config.device)
     register_layer(entry, [output], paths.MASKS_LAYER)
     print(f"registered {output} as layer {paths.MASKS_LAYER} of {config.segment}")
 

@@ -41,6 +41,7 @@ import pycolmap
 import rerun as rr
 from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
+from simplecv.catalog_layers import atomic_recording
 from simplecv.rerun_growing_points import log_points_by_first_view
 from simplecv.rerun_walk_path import send_walk_path
 from simplecv.run_record import RunRecord, write_run_record
@@ -366,43 +367,43 @@ def write_run_layer(
     metrics: ReconstructionMetrics = reconstruction_metrics(reconstruction)
 
     root: str = f"/world/runs/{source}"
-    recording: rr.RecordingStream = open_layer(rrd_path, segment)
-    log_rig_trajectory(recording, root, times_ns, world_T_rig, timeline)
-    for camera in artifacts.frames_meta.cameras.values():
-        _log_camera(recording, f"{root}/rig/{camera.sensor_name}", camera)
-    if frames is not None:
-        log_frame_references(recording, root, posed, frames)
-        if view is not None:
-            log_view_rig(recording, root, artifacts.frames_meta, frames, times_ns, world_T_rig, view)
-    points: Float64[ndarray, "p 3"] = artifacts.points_xyz()
-    colors: UInt8[ndarray, "p 3"] = artifacts.points_rgb().astype(np.uint8)
-    recording.log(f"{root}/points", rr.Points3D(points, colors=colors, radii=rr.Radius.ui_points(1.5)), static=True)
-    # Each image on its rig frame's clock, the clock of `<root>/rig`: one row per rig frame, not per camera image.
-    image_t_ns: dict[int, int] = {
-        keyframe_id: rig_frame.timestamp_microseconds * 1000 for rig_frame in artifacts.frames_meta.rig_frames() for keyframe_id in rig_frame.keyframe_ids
-    }
-    seen_ns: Int64[ndarray, " p"] = np.fromiter(
-        (min(image_t_ns[element.image_id] for element in point.track.elements) for point in reconstruction.points3D.values()),
-        dtype=np.int64,
-        count=len(reconstruction.points3D),
-    )
-    log_points_by_first_view(recording, f"{root}/points_growing", points, colors, seen_ns, timeline)
-    # The keyframes the run selected, with the poses it was given: what the optimisation started from.
-    prior_path: Path = run_dir / KEYFRAME_DIR_NAME / FRAMES_META_NAME
-    if prior_path.is_file():
-        prior_ns, world_T_prior = rig_poses(read_frames_meta(prior_path))
-        log_position_difference(recording, f"{root}/position_difference", prior_ns, world_T_prior[:, :3, 3], times_ns, world_T_rig[:, :3, 3], timeline)
-    recording.send_property(
-        "colsfm",
-        rr.AnyValues(
-            registered_images=metrics.registered_images,
-                        num_points=metrics.num_points3D,
-            mean_reprojection_error_px=metrics.mean_reprojection_error_px,
-            total_runtime_s=float(sum(artifacts.runtime_seconds_by_stage.values())),
-            run_dir=str(run_dir),
-        ),
-    )
-    if record is not None:
-        write_run_record(recording, record)
-    recording.flush()
+    # The catalog serves the registered file: a rewrite replaces it only once complete, and a failed one leaves it.
+    with atomic_recording(rrd_path, application_id=APPLICATION_ID, recording_id=segment, send_properties=False) as recording:
+        log_rig_trajectory(recording, root, times_ns, world_T_rig, timeline)
+        for camera in artifacts.frames_meta.cameras.values():
+            _log_camera(recording, f"{root}/rig/{camera.sensor_name}", camera)
+        if frames is not None:
+            log_frame_references(recording, root, posed, frames)
+            if view is not None:
+                log_view_rig(recording, root, artifacts.frames_meta, frames, times_ns, world_T_rig, view)
+        points: Float64[ndarray, "p 3"] = artifacts.points_xyz()
+        colors: UInt8[ndarray, "p 3"] = artifacts.points_rgb().astype(np.uint8)
+        recording.log(f"{root}/points", rr.Points3D(points, colors=colors, radii=rr.Radius.ui_points(1.5)), static=True)
+        # Each image on its rig frame's clock, the clock of `<root>/rig`: one row per rig frame, not per camera image.
+        image_t_ns: dict[int, int] = {
+            keyframe_id: rig_frame.timestamp_microseconds * 1000 for rig_frame in artifacts.frames_meta.rig_frames() for keyframe_id in rig_frame.keyframe_ids
+        }
+        seen_ns: Int64[ndarray, " p"] = np.fromiter(
+            (min(image_t_ns[element.image_id] for element in point.track.elements) for point in reconstruction.points3D.values()),
+            dtype=np.int64,
+            count=len(reconstruction.points3D),
+        )
+        log_points_by_first_view(recording, f"{root}/points_growing", points, colors, seen_ns, timeline)
+        # The keyframes the run selected, with the poses it was given: what the optimisation started from.
+        prior_path: Path = run_dir / KEYFRAME_DIR_NAME / FRAMES_META_NAME
+        if prior_path.is_file():
+            prior_ns, world_T_prior = rig_poses(read_frames_meta(prior_path))
+            log_position_difference(recording, f"{root}/position_difference", prior_ns, world_T_prior[:, :3, 3], times_ns, world_T_rig[:, :3, 3], timeline)
+        recording.send_property(
+            "colsfm",
+            rr.AnyValues(
+                registered_images=metrics.registered_images,
+                            num_points=metrics.num_points3D,
+                mean_reprojection_error_px=metrics.mean_reprojection_error_px,
+                total_runtime_s=float(sum(artifacts.runtime_seconds_by_stage.values())),
+                run_dir=str(run_dir),
+            ),
+        )
+        if record is not None:
+            write_run_record(recording, record)
     return LayerSummary(path=rrd_path, num_rig_poses=int(len(times_ns)), num_points=int(points.shape[0]), metrics=metrics)

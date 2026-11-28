@@ -33,6 +33,8 @@ import rerun.chunk as rrc
 from datafusion import col, lit
 from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer, RegisteredBlueprint
 
+LENS_MASK_LAYER: str = "lens_mask"
+"""A 360 recording's lens masks: written by posekit's lens mask step, read by SLAM and the face masks."""
 DATASET_RETRY_DELAY_S: float = 1.0
 """Wait before the one retry of ``ensure_dataset`` (another worker may be creating the same dataset)."""
 
@@ -141,13 +143,9 @@ def registered_layer_files(entry: DatasetEntry, segment: str) -> dict[str, Path]
     For a stage that reads layer files: the catalog server reads them at the same paths, so they are this host's too.
     """
     rows: list[dict[str, str]] = (
-        entry.manifest().select("rerun_segment_id", "rerun_layer_name", "rerun_storage_url").to_arrow_table().to_pylist()
+        entry.manifest().filter(col("rerun_segment_id") == lit(segment)).select("rerun_layer_name", "rerun_storage_url").to_arrow_table().to_pylist()
     )
-    return {
-        row["rerun_layer_name"]: Path(unquote(urlparse(row["rerun_storage_url"]).path))
-        for row in rows
-        if row["rerun_segment_id"] == segment and row["rerun_storage_url"].startswith("file://")
-    }
+    return {row["rerun_layer_name"]: Path(unquote(urlparse(row["rerun_storage_url"]).path)) for row in rows if row["rerun_storage_url"].startswith("file://")}
 
 
 def register_layer(entry: DatasetEntry, paths: Sequence[Path], layer: str | None, *, replace: bool = True) -> None:

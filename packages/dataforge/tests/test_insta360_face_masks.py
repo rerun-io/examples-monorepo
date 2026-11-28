@@ -244,13 +244,21 @@ def test_the_catalog_names_the_input_layers_and_gets_the_face_mask_layer(tmp_pat
         register_layer(entry, [masks], "lens_mask")
         main(Config(segment="insta360__clip", catalog_url=server.url(), output_dir=tmp_path / "out"))
         registered = registered_layer_files(CatalogClient(server.url()).get_dataset(name="insta360"), "insta360__clip")
-        with pytest.raises(ValueError, match="input layer"):
-            # An output directory holding the base under the segment's name would replace it.
-            same: Path = tmp_path / "inputs" / "insta360__clip.rrd"
-            same.parent.mkdir()
-            same.hardlink_to(base)
-            register_layer(entry, [same], None)
+        # An output directory holding another layer's file under the segment's name would replace it: the base (a link
+        # to it), or a later step's layer such as slam_rs.
+        same: Path = tmp_path / "inputs" / "insta360__clip.rrd"
+        same.parent.mkdir()
+        same.hardlink_to(base)
+        register_layer(entry, [same], None)
+        with pytest.raises(ValueError, match="file of layer base"):
             main(Config(segment="insta360__clip", catalog_url=server.url(), output_dir=same.parent))
+        slam: Path = tmp_path / "slam_rs" / "insta360__clip.rrd"
+        slam.parent.mkdir()
+        slam.write_bytes(faces.read_bytes())
+        register_layer(entry, [slam], "slam_rs")
+        with pytest.raises(ValueError, match="file of layer slam_rs"):
+            main(Config(segment="insta360__clip", catalog_url=server.url(), output_dir=slam.parent))
+        assert slam.read_bytes() == faces.read_bytes()
     output: Path = tmp_path / "out" / "insta360__clip.rrd"
     assert registered["masks"] == output.resolve()
     by_catalog = read_masks(output)

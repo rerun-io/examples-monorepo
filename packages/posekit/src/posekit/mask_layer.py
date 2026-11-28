@@ -5,9 +5,8 @@ Soft mattes sit beside it: per camera ``<camera>/pinhole/people_matte``, an 8-bi
 0 = background, values between = partial coverage) at the stored video size and grid."""
 
 import rerun as rr
+from simplecv.catalog_layers import LENS_MASK_LAYER as LENS_MASK_LAYER
 
-LENS_MASK_LAYER: str = "lens_mask"
-"""Catalog layer of a 360 recording's lens masks (``posekit.apis.lens_masks``), what the SLAM step reads and the face masks remap."""
 MASK_NAME: str = "people_mask"
 """Leaf entity of a mask under ``<camera>/pinhole``."""
 MATTE_NAME: str = "people_matte"

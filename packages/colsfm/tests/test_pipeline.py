@@ -788,3 +788,23 @@ def test_the_run_layer_carries_the_run_record_it_is_given(galileo_run: PipelineS
     layer: Path = tmp_path / "colsfm.rrd"
     write_run_layer(galileo_run.options.output_dir, layer, segment="seg", record=start_run(None, source=Path(__file__)).finish(DEFAULT_SOURCE, "seg"))
     assert "/__properties/run_colsfm" in {str(chunk.entity_path) for chunk in rrc.RrdReader(layer).stream()}
+
+
+@pytest.mark.integration
+def test_a_failed_rewrite_of_the_run_layer_keeps_the_last_published_file(
+    galileo_run: PipelineSummary, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """colsfm registers its layer, and a catalog serves the file: a rewrite that fails must not truncate it."""
+    from colsfm import rerun_layer
+
+    layer: Path = tmp_path / "colsfm.rrd"
+    rerun_layer.write_run_layer(galileo_run.options.output_dir, layer, segment="seg")
+    published: bytes = layer.read_bytes()
+
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("stopped mid-write")
+
+    monkeypatch.setattr(rerun_layer, "log_points_by_first_view", fail)
+    with pytest.raises(RuntimeError, match="mid-write"):
+        rerun_layer.write_run_layer(galileo_run.options.output_dir, layer, segment="seg")
+    assert layer.read_bytes() == published and sorted(path.name for path in tmp_path.iterdir()) == ["colsfm.rrd"]
