@@ -155,7 +155,9 @@ def test_open4dgs_trainer_step_matches_the_stock_per_camera_step(kind: str, call
 def test_a_camera_drawn_twice_renders_once_with_the_gradients_and_relocation_cue_of_the_duplicates(variant: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """5 cameras drawn with replacement from 5 (TRiGS's official sampler caps the batch at the training cameras): the
     batched group rasterizes each distinct camera once, and the step's gradients and relocation accumulators match the
-    stock trainer, which renders every draw; a random background is drawn and a stateful hook called once per draw."""
+    stock trainer, which renders every draw; a stateful hook is called once per draw. With a random background per draw
+    the group renders every draw: the draws' losses differ, so one render could not give the relocation cue (a gradient
+    norm per render) of the stock loop's k renders."""
     if not torch.cuda.is_available():
         pytest.skip("needs a CUDA GPU (gsplat rasterization)")
     calls_fast: list[int] = []
@@ -164,7 +166,7 @@ def test_a_camera_drawn_twice_renders_once_with_the_gradients_and_relocation_cue
     r_cam, g_cam, _, cams_cam, reloc_cam = _one_step("stock", monkeypatch, batch=5, variant=variant, hook_calls=calls_cam)
     assert calls_fast == calls_cam and len(calls_cam) == (5 if variant == "hook" else 0)
     assert len(r_fast) == len(r_cam) == cams_cam == 5
-    assert cams_fast < 5  # the seed-0 draw repeats a camera
+    assert cams_fast == 5 if variant == "random_bg" else cams_fast < 5  # the seed-0 draw repeats a camera
     for a, b in zip(r_fast, r_cam, strict=True):
         assert torch.equal(a, b)
     for name, g in g_cam.items():

@@ -101,7 +101,7 @@ class SizeBatch(NamedTuple):
     gamma: Tensor
     info: dict
     cams: list[int]
-    """The batch's distinct cameras, in draw order."""
+    """The batch's rendered cameras, in draw order: distinct, or one per draw with a random background per draw."""
     draws: tuple[int, ...]
     """How many times the step drew each of ``cams``."""
     batched: tuple[Tensor, Tensor, Tensor | None]
@@ -162,20 +162,25 @@ class SharedTimeGroup:
         self._batches: list[SizeBatch] = []
         self._batch_of: dict[int, tuple[int, int]] = {}
         if self._batch_cameras:
+            # A camera drawn k times renders once and its loss counts k times. Not with a random background per draw: the
+            # k losses then differ, and the relocation cue (the norm of each render's means2d gradient, summed over
+            # renders) needs the k renders of the stock loop (the norm of the summed gradient is smaller).
+            slots: list[int] = list(self._cam_group) if config.masked_rgb_random_bg else list(dict.fromkeys(self._cam_group))
+            slot_of_draw: list[int] = list(range(len(slots))) if config.masked_rgb_random_bg else [slots.index(cam) for cam in self._cam_group]
             by_size: dict[tuple[int, int], list[int]] = {}
-            for cam in dict.fromkeys(self._cam_group):  # distinct cameras, in draw order
-                by_size.setdefault((self._cameras.width_for(cam), self._cameras.height_for(cam)), []).append(cam)
-            for cams in by_size.values():
-                for j, cam in enumerate(cams):
-                    for group_i, drawn in enumerate(self._cam_group):
-                        if drawn == cam:
-                            self._batch_of[group_i] = (len(self._batches), j)
+            for s, cam in enumerate(slots):  # in draw order
+                by_size.setdefault((self._cameras.width_for(cam), self._cameras.height_for(cam)), []).append(s)
+            for batch_slots in by_size.values():
+                for group_i, s in enumerate(slot_of_draw):
+                    if s in batch_slots:
+                        self._batch_of[group_i] = (len(self._batches), batch_slots.index(s))
+                cams: list[int] = [slots[s] for s in batch_slots]
                 colors, alphas, gamma, info = trainer._rasterize_inputs(params, self._leaves, self._cameras, cams, config)
                 # One unbind per output, not a slice per camera: a slice's backward fills a zero tensor of the WHOLE batch
                 # and the cameras' gradients are then summed; unbind's backward stacks the cameras' gradients once.
                 depth: Tensor | None = info.get("render_depth")
                 depths = depth.unbind(0) if depth is not None else None
-                draws: tuple[int, ...] = tuple(self._cam_group.count(cam) for cam in cams)
+                draws: tuple[int, ...] = tuple(slot_of_draw.count(s) for s in batch_slots)
                 self._batches.append(SizeBatch(colors.unbind(0), alphas.unbind(0), depths, gamma, info, cams, draws, (colors, alphas, depth)))
 
     def render(self, group_i: int) -> RenderOut:
