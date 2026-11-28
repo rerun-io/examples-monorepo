@@ -42,7 +42,9 @@ class InferenceConfig:
     dit_fp8_edges: bool = os.environ.get("FDANYONE_DIT_FP8_EDGES", "0") == "1"
     """Also run the boundary blocks 0-2 and 27-29 (BF16 otherwise) with FP8 W8A8 projections. Off by default;
     ``FDANYONE_DIT_FP8_EDGES=1`` turns it on. RTX 5090 step-0 capture: about 0.6 s per forward faster, predicted velocity
-    0.068 rel L2 from the shipped FP8 policy and 0.079 from BF16 (the shipped policy: 0.084 from BF16)."""
+    0.068 rel L2 from the shipped FP8 policy and 0.079 from BF16 (the shipped policy: 0.084 from BF16). Views run vs the FP8
+    golden (with the fused glue): steps 10.7-10.8 s, SSIM 0.932, PSNR 30.50 dB, LPIPS 0.0565: just outside the 5 % band
+    (it moves toward BF16, away from the FP8 golden), hence off."""
     dit_nvfp4_projections: tuple[str, ...] = tuple(filter(None, os.environ.get("FDANYONE_DIT_NVFP4", "").split(",")))
     """Projection groups of the FP8 blocks that run NVFP4 W4A4 instead (cuBLASLt block-scaled FP4 GEMM, Triton
     activation quantization): any of ``ffn``, ``self_attn``, ``self_attn_mvs``, ``cross_attn``. Off by default;
@@ -51,7 +53,9 @@ class InferenceConfig:
     """Inclusive block range of ``dit_nvfp4_projections`` (inside the FP8 range, blocks 3-26)."""
     dit_nvfp4_steps: tuple[int, ...] = tuple(int(k) for k in os.environ.get("FDANYONE_DIT_NVFP4_STEPS", ""))
     """Denoising step indices (digits, e.g. ``3`` for the last of four) at which ``dit_nvfp4_projections`` run NVFP4;
-    the other steps run their FP8 twins. Empty (default) = every step. Late steps amplify the NVFP4 error least."""
+    the other steps run their FP8 twins. Empty (default) = every step. Early steps amplify the NVFP4 error, the last
+    step's error lands in the output as texture: all projections at step 3 only scored SSIM 0.929, PSNR 31.0 dB but
+    LPIPS 0.0585 vs the FP8 golden (band 0.0544)."""
     dit_regional_compile: bool = False
     """``torch.compile`` each DiT block in place (static shapes). Off by default: on an RTX 5090 a cold
     max-autotune compile took ~690 s, and with upstream's six-view groups the compiled blocks ran out of the 32 GB
