@@ -176,3 +176,32 @@ def test_rigid_coherence_loss_value_and_gradients_unchanged() -> None:
     torch.testing.assert_close(ours, ref)
     torch.testing.assert_close(z1.grad, z2.grad)
     torch.testing.assert_close(c1.grad, c2.grad)
+
+
+@pytest.mark.parametrize("bg", [(0.0, 0.0, 0.0), (0.2, 0.5, 1.0)])
+def test_batched_composite_terms_equal_per_camera_terms(bg: tuple[float, float, float]) -> None:
+    """masked_composite_terms_batch (uint8 targets, channel-first composites) gives each camera's masked_composite_terms
+    and the same render / alpha gradients (eager, CPU)."""
+    from open4dgs.fused_loss import masked_composite_terms, masked_composite_terms_batch
+
+    torch.manual_seed(0)
+    b, h, w = 3, 24, 40
+    colors = torch.rand(b, h, w, 3) * 1.2 - 0.1
+    alphas = torch.rand(b, h, w, 1)
+    gt = (torch.rand(b, h, w, 3) * 255).round().to(torch.uint8)
+    masks = torch.rand(b, h, w).round()
+    masks[1] *= 255.0  # a 0-255 mask is rescaled per camera
+    bgt = torch.tensor(bg)
+    c1, a1 = colors.clone().requires_grad_(True), alphas.clone().requires_grad_(True)
+    ref = [masked_composite_terms(c1[i], a1[i], gt[i].float().div(255.0), masks[i], bgt, 1e-4) for i in range(b)]
+    c2, a2 = colors.clone().requires_grad_(True), alphas.clone().requires_grad_(True)
+    l1, pred_l, gt_l, alpha_out, alpha_mask = masked_composite_terms_batch(c2, a2, gt, masks, bgt, 1e-4)
+    for got, k in ((l1, 0), (alpha_out, 3), (alpha_mask, 4)):
+        torch.testing.assert_close(got, torch.stack([r[k] for r in ref]), rtol=1e-5, atol=1e-7)
+    torch.testing.assert_close(pred_l, torch.stack([r[1] for r in ref]).permute(0, 3, 1, 2))
+    torch.testing.assert_close(gt_l, torch.stack([r[2] for r in ref]).permute(0, 3, 1, 2))
+    assert pred_l.is_contiguous() and gt_l.is_contiguous()
+    sum(r[0] + r[3] + 0.5 * r[4] + r[1].square().mean() for r in ref).backward()
+    (l1 + alpha_out + 0.5 * alpha_mask + pred_l.square().mean(dim=(1, 2, 3))).sum().backward()
+    torch.testing.assert_close(c2.grad, c1.grad, rtol=1e-4, atol=1e-8)
+    torch.testing.assert_close(a2.grad, a1.grad, rtol=1e-4, atol=1e-8)

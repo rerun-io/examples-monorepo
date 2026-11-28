@@ -54,11 +54,16 @@ source:
     # Fix, maths unchanged: rigid_coherence_loss gathers its neighbours with index_select (backward = one index_add_)
     # instead of advanced indexing (backward = a sort-based index_put_ over every dynamic row x K, each step).
     - patches/0009-rigid-loss-index-select.patch
+    # Hook + host-sync fix, maths unchanged: one camera-losses seam in the train loop (a camera group's
+    # ``camera_losses(...)``, None = the per-camera loop) and no unique() of identical active-row sets (a camera
+    # group's cameras share one; unique only re-sorted them, with a host sync). packages/open4dgs
+    # (open4dgs.trigs_trainer.SharedTimeGroup.camera_losses) owns the batched loss.
+    - patches/0010-camera-losses-seam.patch
 
 build:
   # Bump with every patch or build script change: the build string hash does not follow the recipe content, and the
   # shared rattler package cache would otherwise hand an older build to the next install.
-  number: 10
+  number: 11
   noarch: python
   script:
     # pixi-build reuses the host prefix between rebuilds: clear the target first.
