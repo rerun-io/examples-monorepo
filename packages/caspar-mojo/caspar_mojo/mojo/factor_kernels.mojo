@@ -384,11 +384,11 @@ def point_linearize_kernel[Model: CameraModel](
     point_v: Int32,
     point_h: Int32,
 ):
-    """The point blocks of -J^T e and of the block diagonal, one thread per point over its observations (no atomics)."""
+    """The point blocks of -J^T e and of the block diagonal, one warp per point over its observations (no atomics)."""
     comptime assert point_off.flat_rank == 1 and point_start.flat_rank == 1 and by_point_pixels.flat_rank == 2
     comptime assert by_point_frame.flat_rank == 1 and by_point_camera.flat_rank == 1
     comptime assert g.flat_rank == 1 and hblk.flat_rank == 1
-    var j = global_idx.x
+    var j = global_idx.x // WARP_SIZE
     if j >= Int(point_off.dim[0]()):
         return
     var v = Int(point_off[j][0])
@@ -396,7 +396,7 @@ def point_linearize_kernel[Model: CameraModel](
         return
     var grad = Array[Float32, 3](fill=0.0)
     var hess = Array[Float32, tri(3)](fill=0.0)
-    for i in range(Int(point_start[j][0]), Int(point_start[j + 1][0])):
+    for i in range(Int(point_start[j][0]) + lane_id(), Int(point_start[j + 1][0]), WARP_SIZE):
         var o = project_observation[Model](poses, rigs, intrinsics, points, Int(by_point_frame[i][0]), Int(by_point_camera[i][0]), j)
         var e0 = o.u - by_point_pixels[i, 0][0]
         var e1 = o.v - by_point_pixels[i, 1][0]
@@ -404,6 +404,12 @@ def point_linearize_kernel[Model: CameraModel](
             grad[a] -= o.point[a] * e0 + o.point[3 + a] * e1
             comptime for b in range(a, 3):
                 hess[tri_index[3](a, b)] += o.point[a] * o.point[b] + o.point[3 + a] * o.point[3 + b]
+    comptime for a in range(3):
+        grad[a] = warp.sum(grad[a])
+    comptime for t in range(tri(3)):
+        hess[t] = warp.sum(hess[t])
+    if lane_id() != 0:
+        return
     var h = Int(point_h) + tri(3) * ((v - Int(point_v)) // 3)
     comptime for a in range(3):
         g[v + a] = grad[a]
@@ -490,21 +496,21 @@ def point_gather_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG:
     point_h: Int32,
     lam: Float32,
 ):
-    """One thread per point gathers its observations (point-sorted copies of frame and camera): H_pc x_cam summed
-    in registers, then the damped 3x3 point solve. No atomics: the camera-sorted order scatters a point's terms."""
+    """One warp per point gathers its observations (point-sorted copies of frame and camera): H_pc x_cam summed
+    over the lanes, then the damped 3x3 point solve. No atomics: the camera-sorted order scatters a point's terms."""
     comptime assert point_off.flat_rank == 1 and point_start.flat_rank == 1 and pose_off.flat_rank == 1
     comptime assert by_point_frame.flat_rank == 1 and by_point_camera.flat_rank == 1
     comptime assert rig_off.flat_rank == 1 and calib_off.flat_rank == 1
     comptime assert g.flat_rank == 1 and dst.flat_rank == 1
     comptime K = Model.NUM_CALIB
-    var j = global_idx.x
+    var j = global_idx.x // WARP_SIZE
     if j >= Int(point_off.dim[0]()):
         return
     var v = Int(point_off[j][0])
     if v < 0:
         return
     var w = Array[Float32, 3](fill=0.0)
-    for i in range(Int(point_start[j][0]), Int(point_start[j + 1][0])):
+    for i in range(Int(point_start[j][0]) + lane_id(), Int(point_start[j + 1][0]), WARP_SIZE):
         var frame = Int(by_point_frame[i][0])
         var camera = Int(by_point_camera[i][0])
         var o = project_observation[Model](poses, rigs, intrinsics, points, frame, camera, j)
@@ -529,6 +535,10 @@ def point_gather_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG:
                 u1 += uc[1]
         comptime for k in range(3):
             w[k] += o.point[k] * u0 + o.point[3 + k] * u1
+    comptime for k in range(3):
+        w[k] = warp.sum(w[k])
+    if lane_id() != 0:
+        return
     var rhs = Array[Float32, 3](fill=0.0)
     comptime for k in range(3):
         comptime if MODE == GATHER_NEGATE:
