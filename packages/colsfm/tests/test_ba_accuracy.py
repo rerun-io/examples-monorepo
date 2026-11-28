@@ -31,7 +31,7 @@ def test_perturb_moves_every_free_pose_and_point_by_the_stated_amounts() -> None
 def test_a_merged_row_replaces_the_row_of_the_same_name_and_gpu() -> None:
     from colsfm.apis.ba_accuracy import AccuracyRow, AccuracyTable, markdown, merged
 
-    numbers = {f.name: 0.5 for f in dataclasses.fields(AccuracyRow) if f.type in ("float", float)}
+    numbers = {f.name: 0.5 for f in dataclasses.fields(AccuracyRow) if str(f.type).startswith("float") and f.default is dataclasses.MISSING}
     lists = {"caspar_lm_trials": [3], "caspar_pcg_iterations": [9], "mojo_lm_trials": [3], "mojo_pcg_iterations": [9]}
     seconds = {"caspar_solver_seconds": [0.1], "caspar_solve_call_seconds": [0.2], "mojo_solve_seconds": [0.1], "mojo_call_seconds": [0.2]}
     row = AccuracyRow(
