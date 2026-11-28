@@ -194,3 +194,22 @@ def test_refined_principal_point_is_rejected() -> None:
     options.refine_principal_point = True
     with pytest.raises(ValueError, match="principal_point"):
         problem_from_reconstruction(reconstruction, _config(reconstruction), options)
+
+
+def test_compare_solutions_of_identical_and_moved_models() -> None:
+    from colsfm.ba_compare import compare_solutions
+
+    a = _tiny(num_cameras=2)
+    residuals, _ = _pinhole_residuals(a)
+    same = compare_solutions(a, pycolmap.Reconstruction(a), _config(a), _options())
+    assert np.isclose(same.cost_a, 0.5 * np.sum(residuals**2), rtol=1e-9) and same.cost_relative_difference == 0.0
+    assert same.rotation_difference_max_deg < 1e-6 and same.center_difference_max == 0.0 and same.point_difference_max == 0.0
+    assert same.registered_images_a == same.registered_images_b == 12
+
+    b = pycolmap.Reconstruction(a)
+    frame = b.frame(3)
+    turn = pycolmap.Rotation3d(np.deg2rad([0.0, 1.0, 0.0])) * frame.rig_from_world.rotation
+    frame.rig_from_world = pycolmap.Rigid3d(turn, np.asarray(frame.rig_from_world.translation))
+    moved = compare_solutions(a, b, _config(a), _options())
+    assert np.isclose(moved.rotation_difference_max_deg, 1.0, atol=1e-6) and moved.rotation_difference_median_deg < 1e-6
+    assert moved.cost_b > moved.cost_a and moved.reprojection_relative_difference > 0
