@@ -15,14 +15,14 @@ source:
     # Hook only: `encode` reads a .trigsbin file; `encode_runtime` takes the TrigsRuntime it reads (same options), so
     # packages/open4dgs passes the checkpoint's arrays in memory instead of writing a .trigsbin.
     - patches/0001-encode-runtime-hook.patch
-    # Hooks only: `encode_runtime(executor=...)` compresses each stream (with and without delta coding) on the executor
-    # while the next streams are built, and `codebook1d=` takes a drop-in for `quantize.codebook1d`; the file is the
-    # serial one. packages/open4dgs passes a thread pool and `open4dgs.asog.sorted_codebook1d`.
+    # Hooks only: `encode_runtime(executor=...)` submits each stream's `container.encode_stream` (its own delta choice)
+    # to the executor while the next streams are built, and `codebook1d=` takes a drop-in for `quantize.codebook1d`; the
+    # file is the serial one. packages/open4dgs passes a thread pool and `open4dgs.asog.sorted_codebook1d`.
     - patches/0002-encode-runtime-executor-and-codebook-hooks.patch
 
 build:
   # Bump with every patch or build script change (the build string hash does not follow recipe content).
-  number: 1
+  number: 2
   noarch: python
   script:
     - rm -rf "$SP_DIR/asog" "$SP_DIR"/animated_sog-*.dist-info
