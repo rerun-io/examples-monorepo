@@ -52,7 +52,9 @@ app embeds that viewer: its gradio-rerun comes from `recipes/gradio-rerun-src` (
 wheel). CLI defaults: 20,000 steps of the 25,000-step schedule (`--person.train.schedule-steps`), prior on (`--person.no-prior`); the app starts at 5,000 steps with the prior on (about 3 to 3.5 min on an
 RTX 5090; held-out normal error 30° -> 16°). "Depth + normal prior (MoGe-2)" under Advanced settings turns it off for a faster run.
 MoGe-2 runs through TensorRT when monopriors' engine cache already holds an engine for the frames' size on this machine
-(built by an earlier `MoGeV2TrtPredictor` run), else through torch.
+(built by an earlier `MoGeV2TrtPredictor` run), else through torch. BiRefNet follows the same rule with its own engine
+(`open4dgs.birefnet_trt`): build it once per machine with `pixi run -e fdanyone-rerun fdanyone-birefnet-engine` (ONNX
+export ~40-50 s on the CPU, engine build 81 s on an RTX 5090); the mattes then take 16 ms per frame instead of 42 ms.
 
 The default layout puts the rig and body in 3D beside the source camera, above a grid of the generated views.
 
