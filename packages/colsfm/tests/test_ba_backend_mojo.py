@@ -16,7 +16,7 @@ import pycolmap
 import pytest
 
 if TYPE_CHECKING:
-    from mapping_helpers import SyntheticRig
+    from mapping_helpers import SyntheticRig  # pyrefly: ignore[missing-import]
 
     from colsfm.ba_backend import BaExecutionPlan, CasparCapability
     from colsfm.config import CusfmConfig
@@ -78,9 +78,7 @@ def test_the_camera_models_narrow_a_mojo_plan() -> None:
     assert unported.backend == "ceres" and unported.fallback_reason is not None
     assert "Mojo" in unported.fallback_reason and "SIMPLE_RADIAL" in unported.fallback_reason
 
-    two_models = CasparCapability(
-        availability="available", supported_camera_models=frozenset({"PINHOLE", "SIMPLE_RADIAL"}), probe_errors=()
-    )
+    two_models = CasparCapability(availability="available", supported_camera_models=frozenset({"PINHOLE", "SIMPLE_RADIAL"}), probe_errors=())
     mixed = resolve_ba_plan("mojo", (), ceres_polish=False, optimize_extrinsics=False, capability=two_models)
     # Two rigs, one model each: CASPAR would take it, the Mojo solver takes one model per solve.
     narrowed = mixed.for_camera_models(["PINHOLE", "SIMPLE_RADIAL"], rig_camera_models=[frozenset({"PINHOLE"}), frozenset({"SIMPLE_RADIAL"})])
@@ -146,13 +144,17 @@ def test_a_mojo_solve_reports_colmaps_termination(exit_reason: str, final_cost: 
 
 
 def test_a_mojo_plan_builds_caspars_options_with_the_overrides(isaac_config: CusfmConfig) -> None:
-    from mapping_helpers import quiet_options
+    from mapping_helpers import quiet_options  # pyrefly: ignore[missing-import]
 
     from colsfm.ba_backend import backend_name, resolve_ba_plan
     from colsfm.mapping import bundle_adjustment_options
 
-    plan: BaExecutionPlan = resolve_ba_plan("mojo", ("reduced_pcg_eta=0.25",), ceres_polish=False, optimize_extrinsics=False, capability=_pinhole_only())
-    ba_options: pycolmap.BundleAdjustmentOptions = bundle_adjustment_options(isaac_config.vision_mapping.bundle_adjustment, quiet_options(ba_plan=plan))
+    plan: BaExecutionPlan = resolve_ba_plan(
+        "mojo", ("reduced_pcg_eta=0.25",), ceres_polish=False, optimize_extrinsics=False, capability=_pinhole_only()
+    )
+    ba_options: pycolmap.BundleAdjustmentOptions = bundle_adjustment_options(
+        isaac_config.vision_mapping.bundle_adjustment, quiet_options(ba_plan=plan)
+    )
     assert backend_name(ba_options) == "caspar"
     assert ba_options.caspar.reduced_camera_system and ba_options.caspar.reduced_pcg_eta == pytest.approx(0.25)
 
@@ -161,7 +163,7 @@ def test_a_mojo_plan_builds_caspars_options_with_the_overrides(isaac_config: Cus
 def test_the_mapper_on_mojo_matches_the_mapper_on_caspar(
     synthetic_rig: SyntheticRig, synthetic_database: Path, isaac_config: CusfmConfig, caspar_enabled: bool
 ) -> None:
-    from mapping_helpers import quiet_options
+    from mapping_helpers import quiet_options  # pyrefly: ignore[missing-import]
 
     from colsfm.ba_backend import resolve_ba_plan
     from colsfm.mapping import MappingResult, run_mapping
@@ -175,8 +177,12 @@ def test_the_mapper_on_mojo_matches_the_mapper_on_caspar(
         pytest.skip(f"the Mojo solver cannot solve here: {mojo_plan.fallback_reason} {mojo_plan.capability.probe_errors}")
     caspar_plan: BaExecutionPlan = resolve_ba_plan("caspar", (), ceres_polish=False, optimize_extrinsics=False)
     mapping_config = isaac_config.vision_mapping
-    caspar: MappingResult = run_mapping(build_reconstruction(synthetic_rig.frames_meta), synthetic_database, mapping_config, quiet_options(ba_plan=caspar_plan))
-    mojo: MappingResult = run_mapping(build_reconstruction(synthetic_rig.frames_meta), synthetic_database, mapping_config, quiet_options(ba_plan=mojo_plan))
+    caspar: MappingResult = run_mapping(
+        build_reconstruction(synthetic_rig.frames_meta), synthetic_database, mapping_config, quiet_options(ba_plan=caspar_plan)
+    )
+    mojo: MappingResult = run_mapping(
+        build_reconstruction(synthetic_rig.frames_meta), synthetic_database, mapping_config, quiet_options(ba_plan=mojo_plan)
+    )
     stats: MappingStats = MappingStats.of(mojo)
     assert (mojo.ba_backend, stats.ba_backend, stats.ba_fallback_reason) == ("mojo", "mojo", None)
     assert mojo.num_registered_images == caspar.num_registered_images

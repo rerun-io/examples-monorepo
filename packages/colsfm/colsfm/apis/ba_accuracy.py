@@ -112,7 +112,9 @@ def perturb(
         axis: Float64[ndarray, " 3"] = rng.normal(size=3)
         direction: Float64[ndarray, " 3"] = rng.normal(size=3)
         turn = pycolmap.Rotation3d(np.deg2rad(rotation_deg) * axis / np.linalg.norm(axis))
-        pose: pycolmap.Rigid3d = frame.rig_from_world
+        pose: pycolmap.Rigid3d | None = frame.rig_from_world
+        if pose is None:
+            raise ValueError(f"registered frame {frame_id} has no pose")
         frame.rig_from_world = pycolmap.Rigid3d(
             turn * pose.rotation, np.asarray(pose.translation) + translation * direction / np.linalg.norm(direction)
         )
