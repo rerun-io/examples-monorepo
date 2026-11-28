@@ -136,7 +136,7 @@ def test_frame_major_multiview_layout_matches_the_rearranged_eager_path() -> Non
     assert torch.equal(gated_residual_(x.clone(), branch, gate, frames=f), expected)
 
 
-def test_shared_fp8_projections_equal_the_eager_linears() -> None:
+def test_shared_fp8_projections_equal_the_eager_linears(monkeypatch: pytest.MonkeyPatch) -> None:
     import fdanyone.model.fused as fused
     from fdanyone.model.quantization import Fp8RowwiseLinear, project_fp8_shared
 
@@ -144,14 +144,14 @@ def test_shared_fp8_projections_equal_the_eager_linears() -> None:
     linears = tuple(Fp8RowwiseLinear(torch.nn.Linear(256, 128).to(DEVICE, torch.bfloat16)) for _ in range(3))
     x = (torch.randn(2, 300, 256, device=DEVICE) * 3).to(torch.bfloat16)
     with torch.inference_mode():
-        fused.ENABLED = False
+        monkeypatch.setattr(fused, "ENABLED", False)
         eager = [linear(x) for linear in linears]
-        fused.ENABLED = True
+        monkeypatch.setattr(fused, "ENABLED", True)
         shared = project_fp8_shared(linears, x)
     assert all(torch.equal(a, b) for a, b in zip(eager, shared, strict=True))
 
 
-def test_dit_block_fused_path_stays_near_the_eager_block() -> None:
+def test_dit_block_fused_path_stays_near_the_eager_block(monkeypatch: pytest.MonkeyPatch) -> None:
     """One random FP8 DiT block on a 3-view, 4-frame grid: the fused glue changes only FP32 reduction order."""
 
     import fdanyone.model.fused as fused
@@ -179,9 +179,31 @@ def test_dit_block_fused_path_stays_near_the_eager_block() -> None:
     modulation = (torch.randn(views, 6, 3072, device=DEVICE) * 0.1).to(torch.bfloat16)
     outputs = []
     for enabled in (False, True):
-        fused.ENABLED = enabled
+        monkeypatch.setattr(fused, "ENABLED", enabled)
         with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             outputs.append(block(x.clone(), context, modulation, spatial, multiview, (views, frames, height, width)).float())
-    fused.ENABLED = True
     eager, fast = outputs
     assert float((fast - eager).norm() / eager.norm()) < 0.02
+
+
+def test_inputs_off_the_kernel_contract_run_the_eager_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An FP32 stream or a strided view must not reach a BF16 row kernel (it would round differently or raise)."""
+
+    import fdanyone.model.fused as fused
+    from fdanyone.vendor.diffsynth.models.wan_video_dit import normalized_modulation
+
+    monkeypatch.setattr(fused, "ENABLED", True)
+    torch.manual_seed(0)
+    v, n, c = 2, 16, 256
+    norm = torch.nn.LayerNorm(c, eps=1e-6, elementwise_affine=False).to(DEVICE)
+    shift, scale = (torch.randn(v, 1, c, device=DEVICE) * 0.2 for _ in range(2))
+    with torch.inference_mode():
+        bf16 = torch.randn(v, n, c, device=DEVICE).to(torch.bfloat16)
+        assert fused.active(bf16)
+        assert not fused.active(bf16.float())
+        assert not fused.active(bf16.transpose(1, 2))
+        fp32 = torch.randn(v, n, c, device=DEVICE)
+        out = normalized_modulation(norm, fp32, shift, scale)
+        monkeypatch.setattr(fused, "ENABLED", False)
+        expected = normalized_modulation(norm, fp32, shift, scale)
+    assert out.dtype is torch.float32 and torch.equal(out, expected)

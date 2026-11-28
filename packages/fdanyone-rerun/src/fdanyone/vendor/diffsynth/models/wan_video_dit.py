@@ -118,7 +118,7 @@ def normalized_modulation(
 
     if torch.is_grad_enabled():
         return modulate(norm(x), shift, scale)
-    if fused.active(x) and x.dtype == torch.bfloat16 and x.is_contiguous():
+    if fused.active(x):
         return fused.layer_norm_modulation(x, shift, scale, norm.eps)
 
     output = torch.empty_like(x)
@@ -269,27 +269,21 @@ class SelfAttention(nn.Module):
 
     def forward(self, x: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
         if fused.active(x):
-            return self._forward_fused(x, freqs)
-        q = self.norm_q.forward_inplace(self.q(x))
-        k = self.norm_k.forward_inplace(self.k(x))
-        v = self.v(x)
-        q = rope_apply(q, freqs, self.num_heads)
-        k = rope_apply(k, freqs, self.num_heads)
-        return self.o(attention(q, k, v, self.num_heads, self.attention_backend))
-
-
-    def _project_qkv(self, x: torch.Tensor) -> list[torch.Tensor]:
-        projections = (self.q, self.k, self.v)
-        if all(isinstance(p, Fp8RowwiseLinear) for p in projections):
-            return project_fp8_shared(projections, x)
-        return [projection(x) for projection in projections]
-
-    def _forward_fused(self, x: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
-        q, k, v = self._project_qkv(x)
-        del x
-        tables = fused.rope_tables(freqs)
-        q = fused.rms_norm_rope_(q, self.norm_q.weight, self.norm_q.eps, tables)
-        k = fused.rms_norm_rope_(k, self.norm_k.weight, self.norm_k.eps, tables)
+            projections = (self.q, self.k, self.v)
+            if all(isinstance(p, Fp8RowwiseLinear) for p in projections):
+                q, k, v = project_fp8_shared(projections, x)
+            else:
+                q, k, v = (projection(x) for projection in projections)
+            del x  # the modulation slab, released before attention
+            tables = fused.rope_tables(freqs)
+            q = fused.rms_norm_rope_(q, self.norm_q.weight, self.norm_q.eps, tables)
+            k = fused.rms_norm_rope_(k, self.norm_k.weight, self.norm_k.eps, tables)
+        else:
+            q = self.norm_q.forward_inplace(self.q(x))
+            k = self.norm_k.forward_inplace(self.k(x))
+            v = self.v(x)
+            q = rope_apply(q, freqs, self.num_heads)
+            k = rope_apply(k, freqs, self.num_heads)
         return self.o(attention(q, k, v, self.num_heads, self.attention_backend))
 
 
@@ -341,13 +335,15 @@ class DiTBlock(nn.Module):
         # token slab for the equally shaped second-projection output.
         if not torch.is_grad_enabled():
             del x
-            if isinstance(self.ffn[2], Fp8RowwiseLinear):
-                return self.ffn[2].forward_gelu(hidden)
+            if isinstance(self.ffn[2], Fp8RowwiseLinear) and fused.active(hidden):
+                return project_fp8_shared((self.ffn[2],), hidden, gelu=True)[0]
         hidden = gelu_tanh(hidden)
         return self.ffn[2](hidden)
 
     def _norm3(self, x: torch.Tensor) -> torch.Tensor:
-        if fused.active(x) and x.is_contiguous():
+        """A call, not a local, so the normalized slab is released before the FFN allocates its hidden activation."""
+
+        if fused.active(x):
             return fused.layer_norm_affine(x, self.norm3.weight, self.norm3.bias, self.norm3.eps)
         return self.norm3(x)
 
@@ -362,7 +358,7 @@ class DiTBlock(nn.Module):
 
         if torch.is_grad_enabled():
             return x + (branch if gate is None else gate * branch)
-        if gate is not None and fused.active(x) and x.is_contiguous() and branch.is_contiguous():
+        if gate is not None and fused.active(x) and fused.active(branch):
             return fused.gated_residual_(x, branch, gate)
         if gate is not None:
             branch.mul_(gate)
