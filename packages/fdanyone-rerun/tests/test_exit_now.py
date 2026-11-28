@@ -1,4 +1,5 @@
-"""``exit_now``: the CLI ends without interpreter teardown, and its saved recording is still complete."""
+"""fdanyone-run start-up and exit: ``exit_now`` ends without interpreter teardown (its saved recording complete), and the
+entry module stays light."""
 
 import subprocess
 import sys
@@ -38,3 +39,11 @@ def test_exit_now_closes_the_recording_and_exits_zero(tmp_path: Path) -> None:
             last = max(last, float(np.max(batch.column("Points3D:positions").to_pylist()[-1])))
     assert rows == 50
     assert last == 49.0
+
+
+def test_the_cli_entry_does_not_import_torchmetrics() -> None:
+    # 2 s of fdanyone-run's start-up (with torchvision.models); the run itself never scores (fused SSIM, no holdout)
+    probe: str = "import sys, fdanyone_rerun.apis.run; print(sorted(m for m in ('torchmetrics', 'open4dgs.evaluate') if m in sys.modules))"
+    done = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, timeout=120)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip() == "[]"
