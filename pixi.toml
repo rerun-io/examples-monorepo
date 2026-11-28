@@ -4260,6 +4260,12 @@ depends-on = ["fdanyone-download"]
 cwd = "packages/fdanyone-rerun"
 description = "Generate novel views of the person in a video and log the run to Rerun (needs the GPU); see --help"
 
+[feature.fdanyone-rerun.tasks.fdanyone-birefnet-engine]
+cmd = "python tools/apps/birefnet_engine.py"
+depends-on = ["fdanyone-download"]
+cwd = "packages/open4dgs"
+description = "Build this machine's BiRefNet TensorRT engine once (the person mattes use it from the next run on; without it they run in torch)"
+
 # The Space's fixed policy on its example clip: six views on one ring 15 degrees above the subject, 4DAnyone-Turbo.
 [feature.fdanyone-rerun.tasks.fdanyone-example]
 cmd = "python tools/run.py --run.output-dir data/runs/example --run.overwrite"
