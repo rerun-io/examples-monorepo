@@ -10,14 +10,13 @@ from std.time import perf_counter_ns
 
 from max.gpu.host import DeviceContext
 
-from solver import F32HostIn, F32HostOut, HostProblem, HostState, I32HostIn, Options, Stats, U8HostIn, solve_model
+from solver import F32HostIn, F32HostOut, HostProblem, HostState, I32HostIn, Options, Stats, U8HostIn, solve_model, supports_model
 
 comptime ABI_VERSION: Int32 = 1
 comptime OK: Int32 = 0
 comptime ERROR: Int32 = 1
 comptime UNSUPPORTED: Int32 = 2
 
-comptime NUM_CAMERA_MODELS: Int64 = 4
 
 @fieldwise_init
 struct CProblem(TrivialRegisterPassable):
@@ -85,10 +84,6 @@ def _set_error(message: String, buffer: MutPointer[c_char, MutUntrackedOrigin], 
     buffer[unsafe_offset=n] = 0
 
 
-def _supported(camera_model: Int64) -> Bool:
-    return 0 <= camera_model < NUM_CAMERA_MODELS
-
-
 def _host_problem(p: CProblem) -> HostProblem:
     return HostProblem(
         n_frames=Int(p.num_frames),
@@ -137,7 +132,7 @@ def caspar_mojo_abi_version() abi("C") -> Int32:
 @export
 def caspar_mojo_supports(camera_model: Int64, refine_intrinsics: Int64, refine_rig: Int64) abi("C") -> Int32:
     _ = refine_intrinsics, refine_rig  # every flag combination is compiled for a supported model
-    return 1 if _supported(camera_model) else 0
+    return 1 if supports_model(Int(camera_model)) else 0
 
 
 @export
@@ -150,7 +145,7 @@ def caspar_mojo_solve(
     error_capacity: Int64,
 ) abi("C") -> Int32:
     var start = perf_counter_ns()
-    if not _supported(problem[].camera_model):
+    if not supports_model(Int(problem[].camera_model)):
         _set_error(String(t"camera model {problem[].camera_model} is not compiled into this library"), error_message, error_capacity)
         return UNSUPPORTED
     try:

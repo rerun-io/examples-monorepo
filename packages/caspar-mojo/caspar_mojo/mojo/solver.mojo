@@ -17,8 +17,6 @@ from camera_models import CameraModel, FullOpenCV, MAX_PARAMS, OpenCVFisheye, Pi
 from factor_kernels import (
     BLOCK,
     WARPS,
-    GATHER_BACKSUBSTITUTE,
-    GATHER_NEGATE,
     POINT_LANES,
     cross_points_kernel,
     gather_rows_kernel,
@@ -149,14 +147,14 @@ struct TangentLayout(ImplicitlyCopyable):
 def tangent_layout[K: Int](problem: HostProblem) -> TangentLayout:
     var n6 = 0
     for i in range(problem.n_frames):
-        n6 += Int(problem.pose_free[unsafe_offset=i])
+        n6 += Int(problem.pose_free[unsafe_offset=i] != 0)
     var n_calib = 0
     for c in range(problem.n_cameras):
-        n6 += Int(problem.sensor_free[unsafe_offset=c])
-        n_calib += Int(problem.intrinsics_free[unsafe_offset=c])
+        n6 += Int(problem.sensor_free[unsafe_offset=c] != 0)
+        n_calib += Int(problem.intrinsics_free[unsafe_offset=c] != 0)
     var n_points = 0
     for j in range(problem.n_points):
-        n_points += Int(problem.point_free[unsafe_offset=j])
+        n_points += Int(problem.point_free[unsafe_offset=j] != 0)
     var n_cam = 6 * n6 + K * n_calib
     var n_h_cam = tri(6) * n6 + tri(K) * n_calib
     return TangentLayout(n6, n_calib, n_points, n_cam, n_cam + 3 * n_points, n_h_cam, n_h_cam + tri(3) * n_points)
@@ -282,10 +280,7 @@ def _upload[dtype: DType](ctx: DeviceContext, src: ImmPointer[Scalar[dtype], Imm
 
 
 def _upload_list[dtype: DType](ctx: DeviceContext, values: List[Scalar[dtype]]) raises -> DeviceBuffer[dtype]:
-    var buf = ctx.enqueue_create_buffer[dtype](max(len(values), 1))
-    if len(values) > 0:
-        ctx.enqueue_copy(buf.create_sub_buffer[dtype](0, len(values)), values.unsafe_ptr())
-    return buf^
+    return _upload[dtype](ctx, ImmPointer[Scalar[dtype], ImmUntrackedOrigin](unsafe_from_address=Int(values.unsafe_ptr())), len(values))
 
 
 def _download(ctx: DeviceContext, dst: F32HostOut, src: DeviceBuffer[DType.float32], n: Int) raises:
@@ -331,6 +326,33 @@ struct KernelClock(Movable):
         print(line)
 
 
+def _copy(dst: F32HostOut, src: F32HostIn, n: Int):
+    for i in range(n):
+        dst[unsafe_offset=i] = src[unsafe_offset=i]
+
+
+def _zero(dst: F32HostOut, n: Int):
+    for i in range(n):
+        dst[unsafe_offset=i] = 0.0
+
+
+comptime INDEX_LIMIT = 2**31 - 1
+"""Device indices are int32."""
+
+
+def _check(problem: HostProblem, options: Options) raises:
+    """The limits the buffer sizing and the int32 device indices rely on, before any buffer exists."""
+    if options.solver_iter_max < 1 or options.reduced_pcg_iter_max < 1:
+        raise Error(t"solver_iter_max {options.solver_iter_max} and reduced_pcg_iter_max {options.reduced_pcg_iter_max} must be >= 1")
+    if not (0.0 < options.reduced_pcg_eta < 1.0):
+        raise Error(t"reduced_pcg_eta {options.reduced_pcg_eta} must lie in (0, 1)")
+    if min(problem.n_frames, problem.n_cameras, problem.n_points, problem.n_obs) < 0:
+        raise Error("negative problem size")
+    var packed = tri(3) * problem.n_points + tri(6) * (problem.n_frames + problem.n_cameras) + tri(MAX_PARAMS) * problem.n_cameras
+    if 2 * problem.n_obs > INDEX_LIMIT or packed > INDEX_LIMIT:
+        raise Error(t"problem too large for int32 indices: {problem.n_obs} observations, {packed} packed block entries")
+
+
 def _usable(x: Float64) -> Bool:
     return x > 0.0 and isfinite(x)
 
@@ -347,6 +369,19 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
     """Run the LM solve and write the accepted state into `result`, or with `linearize_only` linearise once at the
     given state and write the gradient -J^T e and the packed block diagonal instead."""
     comptime K = Model.NUM_CALIB
+    _check(problem, options)
+    if problem.n_obs == 0:
+        # No residual: cost 0, nothing moves (CASPAR ends such a solve on its score exit).
+        if linearize_only:
+            var lay = tangent_layout[K](problem)
+            _zero(linearize_gradient, lay.n_tan)
+            _zero(linearize_hblk, lay.n_h)
+        else:
+            _copy(result.intrinsics, problem.intrinsics, problem.n_cameras * MAX_PARAMS)
+            _copy(result.sensor_from_rig, problem.sensor_from_rig, problem.n_cameras * 7)
+            _copy(result.rig_from_world, problem.rig_from_world, problem.n_frames * 7)
+            _copy(result.points, problem.points, problem.n_points * 3)
+        return Stats(0.0, 0.0, 0, 0, EXIT_CONVERGED_SCORE_THRESHOLD, 0.0, 0, List[Trial]())
     var image_order = Optional[ImageOrder]()
     if not _in_image_order(problem):
         # The warp tiles hold one image each: any order is correct, (camera, frame) order makes them full.
@@ -450,8 +485,8 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
     comptime point_linearize = point_linearize_kernel[Model]
     comptime cross_points = cross_points_kernel[Model, REFINE_INTRINSICS, REFINE_RIG, False]
     comptime cross_all = cross_points_kernel[Model, REFINE_INTRINSICS, REFINE_RIG, True]
-    comptime gather_negate = point_gather_kernel[Model, REFINE_INTRINSICS, REFINE_RIG, GATHER_NEGATE]
-    comptime gather_backsubstitute = point_gather_kernel[Model, REFINE_INTRINSICS, REFINE_RIG, GATHER_BACKSUBSTITUTE]
+    comptime gather_negate = point_gather_kernel[Model, REFINE_INTRINSICS, REFINE_RIG, False]
+    comptime gather_backsubstitute = point_gather_kernel[Model, REFINE_INTRINSICS, REFINE_RIG, True]
     comptime precond = pcg_precond_kernel[K]
     comptime retract = retract_kernel[Model]
 
@@ -470,36 +505,6 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
     var t0 = perf_counter_ns()
     clock.last = perf_counter_ns()
 
-    # Linearise at the current state: g = -J^T e, the block diagonal, the J cache, the cost into its slot.
-    ctx.enqueue_memset(d_g, 0.0)
-    ctx.enqueue_memset(d_h, 0.0)
-    ctx.enqueue_memset(d_scalars, 0.0)
-    ctx.enqueue_function[linearize](
-        TileTensor(d_poses, row_major((nf, 7))).as_imm(), TileTensor(d_rigs, row_major((nc, 7))).as_imm(),
-        TileTensor(d_intr, row_major((nc, MAX_PARAMS))).as_imm(), TileTensor(d_points, row_major((np, 3))).as_imm(),
-        t_pose_off, t_rig_off, t_calib_off, t_point_off, obs_frame, obs_camera, obs_point, pixels,
-        warp_tiles, d_g.unsafe_ptr(), d_h.unsafe_ptr(), scalars, Int32(SLOT_COST_LINEARIZE), n6, ncal, Int32(tiles),
-        grid_dim=tile_grid, block_dim=BLOCK,
-    )
-    clock.tick(ctx, "linearize")
-    ctx.enqueue_function[point_linearize](
-        TileTensor(d_poses, row_major((nf, 7))).as_imm(), TileTensor(d_rigs, row_major((nc, 7))).as_imm(),
-        TileTensor(d_intr, row_major((nc, MAX_PARAMS))).as_imm(), TileTensor(d_points, row_major((np, 3))).as_imm(),
-        t_point_off, point_start, by_point_frame, by_point_camera, by_point_pixels, g, TileTensor(d_h, row_major((max(lay.n_h, 1),))),
-        point_v, point_h, grid_dim=_grid(np * POINT_LANES), block_dim=BLOCK,
-    )
-    clock.tick(ctx, "point_linearize")
-    launches += 2
-    ctx.enqueue_copy(host2, d_scalars.create_sub_buffer[DType.float64](SLOT_COST_LINEARIZE, 2))
-    ctx.synchronize()
-    var score_best = Float32(host2[0])
-    var initial_cost = score_best
-    if linearize_only:
-        _download(ctx, linearize_gradient, d_g, lay.n_tan)
-        _download(ctx, linearize_hblk, d_h, lay.n_h)
-        ctx.synchronize()
-        return Stats(initial_cost, initial_cost, 0, 0, EXIT_MAX_ITERATIONS, 0.0, launches, List[Trial]())
-
     var trace = List[Trial](capacity=options.solver_iter_max)
     var diag = options.diag_init
     var up_scale = options.diag_scaling_up
@@ -510,11 +515,16 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
     # Whether the linearisation state sits in the trial buffers: after an accept that the next iteration does not
     # re-linearise (CASPAR skips it on the last allowed iteration), the products must still see the old state.
     var lin_in_trial = False
+    var score_best: Float32 = 0.0
+    var initial_cost: Float32 = 0.0
     for it in range(options.solver_iter_max):
-        if it != 0 and it < options.solver_iter_max - 1:
+        # CASPAR linearises first (res_jac_first) and again at every trial but the last allowed one.
+        if it == 0 or it < options.solver_iter_max - 1:
             lin_in_trial = False
             ctx.enqueue_memset(d_g, 0.0)
             ctx.enqueue_memset(d_h, 0.0)
+            if it == 0:
+                ctx.enqueue_memset(d_scalars, 0.0)
             ctx.enqueue_function[linearize](
                 TileTensor(d_poses, row_major((nf, 7))).as_imm(), TileTensor(d_rigs, row_major((nc, 7))).as_imm(),
                 TileTensor(d_intr, row_major((nc, MAX_PARAMS))).as_imm(), TileTensor(d_points, row_major((np, 3))).as_imm(),
@@ -531,6 +541,16 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
             )
             clock.tick(ctx, "point_linearize")
             launches += 2
+            if it == 0:
+                ctx.enqueue_copy(host2, d_scalars.create_sub_buffer[DType.float64](SLOT_COST_LINEARIZE, 2))
+                ctx.synchronize()
+                score_best = Float32(host2[0])
+                initial_cost = score_best
+                if linearize_only:
+                    _download(ctx, linearize_gradient, d_g, lay.n_tan)
+                    _download(ctx, linearize_hblk, d_h, lay.n_h)
+                    ctx.synchronize()
+                    return Stats(initial_cost, initial_cost, 0, 0, EXIT_MAX_ITERATIONS, 0.0, launches, List[Trial]())
         var lin_poses = TileTensor(t_poses if lin_in_trial else d_poses, row_major((nf, 7))).as_imm()
         var lin_rigs = TileTensor(t_rigs if lin_in_trial else d_rigs, row_major((nc, 7))).as_imm()
         var lin_intr = TileTensor(t_intr if lin_in_trial else d_intr, row_major((nc, MAX_PARAMS))).as_imm()
@@ -554,7 +574,7 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
         var pending = False
         var k = 0
         while k < options.reduced_pcg_iter_max:
-            var first = Int32(1 if k == 0 else 0)
+            var first = Int32(1 if k == 0 else 0)  # Bool is not DevicePassable
             var rho_slot = Int32(SLOT_PCG + 2 * k)
             ctx.enqueue_function[precond](
                 r, z, s, p.as_imm(), w.as_imm(), hblk, n6, ncal, diag, alpha, first, scalars, rho_slot,
@@ -690,6 +710,15 @@ def _solve_flags[Model: CameraModel](
             return solve[Model, False, True](ctx, problem, options, result, linearize_gradient, linearize_hblk, linearize_only)
         case (False, False):
             return solve[Model, False, False](ctx, problem, options, result, linearize_gradient, linearize_hblk, linearize_only)
+
+
+def supports_model(model: Int) -> Bool:
+    """Whether `solve_model` has a specialisation for this `CameraModel` value (same arms)."""
+    match model:
+        case 0 | 1 | 2 | 3:
+            return True
+        case _:
+            return False
 
 
 def solve_model(

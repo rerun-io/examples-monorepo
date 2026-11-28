@@ -8,7 +8,7 @@ M = B + lambda diag(B) + lambda 1e-6 I, solved exactly (dense Cholesky, unrolled
 from max.gpu import global_idx
 
 from factor_kernels import F32In, F32Out, F64Ptr, I32In, Vec, VecIn, damped_solve, reduce_add, tri, tri_index
-from camera_models import CameraModel
+from camera_models import CameraModel, MAX_PARAMS
 from geometry import Pose, retract
 
 
@@ -216,7 +216,7 @@ def retract_kernel[Model: CameraModel](
             pred = retract_pose(rigs, new_rigs, c, v, s, g, hblk, tri(6) * (v // 6), lam)
         else:
             copy_row[7](rigs, new_rigs, c)
-        copy_row[12](intrinsics, new_intrinsics, c)
+        copy_row[MAX_PARAMS](intrinsics, new_intrinsics, c)
         var vc = Int(calib_off[c][0])
         if vc >= 0:
             var h = calib_h + tri(K) * ((vc - calib_v) // K)

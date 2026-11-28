@@ -24,7 +24,7 @@ from max.gpu.primitives import warp
 
 from layout import ImmTileTensor, MutTileTensor, row_major
 
-from camera_models import CameraModel, Params
+from camera_models import CameraModel, MAX_PARAMS, Params
 from geometry import Pose, Vec3, apply, cross, rotation, translation
 
 comptime L1 = type_of(row_major((0,)))
@@ -87,7 +87,8 @@ def damped_solve[D: Int](hblk: VecIn, h: Int, rhs: Array[Float32, D], lam: Float
 
 @always_inline
 def atomic_add(p: F32Ptr, offset: Int, value: Float32):
-    # CUDA's atomicAdd (relaxed, device scope); Mojo's default ordering adds a fence per add, about 3x slower.
+    # The scatter targets are raw pointers because Atomic takes a pointer, not a TileTensor element. Relaxed, device
+    # scope is CUDA's atomicAdd; Mojo's default ordering adds a fence per add, about 3x slower.
     _ = Atomic[Float32, scope="device"].fetch_add[ordering=Ordering.relaxed](p.unsafe_offset(offset), value)
 
 
@@ -166,7 +167,7 @@ def load_pose(t: F32In, i: Int) -> Pose:
 def load_params(t: F32In, i: Int) -> Params:
     comptime assert t.flat_rank == 2
     var p = Params(fill=0.0)
-    comptime for k in range(12):
+    comptime for k in range(MAX_PARAMS):
         p[k] = t[i, k][0]
     return p^
 
@@ -497,13 +498,7 @@ def add_block_transpose[D: Int](j: Array[Float32, 2 * D], u0: Float32, u1: Float
     scatter_values[D](dst, key, values, running)
 
 
-comptime GATHER_NEGATE = 0
-"""dst_p = -M_pp^-1 H_pc x_cam: the point half of the Schur matvec."""
-comptime GATHER_BACKSUBSTITUTE = 1
-"""dst_p = M_pp^-1 (g_p - H_pc x_cam): the point step after the PCG."""
-
-
-def point_gather_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool, MODE: Int](
+def point_gather_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool, BACKSUBSTITUTE: Bool](
     poses: F32In,
     rigs: F32In,
     intrinsics: F32In,
@@ -524,7 +519,9 @@ def point_gather_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG:
     lam: Float32,
 ):
     """POINT_LANES lanes per point gather its observations (point-sorted copies of frame and camera): H_pc x_cam
-    summed over the lanes, then the damped 3x3 point solve. No atomics: the camera-sorted order scatters a point's terms."""
+    summed over the lanes, then the damped 3x3 point solve: dst_p = -M_pp^-1 H_pc x_cam (the point half of the Schur
+    matvec) or, with `BACKSUBSTITUTE`, M_pp^-1 (g_p - H_pc x_cam) (the point step after the PCG). No atomics: the
+    camera-sorted order scatters a point's terms."""
     comptime assert point_off.flat_rank == 1 and point_start.flat_rank == 1 and pose_off.flat_rank == 1
     comptime assert by_point_frame.flat_rank == 1 and by_point_camera.flat_rank == 1
     comptime assert rig_off.flat_rank == 1 and calib_off.flat_rank == 1
@@ -568,10 +565,10 @@ def point_gather_kernel[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG:
         return
     var rhs = Array[Float32, 3](fill=0.0)
     comptime for k in range(3):
-        comptime if MODE == GATHER_NEGATE:
-            rhs[k] = -w[k]
-        else:
+        comptime if BACKSUBSTITUTE:
             rhs[k] = g[v + k][0] - w[k]
+        else:
+            rhs[k] = -w[k]
     var sol = damped_solve[3](hblk, Int(point_h) + tri(3) * ((v - Int(point_v)) // 3), rhs, lam)
     comptime for k in range(3):
         dst[v + k] = sol[k]

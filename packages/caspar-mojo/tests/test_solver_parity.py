@@ -4,8 +4,11 @@ Tolerances (the lead's parity ruling). The Mojo solver runs in float32 like CASP
 every trial changes it by ~1e-6 relative, so float32 summation order decides its accept or reject (in CASPAR too)
 and the length of that tail varies from run to run. So:
 - the trace is compared trial by trial only up to convergence, the float32 reference's first trial whose best cost
-  is within `CONVERGED` of its final cost (same accept flags, best cost within 1e-3, PCG iterations within 1). That
-  trial itself is left out: its damping comes from the quality ratio of a decrease near the float32 noise;
+  is within `CONVERGED` of its final cost (same accept flags, best cost within 1e-3). That trial itself is left out:
+  its damping comes from the quality ratio of a decrease near the float32 noise. PCG iterations are compared per trial
+  (within 1) only while the best cost is more than `PCG_CONVERGED` above the final one; closer to it the Q stop meets
+  its threshold on float32 noise (the joint rig + intrinsics case: the same trial runs 11 to 19 iterations over five
+  Mojo runs on the 3060), so there only the prefix's total is compared, within 30 %;
 - costs against the float64 reference: initial within 1e-4, final within 1 %;
 - the exit reason equals the float32 reference's, and the trial count is within a factor 2 of it (a gross check);
 - the state is compared through what it predicts, the pixels, because each tail accept moves it along a nearly flat
@@ -34,6 +37,8 @@ pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("native")]
 OPTIONS = BaOptions(solver_iter_max=40)
 CONVERGED = 1e-5
 """Relative distance to the final cost at which a trace counts as converged."""
+PCG_CONVERGED = 1e-4
+"""Relative distance to the final cost below which the per-trial PCG count is float32 noise at the Q stop."""
 QUADRATIC_SLACK = 1.1
 """Room for the third-order terms of the cost around its minimum (measured: at most 1.01 on 12 cases x 2 GPUs)."""
 
@@ -94,14 +99,7 @@ def _residuals(problem: BaProblem, result: BaResult) -> np.ndarray:
     return residual
 
 
-TAIL_PCG_NOISE = pytest.mark.xfail(
-    strict=False,
-    reason="3060, 2026-11-27: trial 6 of 20, cost 4.5e-5 above final, PCG 13 vs 17 (Q stop); accept flags and costs agree. Lead to rule",
-)
-"""The joint rig + intrinsics case trips the PCG-count tolerance just outside `CONVERGED` (fix-b's B review)."""
-
-
-@pytest.mark.parametrize("name", [pytest.param(n, marks=TAIL_PCG_NOISE) if n == "joint_rig_intrinsics_free" else n for n in CASES])
+@pytest.mark.parametrize("name", CASES)
 def test_solve_matches_reference(name: str) -> None:
     problem = _problem(name)
     mojo = solve(problem, OPTIONS)
@@ -116,7 +114,11 @@ def test_solve_matches_reference(name: str) -> None:
         assert isinstance(trial, BaIteration)
         assert trial.accepted == expected.accepted, (index, trial, expected)
         assert trial.cost_best == pytest.approx(expected.cost_best, rel=1e-3), (index, trial, expected)
-        assert abs(trial.pcg_iterations - expected.pcg_iterations) <= 1, (index, trial, expected)
+        if expected.cost_best > trace32[-1].cost_best * (1 + PCG_CONVERGED):
+            assert abs(trial.pcg_iterations - expected.pcg_iterations) <= 1, (index, trial, expected)
+    prefix_pcg = sum(t.pcg_iterations for t in mojo.trace[:converged])
+    reference_pcg = sum(t.pcg_iterations for t in trace32[:converged])
+    assert prefix_pcg == pytest.approx(reference_pcg, rel=0.3), (prefix_pcg, reference_pcg)
     assert mojo.initial_cost == pytest.approx(reference64.initial_cost, rel=1e-4)
     assert mojo.final_cost == pytest.approx(reference64.final_cost, rel=1e-2)
     assert mojo.exit_reason == reference32.exit_reason
@@ -135,6 +137,34 @@ def test_solve_matches_reference(name: str) -> None:
         (mojo.intrinsics, problem.intrinsics, problem.intrinsics_free),
     ):
         np.testing.assert_array_equal(refined[~free], original[~free])
+
+
+def _with_observations(problem: BaProblem, rows: np.ndarray) -> BaProblem:
+    return dataclasses.replace(
+        problem,
+        pixels=problem.pixels[rows],
+        observation_frame=problem.observation_frame[rows],
+        observation_camera=problem.observation_camera[rows],
+        observation_point=problem.observation_point[rows],
+    )
+
+
+def test_observation_order_does_not_change_the_solve() -> None:
+    """The solver regroups observations by (camera, frame) itself; only float32 summation order may differ."""
+    problem = _problem("pinhole_rig_fixed")
+    shuffled = _with_observations(problem, np.random.default_rng(0).permutation(len(problem.pixels)))
+    ordered, permuted = solve(problem, OPTIONS), solve(shuffled, OPTIONS)
+    assert permuted.final_cost == pytest.approx(ordered.final_cost, rel=1e-4)
+    converged = _converged(list(ordered.trace))
+    assert [t.accepted for t in permuted.trace[:converged]] == [t.accepted for t in ordered.trace[:converged]]
+
+
+def test_empty_problem_returns_its_start() -> None:
+    problem = _problem("pinhole")
+    result = solve(_with_observations(problem, np.arange(0)), OPTIONS)
+    assert (result.initial_cost, result.final_cost, result.exit_reason) == (0.0, 0.0, "CONVERGED_SCORE_THRESHOLD")
+    np.testing.assert_allclose(result.points, problem.points, rtol=1e-6)
+    np.testing.assert_allclose(result.rig_from_world, problem.rig_from_world, rtol=1e-6, atol=1e-7)
 
 
 def test_two_trial_cap_matches_reference() -> None:
