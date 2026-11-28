@@ -17,6 +17,7 @@ import dataclasses
 import threading
 import time
 from collections.abc import Callable, Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -117,22 +118,31 @@ def read_run_clip(
     rig: CameraRig = read_camera_rig(output_dir)
     metadata: RunMetadata = read_run_metadata(output_dir)
     models: Path = model_dir()
-    body = load_body(output_dir, models)
     num_frames: int = metadata.input.num_frames
-    if len(body.vertices) != num_frames:
-        raise ValueError(f"{output_dir}: the body has {len(body.vertices)} frames, the clip {num_frames}")
-    vertices: Float32[np.ndarray, "frames verts 3"] = body.vertices.astype(np.float32)
-    matte_model: torch.nn.Module = load_birefnet(models / "birefnet", device)
+
+    def decode(video: str) -> UInt8[Tensor, "frames h w 3"]:
+        return torch.from_numpy(np.stack(read_rgb_video(output_dir / video, expected_frames=num_frames)))
+
+    # PyAV decodes without the GIL: every view decodes on its own thread while the body and BiRefNet load and the
+    # earlier views' mattes run, instead of one view after another on the critical path.
+    pool: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=len(rig.cameras))
+    decoded: list[Future[UInt8[Tensor, "frames h w 3"]]] = [pool.submit(decode, camera.video) for camera in rig.cameras]
     frames: list[UInt8[Tensor, "frames h w 3"]] = []
     masks: list[Float32[Tensor, "frames h w"]] = []
     K: list[np.ndarray] = []
     sizes: list[tuple[int, int]] = []
+    matte_model: torch.nn.Module | None = None
     try:
-        for camera in rig.cameras:
+        body = load_body(output_dir, models)
+        if len(body.vertices) != num_frames:
+            raise ValueError(f"{output_dir}: the body has {len(body.vertices)} frames, the clip {num_frames}")
+        vertices: Float32[np.ndarray, "frames verts 3"] = body.vertices.astype(np.float32)
+        matte_model = load_birefnet(models / "birefnet", device)
+        for camera, pending in zip(rig.cameras, decoded, strict=True):
             raise_if_stopped(cancel)
             stored_wh: tuple[int, int] = (camera.image_width, camera.image_height)
             target_wh: tuple[int, int] = fit_max_side(*stored_wh, max_side)
-            stored: UInt8[Tensor, "frames h w 3"] = torch.from_numpy(np.stack(read_rgb_video(output_dir / camera.video, expected_frames=num_frames)))
+            stored: UInt8[Tensor, "frames h w 3"] = pending.result()
             mattes: UInt8[Tensor, "frames h w"] = camera_matte(
                 matte_model,
                 stored,
@@ -158,6 +168,7 @@ def read_run_clip(
             K.append(scale_intrinsics(camera.intrinsics, stored_wh, target_wh))
             sizes.append(stored_wh)
     finally:
+        pool.shutdown(wait=False, cancel_futures=True)
         del matte_model
         free_gpu()
     people: ClipPeople = ClipPeople(

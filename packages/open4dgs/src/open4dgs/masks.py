@@ -137,11 +137,15 @@ def predict_mattes(
     device: torch.device,
     batch_size: int = 8,
 ) -> UInt8[Tensor, "n h w"]:
-    """BiRefNet mattes (255 = person) of each frame inside its box; zero outside it, the whole frame for a NaN box."""
+    """BiRefNet mattes (255 = person) of each frame inside its box; zero outside it, the whole frame for a NaN box; on the CPU.
+
+    The frames go to ``device`` in one copy and the mattes stay there until one copy back, so no batch waits on the host.
+    """
     height, width = frames.shape[1], frames.shape[2]
     mean: Tensor = torch.tensor(IMAGENET_MEAN, device=device).view(1, 3, 1, 1)
     std: Tensor = torch.tensor(IMAGENET_STD, device=device).view(1, 3, 1, 1)
-    out: UInt8[Tensor, "n h w"] = torch.zeros((len(frames), height, width), dtype=torch.uint8)
+    frames = frames.to(device)
+    out: UInt8[Tensor, "n h w"] = torch.zeros((len(frames), height, width), dtype=torch.uint8, device=device)
     crops: list[tuple[int, int, int, int]] = []
     for box in boxes:
         if not np.isfinite(box).all():
@@ -154,7 +158,7 @@ def predict_mattes(
         inputs: list[Tensor] = []
         for i in batch:
             x0, y0, x1, y1 = crops[i]
-            crop: Tensor = frames[i, y0:y1, x0:x1].to(device).permute(2, 0, 1)[None].float() / 255.0
+            crop: Tensor = frames[i, y0:y1, x0:x1].permute(2, 0, 1)[None].float() / 255.0
             inputs.append(F.interpolate(crop, size=(MODEL_SIZE, MODEL_SIZE), mode="bilinear", antialias=True, align_corners=False))
         with torch.inference_mode():
             logits: Tensor = model(((torch.cat(inputs) - mean) / std).half())[-1]
@@ -162,8 +166,8 @@ def predict_mattes(
         for slot, i in enumerate(batch):
             x0, y0, x1, y1 = crops[i]
             matte: Tensor = F.interpolate(probs[slot : slot + 1], size=(y1 - y0, x1 - x0), mode="bilinear", align_corners=False)[0, 0]
-            out[i, y0:y1, x0:x1] = (matte * 255.0).round().clamp(0, 255).to(torch.uint8).cpu()
-    return out
+            out[i, y0:y1, x0:x1] = (matte * 255.0).round().clamp(0, 255).to(torch.uint8)
+    return out.cpu()
 
 
 def camera_matte(
