@@ -52,6 +52,12 @@ class TrainConfig:
     steps: int = 5000
     """Optimizer steps. Run C on the RTX 5090 (2026-11-26): 2.5k = 30 s, 21.95 dB / LPIPS 0.215; 5k = 60 s, 22.46 dB / 0.180;
     12.5k = ~150 s, 22.96 dB / 0.149; 25k = 306 s, 23.12 dB / 0.140."""
+    schedule_steps: int | None = None
+    """Length of the schedule the run follows, when it stops before its end: the learning-rate decay (TRiGS
+    ``lr_decay_steps``), the relocation stop (a fraction of it) and the MoGe-2 prior schedule (``PriorConfig.at_steps``)
+    keep the horizon of a ``schedule_steps`` run and training stops at ``steps``. None = ``steps``. Run C (Spark, prior
+    on, stride 2, 2026-11-27): 20,000 steps of the 25,000 schedule lose 1.6 % LPIPS held out, a schedule compressed to
+    18,000 steps 4.8 % (more than 18,000 steps of the 25,000 schedule, 3.4 %)."""
     cameras_per_step: int = 4
     """Cameras rendered per optimizer step (TRiGS ``batch_cameras``); cost per step scales with it."""
     sh_degree: int = 3
@@ -101,12 +107,19 @@ class TrainConfig:
     first, -1 = the last. Capture time of line s: t + sign * readout * (s / S - 0.5) (trigs.capture_timing)."""
 
     def __post_init__(self) -> None:
+        if self.schedule_steps is not None and self.schedule_steps < self.steps:
+            raise ValueError(f"schedule_steps ({self.schedule_steps}) must be at least steps ({self.steps})")
         if any(r < 0.0 for r in self.rs_readout_ms):
             raise ValueError(f"rs_readout_ms must be >= 0, got {self.rs_readout_ms}")
         if any(s not in (-1.0, 1.0) for s in self.rs_sign):
             raise ValueError(f"rs_sign entries must be +1 or -1, got {self.rs_sign}")
         if not self.rs_sign:
             raise ValueError("rs_sign needs one value or one per camera")
+
+    @property
+    def horizon(self) -> int:
+        """Steps of the schedule (``schedule_steps``, else ``steps``)."""
+        return self.schedule_steps if self.schedule_steps is not None else self.steps
 
     def rs_signs(self, num_cameras: int) -> tuple[float, ...] | None:
         """``CameraConfig.rs_signs``: sign * readout / max readout per camera (TRiGS takes one readout and scales it by
@@ -123,6 +136,7 @@ class TrainConfig:
         clamp_ms: float = self.time_offset_clamp_ms if self.time_offset_clamp_ms is not None else 500.0 / fps
         return TrigsTrainingConfig(
             n_steps=self.steps,
+            lr_decay_steps=self.schedule_steps if self.schedule_steps is not None else 0,
             fps=fps,
             keyframe_stride=keyframe_step,
             batch_cameras=self.cameras_per_step,
