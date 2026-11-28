@@ -35,6 +35,8 @@ comptime F32In = ImmTileTensor[DType.float32, L2, ImmUntrackedOrigin]
 comptime Vec = MutTileTensor[DType.float32, L1, MutUntrackedOrigin]
 comptime I32In = ImmTileTensor[DType.int32, L1, ImmUntrackedOrigin]
 comptime TilesIn = ImmTileTensor[DType.int32, L2, ImmUntrackedOrigin]
+comptime I32Out = MutTileTensor[DType.int32, L1, MutUntrackedOrigin]
+comptime F32Out = MutTileTensor[DType.float32, L2, MutUntrackedOrigin]
 comptime VecIn = ImmTileTensor[DType.float32, L1, ImmUntrackedOrigin]
 
 def tri(d: Int) -> Int:
@@ -418,6 +420,28 @@ def point_linearize_kernel[Model: CameraModel](
         g[v + a] = grad[a]
     comptime for t in range(tri(3)):
         hblk[h + t] = hess[t]
+
+
+def gather_rows_kernel(
+    rows: I32In,
+    frame: I32In,
+    camera: I32In,
+    pixels: F32In,
+    out_frame: I32Out,
+    out_camera: I32Out,
+    out_pixels: F32Out,
+):
+    """out[i] = column[rows[i]] for the frame, camera and pixel columns."""
+    comptime assert rows.flat_rank == 1 and frame.flat_rank == 1 and camera.flat_rank == 1 and pixels.flat_rank == 2
+    comptime assert out_frame.flat_rank == 1 and out_camera.flat_rank == 1 and out_pixels.flat_rank == 2
+    var i = global_idx.x
+    if i >= Int(rows.dim[0]()):
+        return
+    var n = Int(rows[i][0])
+    out_frame[i] = frame[n]
+    out_camera[i] = camera[n]
+    out_pixels[i, 0] = pixels[n, 0]
+    out_pixels[i, 1] = pixels[n, 1]
 
 
 def score_kernel[Model: CameraModel](

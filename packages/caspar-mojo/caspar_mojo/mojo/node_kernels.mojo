@@ -7,13 +7,10 @@ M = B + lambda diag(B) + lambda 1e-6 I, solved exactly (dense Cholesky, unrolled
 
 from max.gpu import global_idx
 
-from layout import MutTileTensor
-
-from factor_kernels import F32In, F64Ptr, I32In, L2, Vec, VecIn, damped_solve, reduce_add, tri, tri_index
+from factor_kernels import F32In, F32Out, F64Ptr, I32In, Vec, VecIn, damped_solve, reduce_add, tri, tri_index
 from camera_models import CameraModel
 from geometry import Pose, retract
 
-comptime F32Out = MutTileTensor[DType.float32, L2, MutUntrackedOrigin]
 
 
 

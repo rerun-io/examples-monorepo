@@ -10,7 +10,7 @@ from std.os import getenv
 from std.time import perf_counter_ns
 
 from max.gpu import WARP_SIZE
-from max.gpu.host import DeviceAttribute, DeviceBuffer, DeviceContext
+from max.gpu.host import DeviceAttribute, DeviceBuffer, DeviceContext, HostBuffer
 from layout import TileTensor, row_major
 
 from camera_models import CameraModel, FullOpenCV, MAX_PARAMS, OpenCVFisheye, Pinhole, SimpleRadial
@@ -21,6 +21,7 @@ from factor_kernels import (
     GATHER_NEGATE,
     POINT_LANES,
     cross_points_kernel,
+    gather_rows_kernel,
     linearize_kernel,
     point_gather_kernel,
     point_linearize_kernel,
@@ -172,35 +173,28 @@ def _offsets(free: U8HostIn, n: Int, start: Int, width: Int, mut next: Int) -> L
     return out^
 
 
-@fieldwise_init
 struct ByPoint(Movable):
-    """Observations regrouped by point (a counting sort): point j's are rows start[j]..start[j+1] of frame/camera."""
+    """Observations regrouped by point (a counting sort): point j's observations are `rows[start[j]:start[j+1]]`."""
 
     var start: List[Int32]
-    var frame: List[Int32]
-    var camera: List[Int32]
-    var pixels: List[Float32]
+    var rows: HostBuffer[DType.int32]
 
-
-def _by_point(problem: HostProblem) -> ByPoint:
-    var start = List[Int32](length=problem.n_points + 1, fill=0)
-    for n in range(problem.n_obs):
-        start[Int(problem.obs_point[unsafe_offset=n]) + 1] += 1
-    for j in range(problem.n_points):
-        start[j + 1] += start[j]
-    var next = start.copy()
-    var frame = List[Int32](length=problem.n_obs, fill=0)
-    var camera = List[Int32](length=problem.n_obs, fill=0)
-    var pixels = List[Float32](length=2 * problem.n_obs, fill=0.0)
-    for n in range(problem.n_obs):
-        var j = Int(problem.obs_point[unsafe_offset=n])
-        var slot = Int(next[j])
-        next[j] += 1
-        frame[slot] = problem.obs_frame[unsafe_offset=n]
-        camera[slot] = problem.obs_camera[unsafe_offset=n]
-        pixels[2 * slot] = problem.pixels[unsafe_offset=2 * n]
-        pixels[2 * slot + 1] = problem.pixels[unsafe_offset=2 * n + 1]
-    return ByPoint(start^, frame^, camera^, pixels^)
+    def __init__(out self, ctx: DeviceContext, problem: HostProblem) raises:
+        self.start = List[Int32](length=problem.n_points + 1, fill=0)
+        for n in range(problem.n_obs):
+            self.start[Int(problem.obs_point[unsafe_offset=n]) + 1] += 1
+        for j in range(problem.n_points):
+            self.start[j + 1] += self.start[j]
+        var next = self.start.copy()
+        # Pinned, and the device gathers the point-ordered columns through it: the host scatters one value per
+        # observation instead of four (the scatter, not the arithmetic, is the cost: 17 ms on clip 007).
+        self.rows = ctx.enqueue_create_host_buffer[DType.int32](max(problem.n_obs, 1))
+        ctx.synchronize()
+        var rows = self.rows.unsafe_ptr()
+        for n in range(problem.n_obs):
+            var j = Int(problem.obs_point[unsafe_offset=n])
+            rows[unsafe_offset=Int(next[j])] = Int32(n)
+            next[j] += 1
 
 
 @fieldwise_init
@@ -390,11 +384,13 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
     var d_rig_off = _upload_list(ctx, rig_off)
     var d_calib_off = _upload_list(ctx, calib_off)
     var d_point_off = _upload_list(ctx, point_off)
-    var by_point = _by_point(problem)
+    var by_point = ByPoint(ctx, problem)
     var d_point_start = _upload_list(ctx, by_point.start)
-    var d_by_point_frame = _upload_list(ctx, by_point.frame)
-    var d_by_point_camera = _upload_list(ctx, by_point.camera)
-    var d_by_point_pixels = _upload_list(ctx, by_point.pixels)
+    var d_rows = ctx.enqueue_create_buffer[DType.int32](max(no, 1))
+    ctx.enqueue_copy(d_rows, by_point.rows)
+    var d_by_point_frame = ctx.enqueue_create_buffer[DType.int32](max(no, 1))
+    var d_by_point_camera = ctx.enqueue_create_buffer[DType.int32](max(no, 1))
+    var d_by_point_pixels = ctx.enqueue_create_buffer[DType.float32](max(2 * no, 1))
     var tile_rows = _warp_tiles(problem)
     var n_warp_tiles = len(tile_rows) // 2
     var d_warp_tiles = _upload_list(ctx, tile_rows)
@@ -430,6 +426,10 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
     var by_point_camera = TileTensor(d_by_point_camera, row_major((no,))).as_imm()
     var by_point_pixels = TileTensor(d_by_point_pixels, row_major((no, 2))).as_imm()
     var warp_tiles = TileTensor(d_warp_tiles, row_major((n_warp_tiles, 2))).as_imm()
+    ctx.enqueue_function[gather_rows_kernel](
+        TileTensor(d_rows, row_major((no,))).as_imm(), obs_frame, obs_camera, pixels, TileTensor(d_by_point_frame, row_major((no,))),
+        TileTensor(d_by_point_camera, row_major((no,))), TileTensor(d_by_point_pixels, row_major((no, 2))), grid_dim=_grid(no), block_dim=BLOCK,
+    )
     var g = TileTensor(d_g, row_major((nt,)))
     var r = TileTensor(d_r, row_major((nt,)))
     var z = TileTensor(d_z, row_major((nt,)))
@@ -466,6 +466,7 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
 
     ctx.synchronize()
     _ = image_order^  # the uploads above read its lists through raw addresses
+    _ = by_point^  # and the pinned rows asynchronously
     var t0 = perf_counter_ns()
     clock.last = perf_counter_ns()
 
