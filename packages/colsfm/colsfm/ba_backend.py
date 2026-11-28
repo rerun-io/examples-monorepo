@@ -548,6 +548,8 @@ def _mojo_probe_solve(
     if problem is None:
         return None
     reconstruction, config, ba_options = problem
+    # COLMAP's default is the full system, which the Mojo solver does not have; the mapper sets the same switch.
+    ba_options.caspar.reduced_camera_system = True
     return solve_with_mojo(reconstruction, config, ba_options).bundle_adjustment_summary()
 
 
