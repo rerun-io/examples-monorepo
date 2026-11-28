@@ -114,3 +114,23 @@ def test_layer_norm_affine_matches_autocast_layer_norm_then_the_bf16_cast() -> N
         out = layer_norm_affine(x, norm.weight, norm.bias, norm.eps)
     assert _bf16_flip_fraction(out, expected) < 2e-3
     torch.testing.assert_close(out.float(), expected.float(), rtol=1.6e-2, atol=1e-2)
+
+
+def test_frame_major_multiview_layout_matches_the_rearranged_eager_path() -> None:
+    from einops import rearrange
+
+    from fdanyone.model.fused import gated_residual_, layer_norm_modulation
+    from fdanyone.vendor.diffsynth.models.wan_video_dit import normalized_modulation
+
+    torch.manual_seed(0)
+    v, f, hw, c = 3, 4, 10, 3072
+    norm = torch.nn.LayerNorm(c, eps=1e-6, elementwise_affine=False).to(DEVICE)
+    x = torch.randn(v, f * hw, c, device=DEVICE).to(torch.bfloat16)
+    shift, scale, gate = ((torch.randn(v, 1, c, device=DEVICE) * 0.2).to(torch.bfloat16) for _ in range(3))
+    with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        eager = rearrange(normalized_modulation(norm, x, shift, scale), "v (f n) c -> f (v n) c", f=f)
+        fused = layer_norm_modulation(x, shift, scale, 1e-6, frames=f)
+    assert fused.shape == eager.shape and _bf16_flip_fraction(fused, eager) < 2e-3
+    branch = torch.randn(f, v * hw, c, device=DEVICE).to(torch.bfloat16)
+    expected = x.clone().add_(rearrange(branch, "f (v n) c -> v (f n) c", v=v).clone().mul_(gate))
+    assert torch.equal(gated_residual_(x.clone(), branch, gate, frames=f), expected)

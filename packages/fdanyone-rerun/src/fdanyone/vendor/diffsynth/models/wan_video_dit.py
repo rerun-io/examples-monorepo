@@ -429,11 +429,18 @@ class DiTBlock(nn.Module):
             self.modulation_mvs.to(dtype=time_modulation.dtype, device=time_modulation.device)
             + time_modulation[:, :3, :]
         ).chunk(3, dim=1)
-        x = self._add_residual(
-            x,
-            self._multiview_attention(x, shift_mvs, scale_mvs, multiview_freqs, shape),
-            gate_mvs,
-        )
+        if "mvs_t" in _quantization.FUSED and not torch.is_grad_enabled() and x.is_cuda:
+            from fdanyone.model.fused import gated_residual_, layer_norm_modulation
+
+            frames = shape[1]
+            tokens = layer_norm_modulation(x, shift_mvs, scale_mvs, self.norm1_mvs.eps, frames=frames)
+            x = gated_residual_(x, self.self_attn_mvs(tokens, multiview_freqs), gate_mvs, frames=frames)
+        else:
+            x = self._add_residual(
+                x,
+                self._multiview_attention(x, shift_mvs, scale_mvs, multiview_freqs, shape),
+                gate_mvs,
+            )
 
         x = self._add_residual(x, self.cross_attn(self._norm3(x), repeat(context, "1 l c -> v l c", v=x.shape[0])))
 

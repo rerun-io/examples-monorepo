@@ -115,8 +115,20 @@ def rope_tables(freqs: Tensor) -> tuple[Float32[Tensor, "s half"], Float32[Tenso
 
 
 @triton.jit
+def _frame_major_row(row, rows_per_view, views, frames, FRAME_MAJOR: tl.constexpr):
+    """Row of token ``row`` of a view-major ``[v, (f hw)]`` stream in its frame-major ``[f, (v hw)]`` copy."""
+
+    if not FRAME_MAJOR:
+        return row
+    hw = rows_per_view // frames
+    within = row % rows_per_view
+    return (within // hw) * (views * hw) + (row // rows_per_view) * hw + within % hw
+
+
+@triton.jit
 def _layer_norm_modulation_kernel(
-    x_ptr, shift_ptr, scale_ptr, out_ptr, rows_per_view, eps, N_COLS: tl.constexpr, AFFINE: tl.constexpr, BLOCK: tl.constexpr
+    x_ptr, shift_ptr, scale_ptr, out_ptr, rows_per_view, views, frames, eps,
+    N_COLS: tl.constexpr, AFFINE: tl.constexpr, FRAME_MAJOR: tl.constexpr, BLOCK: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     view = 0 if AFFINE else row // rows_per_view
@@ -130,21 +142,27 @@ def _layer_norm_modulation_kernel(
     shift = tl.load(shift_ptr + view * N_COLS + cols, mask=mask, other=0.0).to(tl.float32)
     if not AFFINE:
         scale = _bf16(1.0 + scale)
-    tl.store(out_ptr + row * N_COLS + cols, (centered * rstd * scale + shift).to(tl.bfloat16), mask=mask)
+    out_row = _frame_major_row(row, rows_per_view, views, frames, FRAME_MAJOR)
+    tl.store(out_ptr + out_row * N_COLS + cols, (centered * rstd * scale + shift).to(tl.bfloat16), mask=mask)
 
 
 def layer_norm_modulation(
-    x: BFloat16[Tensor, "v n c"], shift: BFloat16[Tensor, "v 1 c"], scale: BFloat16[Tensor, "v 1 c"], eps: float
-) -> BFloat16[Tensor, "v n c"]:
-    """BF16 ``modulate(LayerNorm(x), shift, scale)``: FP32 normalization (autocast's LayerNorm), BF16 ``1 + scale``."""
+    x: BFloat16[Tensor, "v n c"], shift: BFloat16[Tensor, "v 1 c"], scale: BFloat16[Tensor, "v 1 c"], eps: float, frames: int = 0
+) -> BFloat16[Tensor, "..."]:
+    """BF16 ``modulate(LayerNorm(x), shift, scale)``: FP32 normalization (autocast's LayerNorm), BF16 ``1 + scale``.
+
+    With ``frames`` the result is written frame-major, ``[f, (v hw), c]`` for the per-frame multiview attention.
+    """
 
     v, n, c = x.shape
     if not x.is_contiguous():
         raise ValueError("Fused LayerNorm modulation needs a contiguous token stream.")
-    out = torch.empty_like(x)
+    out = torch.empty_like(x) if not frames else x.new_empty((frames, v * (n // frames), c))
     shift = shift.expand(v, 1, c).contiguous()
     scale = scale.expand(v, 1, c).contiguous()
-    _layer_norm_modulation_kernel[(v * n,)](x, shift, scale, out, n, eps, N_COLS=c, AFFINE=False, BLOCK=triton.next_power_of_2(c), num_warps=8)
+    _layer_norm_modulation_kernel[(v * n,)](
+        x, shift, scale, out, n, v, max(frames, 1), eps, N_COLS=c, AFFINE=False, FRAME_MAJOR=frames > 0, BLOCK=triton.next_power_of_2(c), num_warps=8
+    )
     return out
 
 
@@ -155,28 +173,40 @@ def layer_norm_affine(x: BFloat16[Tensor, "v n c"], weight: Tensor, bias: Tensor
     if not x.is_contiguous():
         raise ValueError("Fused LayerNorm needs a contiguous token stream.")
     out = torch.empty_like(x)
-    _layer_norm_modulation_kernel[(v * n,)](x, bias, weight, out, n, eps, N_COLS=c, AFFINE=True, BLOCK=triton.next_power_of_2(c), num_warps=8)
+    _layer_norm_modulation_kernel[(v * n,)](
+        x, bias, weight, out, n, v, 1, eps, N_COLS=c, AFFINE=True, FRAME_MAJOR=False, BLOCK=triton.next_power_of_2(c), num_warps=8
+    )
     return out
 
 
 @triton.jit
-def _gated_residual_kernel(x_ptr, branch_ptr, gate_ptr, rows_per_view, N_COLS: tl.constexpr, BLOCK: tl.constexpr):
+def _gated_residual_kernel(
+    x_ptr, branch_ptr, gate_ptr, rows_per_view, views, frames, N_COLS: tl.constexpr, FRAME_MAJOR: tl.constexpr, BLOCK: tl.constexpr
+):
     row = tl.program_id(0).to(tl.int64)
     view = row // rows_per_view
     cols = tl.arange(0, BLOCK)
     mask = cols < N_COLS
     x = tl.load(x_ptr + row * N_COLS + cols, mask=mask, other=0.0).to(tl.float32)
-    branch = tl.load(branch_ptr + row * N_COLS + cols, mask=mask, other=0.0).to(tl.float32)
+    branch_row = _frame_major_row(row, rows_per_view, views, frames, FRAME_MAJOR)
+    branch = tl.load(branch_ptr + branch_row * N_COLS + cols, mask=mask, other=0.0).to(tl.float32)
     gate = tl.load(gate_ptr + view * N_COLS + cols, mask=mask, other=0.0).to(tl.float32)
     tl.store(x_ptr + row * N_COLS + cols, (x + _bf16(branch * gate)).to(tl.bfloat16), mask=mask)
 
 
-def gated_residual_(x: BFloat16[Tensor, "v n c"], branch: BFloat16[Tensor, "v n c"], gate: BFloat16[Tensor, "v 1 c"]) -> BFloat16[Tensor, "v n c"]:
-    """In place ``x += bf16(branch * gate)``, the two BF16 roundings of the eager ``mul_`` then ``add_``."""
+def gated_residual_(
+    x: BFloat16[Tensor, "v n c"], branch: BFloat16[Tensor, "..."], gate: BFloat16[Tensor, "v 1 c"], frames: int = 0
+) -> BFloat16[Tensor, "v n c"]:
+    """In place ``x += bf16(branch * gate)``, the two BF16 roundings of the eager ``mul_`` then ``add_``.
+
+    With ``frames`` the branch is frame-major, ``[f, (v hw), c]`` (the multiview attention's output).
+    """
 
     v, n, c = x.shape
     if not (x.is_contiguous() and branch.is_contiguous()):
         raise ValueError("Fused gated residual needs contiguous token streams.")
     gate = gate.expand(v, 1, c).contiguous()
-    _gated_residual_kernel[(v * n,)](x, branch, gate, n, N_COLS=c, BLOCK=triton.next_power_of_2(c), num_warps=8)
+    _gated_residual_kernel[(v * n,)](
+        x, branch, gate, n, v, max(frames, 1), N_COLS=c, FRAME_MAJOR=frames > 0, BLOCK=triton.next_power_of_2(c), num_warps=8
+    )
     return x
