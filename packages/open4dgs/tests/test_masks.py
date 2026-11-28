@@ -1,5 +1,7 @@
 """Pure logic of the foreground masks: entity paths, person crop boxes, gap filling, and shared resampling."""
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -226,3 +228,22 @@ def test_clip_mattes_is_the_per_camera_box_and_matte_pipeline() -> None:
         boxes = fill_missing_boxes(person_boxes(points[cam], world_T_cam, K, (100, 80), 0.1, 4.0))
         assert torch.equal(got[cam], predict_mattes(model, frames[cam], boxes, cpu, 2))
     assert got[1][1].any()  # the frame without points takes its neighbours' box
+
+
+def test_the_matte_layer_carries_the_run_record_of_the_run_that_wrote_it(tmp_path) -> None:
+    """A flow runner reads the layer's record from the catalog to tell this run's mattes from older ones."""
+    from rerun.chunk import RrdReader
+    from simplecv.run_record import start_run
+
+    from open4dgs.masks import MATTE_LAYER, write_mask_layer
+    from open4dgs.properties import MatteLayerProperties
+
+    path = tmp_path / "seg.people_matte.rrd"
+    properties = MatteLayerProperties(model="m", frame_start=0, num_frames=2, source_catalog="u", source_dataset="d", source_segment="seg", crop="c")
+    mattes = [torch.zeros((2, 4, 6), dtype=torch.uint8)]
+    write_mask_layer(path, "seg", ["rig_00/cam_00"], np.arange(2, dtype=np.int64), mattes, properties, run=start_run(None, source=Path(__file__)))
+    cells: dict[str, object] = {}
+    for chunk in RrdReader(path).stream().filter(content=f"/__properties/run_{MATTE_LAYER}", is_static=True).to_chunks():
+        batch = chunk.to_record_batch()
+        cells |= {name: batch.column(name).to_pylist()[0] for name in batch.schema.names if not name.startswith("rerun.")}
+    assert (cells["layer"], cells["segment"]) == ([MATTE_LAYER], ["seg"])
