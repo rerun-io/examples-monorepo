@@ -16,7 +16,9 @@ trigs = pytest.importorskip("trigs", reason="TRiGS comes from recipes/open4dgs-t
 pytestmark = pytest.mark.integration
 
 
-def _one_step(kind: str, monkeypatch: pytest.MonkeyPatch) -> tuple[list[torch.Tensor], dict[str, torch.Tensor], tuple[int, int]]:
+def _one_step(
+    kind: str, monkeypatch: pytest.MonkeyPatch, batch: int = 4
+) -> tuple[list[torch.Tensor], dict[str, torch.Tensor], tuple[int, int], int, dict]:
     from gsplat import rasterization
     from trigs.core.camera import CameraConfig
     from trigs.core.trainer import TrigsTrainer, TrigsTrainingConfig
@@ -62,17 +64,19 @@ def _one_step(kind: str, monkeypatch: pytest.MonkeyPatch) -> tuple[list[torch.Te
     }
     params, sh_degree, scene_extent = build_canonical_from_npz(keyframes, fps=FPS, keyframe_stride=3, device=dev)
     config = TrigsTrainingConfig(n_steps=1, fps=FPS, keyframe_stride=3, holdout_views=(), psnr_eval_every=0, tb_log_every=1, tb_stats_every=0,
-                                 viewer_snapshot_every=0, train_seed=0, batch_cameras=4)
+                                 viewer_snapshot_every=0, train_seed=0, batch_cameras=batch)
     renders: list[torch.Tensor] = []
     grads: dict[str, torch.Tensor] = {}
     from open4dgs.trigs_trainer import Open4dgsTrainer
 
     trainer = TrigsTrainer(device=dev) if kind == "stock" else Open4dgsTrainer(device=dev, batch_cameras=kind == "batched")
     render_inputs, photometric, rasterize = trainer._render_inputs, trainer._photometric_losses, trainer._rasterize_inputs
-    used = {"inputs": 0, "rasterize": 0}
+    used = {"inputs": 0, "rasterize": 0, "cameras": 0}
+    reloc: dict = {}
 
     def count_rasterize(*x, **k):
         used["rasterize"] += 1
+        used["cameras"] += len(x[3]) if isinstance(x[3], list) else 1
         return rasterize(*x, **k)
 
     def count(*x, **k):
@@ -94,6 +98,17 @@ def _one_step(kind: str, monkeypatch: pytest.MonkeyPatch) -> tuple[list[torch.Te
         return adam_step(self, *x, **k)
 
     monkeypatch.setattr(torch.optim.Adam, "step", step)
+    from trigs.strategy.motion_guided_relocation import MotionGuidedRelocationStrategy as _Reloc
+
+    post = _Reloc.step_post_backward
+
+    def keep_reloc(self, *x, **k):
+        state = k.get("state", x[3] if len(x) > 3 else None)
+        if not reloc and isinstance(state, dict):
+            reloc.update({key: v.detach().clone() for key, v in state.items() if isinstance(v, torch.Tensor) and key in ("grad_2d_accum", "visible_accum")})
+        return post(self, *x, **k)
+
+    monkeypatch.setattr(_Reloc, "step_post_backward", keep_reloc)
 
     class Scalars:
         def __getattr__(self, name: str):
@@ -104,15 +119,15 @@ def _one_step(kind: str, monkeypatch: pytest.MonkeyPatch) -> tuple[list[torch.Te
     trainer.train_from_params(params=params, sh_degree=sh_degree, scene_extent=scene_extent, cameras=cameras, n_frames=F,
                               gt_images_per_frame=gt_images, gt_alphas_per_frame=gt_masks, config=config, writer=Scalars())
     monkeypatch.undo()
-    return renders, grads, (used["inputs"], used["rasterize"])
+    return renders, grads, (used["inputs"], used["rasterize"]), used["cameras"], reloc
 
 
 @pytest.mark.parametrize(("kind", "calls"), [("batched", (1, 1)), ("shared", (1, 4))])
 def test_open4dgs_trainer_step_matches_the_stock_per_camera_step(kind: str, calls: tuple[int, int], monkeypatch: pytest.MonkeyPatch) -> None:
     if not torch.cuda.is_available():
         pytest.skip("needs a CUDA GPU (gsplat rasterization)")
-    r_fast, g_fast, n_fast = _one_step(kind, monkeypatch)
-    r_cam, g_cam, n_cam = _one_step("stock", monkeypatch)
+    r_fast, g_fast, n_fast, _, _ = _one_step(kind, monkeypatch)
+    r_cam, g_cam, n_cam, _, _ = _one_step("stock", monkeypatch)
     # (render-input calls, rasterize calls) for 4 same-size cameras: the stock trainer goes per camera through the seams.
     assert len(r_fast) == len(r_cam) == 4
     assert (n_fast, n_cam) == (calls, (4, 4))
@@ -125,3 +140,23 @@ def test_open4dgs_trainer_step_matches_the_stock_per_camera_step(kind: str, call
             assert float(g_fast[name].abs().max()) == 0.0, name
             continue
         assert float((g_fast[name] - g).abs().max()) <= 1e-4 * scale, name
+
+
+def test_a_camera_drawn_twice_renders_once_with_the_gradients_and_relocation_cue_of_the_duplicates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """5 cameras drawn with replacement from 5 (TRiGS's official sampler caps the batch at the training cameras): the
+    batched group rasterizes each distinct camera once and computes its losses once, and the step's gradients and
+    relocation accumulators match the stock trainer, which renders every draw."""
+    if not torch.cuda.is_available():
+        pytest.skip("needs a CUDA GPU (gsplat rasterization)")
+    r_fast, g_fast, _, cams_fast, reloc_fast = _one_step("batched", monkeypatch, batch=5)
+    r_cam, g_cam, _, cams_cam, reloc_cam = _one_step("stock", monkeypatch, batch=5)
+    assert len(r_fast) == len(r_cam) == cams_cam == 5
+    assert cams_fast < 5  # the seed-0 draw repeats a camera
+    for a, b in zip(r_fast, r_cam, strict=True):
+        assert torch.equal(a, b)
+    for name, g in g_cam.items():
+        scale = float(g.abs().max())
+        assert float((g_fast[name] - g).abs().max()) <= 1e-4 * max(scale, 1e-12), name
+    assert reloc_cam.keys() == reloc_fast.keys() and "visible_accum" in reloc_cam
+    for key, v in reloc_cam.items():
+        assert torch.allclose(reloc_fast[key], v, rtol=1e-4, atol=1e-6), key
