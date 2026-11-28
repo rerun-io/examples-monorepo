@@ -57,7 +57,8 @@ DESCRIPTION: str = (
     "One casual video of a person becomes synchronized videos from new cameras around them "
     "([4DAnyone](https://github.com/ant-research/4DAnyone)-Turbo), then a 4D Gaussian model of the person trains on those views "
     "([Open4DGS](https://github.com/ASU-NEM-Labs/open4dgs-trigs) TRiGS) and plays in 3D. **Pick an example or upload a clip, then "
-    "press Run:** motion recovery, the views as they denoise, the camera rig, then the person training (about 7.5 min on an RTX 5090)."
+    "press Run:** motion recovery, the views as they denoise, the camera rig, then the person training (the example takes about 3.5 min on "
+    "an RTX 5090)."
 )
 """Markdown above the app: Rerun's wordmark, then two short lines."""
 NO_WEBGPU: str = (
@@ -292,9 +293,7 @@ def build(examples: list[Path] | None = None) -> gr.Blocks:
                             )
                             seed: gr.Number = gr.Number(label="Seed", value=RunConfig().seed, precision=0)
                             train: gr.Checkbox = gr.Checkbox(label="Train the 4D person after the views", value=True)
-                            steps: gr.Number = gr.Number(
-                                label=f"Training steps ({APP_STEPS:,} take about 3 to 3.5 min on an RTX 5090 with the prior)", value=APP_STEPS, precision=0, minimum=100
-                            )
+                            steps: gr.Number = gr.Number(label="Training steps", value=APP_STEPS, precision=0, minimum=100)
                             prior: gr.Checkbox = gr.Checkbox(label="Depth + normal prior (MoGe-2)", value=PersonConfig().prior, info=PRIOR_INFO)
                         gr.Examples(
                             examples=[[str(path)] for path in clips], inputs=[video], examples_per_page=EXAMPLES_PER_PAGE, cache_examples=False, elem_id="examples"

@@ -96,6 +96,7 @@ def _fake_run(monkeypatch: pytest.MonkeyPatch, log_cameras: Callable[..., None],
     monkeypatch.setattr(stream, "read_camera_rig", lambda output_dir: None)
     monkeypatch.setattr(stream, "log_cameras", log_cameras)
     monkeypatch.setattr(stream, "train_person", train_person)
+    monkeypatch.setattr(stream, "require_fused_ssim", lambda: None)
 
 
 def test_cameras_log_while_the_person_trains(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -150,3 +151,21 @@ def test_the_source_clip_logs_beside_gvhmr_and_is_in_before_denoising(tmp_path: 
     release.set()
     streamer.on_stage(GENERATION_STAGE, 0.45, None)  # waits for it: upstream deletes the clip when the run ends
     assert logged == [clip]
+
+
+def test_a_training_run_without_the_ssim_kernel_fails_before_the_views(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from fdanyone_rerun import stream
+    from fdanyone_rerun.person4d import PersonConfig
+
+    views: list[RunConfig] = []
+
+    def missing_kernel() -> None:
+        raise RuntimeError("hexels_mojo.fused_ssim does not import")
+
+    monkeypatch.setattr(stream, "require_fused_ssim", missing_kernel)
+    monkeypatch.setattr(stream, "run_views", lambda config, **_: views.append(config))
+    streamer, _ = _streamer(tmp_path)
+    streamer.person = PersonConfig()
+    with pytest.raises(RuntimeError, match="fused_ssim"):
+        streamer.run()
+    assert not views

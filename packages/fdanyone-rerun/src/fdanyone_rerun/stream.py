@@ -14,6 +14,7 @@ from pathlib import Path
 
 import rerun as rr
 import torch
+from open4dgs.trigs_adapter import require_fused_ssim
 from taehv import TAEHV
 
 from fdanyone.assets import TAEW2_2
@@ -125,6 +126,8 @@ class RunStreamer:
 
     def run(self) -> RunMetadata:
         """Run the pipeline and stream every phase; returns upstream's run summary."""
+        if self.person is not None:
+            require_fused_ssim()  # before the views: a missing kernel would otherwise fail the run minutes later, at training
         self.recording.send_blueprint(motion_blueprint())
         self.recording.log("world", rr.ViewCoordinates.RIGHT_HAND_Y_UP, static=True)
         try:

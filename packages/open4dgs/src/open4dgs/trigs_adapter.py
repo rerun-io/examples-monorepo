@@ -561,6 +561,16 @@ class _StepTicks:
         self.on_step(self.steps, self.live)
 
 
+def require_fused_ssim() -> None:
+    """Raise unless TRiGS's loss will use the fused SSIM kernel.
+
+    Without the built Mojo kernels TRiGS falls back to torchmetrics SSIM: another number and ~10x slower. Callers that
+    run expensive stages before training (the 4DAnyone views) check this first.
+    """
+    if trigs_losses._get_ssim_backend() != "fused":
+        raise RuntimeError("hexels_mojo.fused_ssim does not import (Mojo kernels not built?): run `pixi run open4dgs-ssim-mojo-build` in this env")
+
+
 def train_clip(
     clip: MultiViewClip,
     masks: tuple[Float32[Tensor, "frames h w"], ...],
@@ -581,9 +591,7 @@ def train_clip(
     ``on_step`` (optional): progress, previews and Stop (``StepCallback``).
     """
     dev: torch.device = device if device is not None else torch.device("cuda")
-    # TRiGS's loss falls back to torchmetrics SSIM (another number, ~10x slower) when hexels_mojo.fused_ssim does not import.
-    if trigs_losses._get_ssim_backend() != "fused":
-        raise RuntimeError("hexels_mojo.fused_ssim does not import (Mojo kernels not built?): run `pixi run -e open4dgs open4dgs-ssim-mojo-build`")
+    require_fused_ssim()
     num_frames: int = int(clip.frame_indices.shape[0])
     if len(masks) != len(clip.camera_names) or any(m.shape[0] != num_frames for m in masks):
         raise ValueError("masks must be one (frames, h, w) tensor per clip camera")
