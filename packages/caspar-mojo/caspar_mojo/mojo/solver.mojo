@@ -383,6 +383,11 @@ struct StateOuts(ImplicitlyCopyable):
     var points: F32Out
 
 
+def _rows(buf: DeviceBuffer[DType.float32], rows: Int, cols: Int) -> F32Out:
+    # Untracked origin, as for a kernel argument: the views live inside one solve, which owns the buffers.
+    return TileTensor(MutPointer[Float32, MutUntrackedOrigin](unsafe_from_address=Int(buf.unsafe_ptr())), row_major((rows, cols)))
+
+
 struct DeviceState(Movable):
     """The solver state on the device (rig_from_world, sensor_from_rig, intrinsics, points), owned as one group so the
     current and trial states swap as a whole."""
@@ -412,19 +417,15 @@ struct DeviceState(Movable):
             self.points = ctx.enqueue_create_buffer[DType.float32](max(self.n_points * 3, 1))
 
     def views(self) -> StateViews:
-        return StateViews(
-            TileTensor(self.poses, row_major((self.n_frames, 7))).as_imm(),
-            TileTensor(self.rigs, row_major((self.n_cameras, 7))).as_imm(),
-            TileTensor(self.intrinsics, row_major((self.n_cameras, MAX_PARAMS))).as_imm(),
-            TileTensor(self.points, row_major((self.n_points, 3))).as_imm(),
-        )
+        var o = self.outs()
+        return StateViews(o.poses.as_imm(), o.rigs.as_imm(), o.intrinsics.as_imm(), o.points.as_imm())
 
     def outs(self) -> StateOuts:
         return StateOuts(
-            TileTensor(self.poses, row_major((self.n_frames, 7))),
-            TileTensor(self.rigs, row_major((self.n_cameras, 7))),
-            TileTensor(self.intrinsics, row_major((self.n_cameras, MAX_PARAMS))),
-            TileTensor(self.points, row_major((self.n_points, 3))),
+            _rows(self.poses, self.n_frames, 7),
+            _rows(self.rigs, self.n_cameras, 7),
+            _rows(self.intrinsics, self.n_cameras, MAX_PARAMS),
+            _rows(self.points, self.n_points, 3),
         )
 
     def download(self, ctx: DeviceContext, result: HostState) raises:
