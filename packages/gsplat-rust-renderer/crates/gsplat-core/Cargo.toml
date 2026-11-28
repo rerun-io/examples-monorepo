@@ -6,10 +6,14 @@ description = "WebGPU Gaussian splat forward rendering without a tensor runtime"
 
 [features]
 testing = ["dep:pollster"]
-# Derives for the CLI camera files; SOG meta.json parsing uses serde unconditionally.
+# Derives for the camera files (camera_spec: gsplat-cli, viewer-probe); SOG meta.json parsing uses serde unconditionally.
 serde = []
+# Provenance (source commit, Cargo.lock digest, Brush revision) for metric reports: gsplat-cli and viewer-probe.
+provenance = ["dep:sha2"]
 
 [dependencies]
+anyhow.workspace = true
+sha2 = { version = "0.10", optional = true }
 pollster = { workspace = true, optional = true }
 half = { workspace = true, features = ["bytemuck"] }
 bytemuck.workspace = true

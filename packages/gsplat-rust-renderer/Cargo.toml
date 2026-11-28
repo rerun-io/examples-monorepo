@@ -34,10 +34,7 @@ rerun = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0", default-fea
 re_build_info = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
 re_byte_size = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
 re_chunk = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
-re_crash_handler = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
 re_format = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
-re_grpc_server = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
-re_log = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
 re_log_encoding = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
 re_log_msg = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
 re_log_types = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
@@ -45,12 +42,8 @@ re_renderer = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
 re_sdk_types = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
 re_tracing = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
 re_types_core = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
-re_video = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
-# Without default features (no analytics): gsplat-viewer's `app` feature adds `default_web`; the gsplat-cli probe asks
-# for `default`.
+# Without default features (no analytics): the canonical viewer chooses Rerun's features.
 re_viewer = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0", default-features = false }
-re_viewer_context = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0" }
-egui_kittest = { version = "0.37.0", features = ["wgpu", "eframe"] }
 
 # Burn and CubeCL are pinned to Brush revisions in Cargo.lock.
 # Rerun 0.44.0 pins wasm-bindgen =0.2.129; registry wgpu 30.0.0 still resolves with it.

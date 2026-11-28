@@ -38,7 +38,17 @@ diff --git a/crates/top/re_viewer/src/lib.rs b/crates/top/re_viewer/src/lib.rs
  // ----------------------------------------------------------------------------
  // When compiling for web:
  
-@@ -229,8 +243,13 @@ pub(crate) fn wgpu_options(force_wgpu_backend: Option<&str>) -> egui_wgpu::WgpuC
+@@ -210,7 +224,8 @@ impl AppEnvironment {
+ 
+ // ---------------------------------------------------------------------------
+ 
+-pub(crate) fn wgpu_options(force_wgpu_backend: Option<&str>) -> egui_wgpu::WgpuConfiguration {
++/// Public for tools that build their own App on the viewer's device, such as the canonical viewer's frame probe.
++pub fn wgpu_options(force_wgpu_backend: Option<&str>) -> egui_wgpu::WgpuConfiguration {
+     re_tracing::profile_function!();
+ 
+     let instance_descriptor = re_renderer::device_caps::instance_descriptor(force_wgpu_backend);
+@@ -229,8 +244,13 @@ pub(crate) fn wgpu_options(force_wgpu_backend: Option<&str>) -> egui_wgpu::WgpuC
                      .map_err(|err| err.to_string())
              })),
              device_descriptor: std::sync::Arc::new(|adapter| {

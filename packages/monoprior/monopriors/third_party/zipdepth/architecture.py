@@ -225,13 +225,13 @@ class QARepBlock(nn.Module):
             ``(output_channels, input_channels_per_group, kernel_height, kernel_width)`` and
             ``(output_channels,)``.
         """
-        if bn.running_mean is None or bn.running_var is None:
+        running_mean: Float[torch.Tensor, "c_out"] | None = bn.running_mean
+        running_var: Float[torch.Tensor, "c_out"] | None = bn.running_var
+        if running_mean is None or running_var is None:
             raise ValueError("BatchNorm without running statistics cannot be fused")
         if bn.weight is None or bn.bias is None:
             raise ValueError("BatchNorm without affine parameters cannot be fused")
         weights: Float[torch.Tensor, "c_out c_in_per_group kernel_h kernel_w"] = conv.weight
-        running_mean: Float[torch.Tensor, "c_out"] = bn.running_mean
-        running_var: Float[torch.Tensor, "c_out"] = bn.running_var
         gamma: Float[torch.Tensor, "c_out"] = bn.weight
         beta: Float[torch.Tensor, "c_out"] = bn.bias
         epsilon: float = bn.eps

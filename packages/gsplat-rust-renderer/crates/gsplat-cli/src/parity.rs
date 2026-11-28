@@ -246,7 +246,7 @@ async fn parity(
             cameras,
             adapter: renderer.adapter(),
             oracle_adapter: oracle.adapter(),
-            provenance: Provenance::capture(),
+            provenance: gsplat_cli::provenance(),
             min_rgb_psnr: views
                 .iter()
                 .map(|v| v.metrics.rgb.psnr)

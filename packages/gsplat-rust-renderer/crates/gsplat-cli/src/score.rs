@@ -64,7 +64,7 @@ pub async fn run(args: ScoreArgs) -> Result<()> {
     super::write_json(
         &args.out,
         &ScoreReport {
-            provenance: Provenance::capture(),
+            provenance: gsplat_cli::provenance(),
             ply: args.ply,
             transforms,
             convention: Convention::Brush,

@@ -35,7 +35,7 @@ fallback points. `tools/log_hexels_compare.py` logs a Brush 3DGS PLY and a hexel
 PLY side by side: both views track one orbit camera on the `frame` timeline
 (the orbit is fitted to the scene's cameras and also written as `orbit.json`),
 with a per-scene metrics table below. `--layout brush|hexels` writes the
-one-view recording that `gsplat probe` measures.
+one-view recording that the canonical viewer's `viewer-probe` measures.
 
 ![Pretrained Lego in the canonical viewer](docs/media/pretrained-lego.png)
 
@@ -78,7 +78,8 @@ The [CLI reference](crates/gsplat-cli/README.md) owns flags, camera inputs, and 
 - `gsplat score`: score a training export against its dataset.
 - `gsplat parity`: compare renderers or native archetype quantization.
 - `gsplat speed`: compare renderer timings along a camera path.
-- `gsplat probe`: measure complete headless viewer frames.
+
+`viewer-probe` (`packages/canonical-viewer`) measures complete headless viewer frames.
 
 `gsplat-evaluate` runs the published-checkpoint guard; add `--checkpoint-only` to score bundled predictions.
 
