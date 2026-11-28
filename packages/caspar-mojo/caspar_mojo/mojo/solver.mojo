@@ -6,6 +6,7 @@ Python extension does. Host arrays are f32 / i32 / u8 (masks), row-major.
 """
 
 from std.math import ceildiv, isfinite
+from std.os import getenv
 from std.time import perf_counter_ns
 
 from max.gpu.host import DeviceBuffer, DeviceContext
@@ -300,10 +301,13 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
         ctx.synchronize()
         return Stats(initial_cost, initial_cost, 0, 0, EXIT_MAX_ITERATIONS, 0.0, launches)
 
+    # CASPAR's print_progress, for comparing traces.
+    var print_progress = getenv("CASPAR_MOJO_PRINT_PROGRESS") == "1"
     var diag = options.diag_init
     var up_scale = options.diag_scaling_up
     var exit_reason = EXIT_MAX_ITERATIONS
     var pcg_total = 0
+    # CASPAR's iteration_count: the index of the trial that ended the solve, or solver_iter_max.
     var trials = options.solver_iter_max
     for it in range(options.solver_iter_max):
         if it != 0 and it < options.solver_iter_max - 1:
@@ -405,6 +409,8 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
         ctx.enqueue_copy(host2, d_scalars.create_sub_buffer[DType.float32](SLOT_COST_TRIAL, 2))
         ctx.synchronize()
         var score_trial = host2[0]
+        if print_progress:
+            print(t"solver_iter: {it}  pcg_iter: {k}  score_current: {score_trial}  score_best: {score_best}  diag: {diag}")
         if score_trial < score_best * options.solver_rel_decrease_min:
             var quality = (score_best - score_trial) / (0.5 * host2[1])
             var q = 2.0 * quality - 1.0
@@ -420,12 +426,12 @@ def solve[Model: CameraModel, REFINE_INTRINSICS: Bool, REFINE_RIG: Bool](
             diag = diag * up_scale
             if diag > options.diag_exit_value:
                 exit_reason = EXIT_CONVERGED_DIAG_EXIT
-                trials = it + 1
+                trials = it
                 break
             up_scale *= 2.0
         if score_best <= options.score_exit_value:
             exit_reason = EXIT_CONVERGED_SCORE_THRESHOLD
-            trials = it + 1
+            trials = it
             break
     ctx.synchronize()
     var solve_seconds = Float64(perf_counter_ns() - t0) * 1e-9
