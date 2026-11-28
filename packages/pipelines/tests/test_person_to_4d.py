@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 
 def _option(arguments: tuple[str, ...], name: str) -> str:
     return arguments[arguments.index(name) + 1]
@@ -47,11 +49,12 @@ def test_the_trained_person_uses_the_settings_of_the_apps_4d_person(tmp_path: Pa
 
     train = flow_steps(video=tmp_path / "v.mp4", clip="c", seed=42, catalog_url="u", output_root=tmp_path)[2].tasks[0]
     settings: dict[str, str] = {name: _option(train.arguments, name) for name in (
-        "--num-frames", "--max-side", "--train.steps", "--train.cameras-per-step", "--samples-per-person", "--prior",
+        "--num-frames", "--max-side", "--train.steps", "--train.cameras-per-step", "--samples-per-person", "--prior", "--num-holdout",
     )}  # fmt: skip
     assert settings == {
         "--num-frames": "121", "--max-side": "None", "--train.steps": "25000", "--train.cameras-per-step": "8", "--samples-per-person": "8000", "--prior": "auto",
-    }  # fmt: skip
+        "--num-holdout": "0",
+    }, "the app trains on every view (person4d.train_person: no held-out cameras)"  # fmt: skip
     quick = flow_steps(video=tmp_path / "v.mp4", clip="c", seed=42, catalog_url="u", output_root=tmp_path, train_steps=500)[2].tasks[0]
     assert _option(quick.arguments, "--train.steps") == "500", "a short proof run trains fewer steps"
 
@@ -69,3 +72,29 @@ def test_every_output_lands_under_the_output_root(tmp_path: Path, monkeypatch) -
         if name in task.arguments
     ]
     assert len(paths) == 7 and all(path.startswith(str(tmp_path / "out")) for path in paths), paths
+
+
+def test_every_layer_goes_on_the_flows_catalog_and_datasets(tmp_path: Path) -> None:
+    """The stages route layers for a catalog they do not call local to the shared server's ``open4dgs-mamma``
+    (open4dgs.catalog_clip.companion_location); the flow names the catalog and dataset of each one."""
+    from pipelines.person_to_4d import flow_steps
+
+    _, (mattes,), (train, _) = (step.tasks for step in flow_steps(video=tmp_path / "v.mp4", clip="c", seed=1, catalog_url="rerun+http://127.0.0.1:9", output_root=tmp_path))
+    assert (_option(mattes.arguments, "--register-url"), _option(mattes.arguments, "--register-dataset")) == ("rerun+http://127.0.0.1:9", "fdanyone-views")
+    assert (_option(train.arguments, "--prior-catalog-url"), _option(train.arguments, "--prior-dataset")) == ("rerun+http://127.0.0.1:9", "fdanyone-views")
+
+
+def test_the_views_are_generated_on_the_layout_the_segment_id_names(tmp_path: Path) -> None:
+    from pipelines.person_to_4d import flow_steps
+
+    generate = flow_steps(video=tmp_path / "v.mp4", clip="c", seed=1, catalog_url="u", output_root=tmp_path)[0].tasks[0]
+    assert (_option(generate.arguments, "--run.layout.views-per-layer"), _option(generate.arguments, "--run.layout.layer-pitches")) == ("6", "15")
+
+
+def test_a_clip_name_the_catalog_rejects_stops_the_flow_before_any_task(tmp_path: Path) -> None:
+    """fdanyone_rerun.catalog.segment_id rejects it only at registration, after the views are generated."""
+    from pipelines.person_to_4d import flow_steps
+
+    for clip in ("MyClip", "my clip", "a/b", "-x", ""):
+        with pytest.raises(ValueError, match="lower-case letters, digits and dashes"):
+            flow_steps(video=tmp_path / "v.mp4", clip=clip, seed=1, catalog_url="u", output_root=tmp_path)
