@@ -4,13 +4,19 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterator
+from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
+from fractions import Fraction
+from multiprocessing import get_context
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
+from jaxtyping import Float32
 
 from fdanyone.assets import BIREFNET_REPO_ID, BIREFNET_REVISION, DOWNLOAD_COMMAND
 from fdanyone.config import CAMERA, CROP, FOREGROUND, INFERENCE, SKELETON, CameraConfig
@@ -33,8 +39,11 @@ from fdanyone.motion.result import MotionResult
 from fdanyone.skeleton.keypoints import KEYPOINT_NAMES
 from fdanyone.skeleton.renderer import estimate_body_height, projected_body_scales, render_goliath40
 from fdanyone.vendor.pytorch3d_compat import install_if_needed as install_pytorch3d_compat
-from fdanyone.video import CanonicalClip, iter_rgb_video, write_lossless_video, write_video
+from fdanyone.video import CanonicalClip, read_rgb_video, write_lossless_video, write_video
 from fdanyone.views import ViewPlan
+
+if TYPE_CHECKING:
+    from torch import Tensor
 
 LOGGER = logging.getLogger("fdanyone")
 
@@ -60,11 +69,21 @@ class Conditioning:
     def load_source_tensor(self):
         return _video_tensor(self.source_video, self.num_frames, crop=self.source_crop)
 
-    def load_skeleton_tensor(self, skeletons: Iterable[SkeletonVideo]):
+    def decode_skeleton_frames(self, skeleton: SkeletonVideo) -> list[Tensor]:
+        """The skeleton video's uint8 ``[height, width, 3]`` frames on the CPU (thread-safe: no CUDA)."""
+
+        return _decode_video_frames(skeleton.path, self.num_frames)
+
+    def prepare_skeleton(self, frames: list[Tensor], skeleton: SkeletonVideo) -> Tensor:
+        """Decoded skeleton frames as ``[3, frames, height, width]`` float32 in [-1, 1] on the media-prep device.
+
+        ``_video_tensor``'s crop and normalisation without its host copy: the pose batch is on the GPU, and the float32
+        round trip through host memory costs several times the decode.
+        """
+
         import torch
 
-        videos = [_video_tensor(item.path, self.num_frames, crop=item.crop) for item in skeletons]
-        return torch.cat(videos, dim=0)
+        return torch.cat(list(_prepared_chunks(frames, skeleton.crop))).permute(1, 0, 2, 3)
 
     @classmethod
     def load(cls, directory: str | Path) -> Conditioning:
@@ -177,22 +196,34 @@ def _crop_and_normalize(tensor, crop: Crop | None):
     return tensor.mul_(2.0).sub_(1.0)
 
 
+def _decode_video_frames(path: Path, num_frames: int) -> list[Tensor]:
+    import torch
+
+    return [torch.from_numpy(frame) for frame in read_rgb_video(path, expected_frames=num_frames)]
+
+
+def _prepared_chunks(frames: list[Tensor], crop: Crop | None) -> Iterator[Tensor]:
+    """Cropped, normalised ``[chunk, 3, height, width]`` float32 batches of ``frames`` on the media-prep device."""
+
+    import torch
+
+    device = _media_prep_device()
+    for start in range(0, len(frames), MEDIA_PREP_CHUNK_FRAMES):
+        batch = torch.stack(frames[start : start + MEDIA_PREP_CHUNK_FRAMES]).to(device).permute(0, 3, 1, 2)
+        yield _crop_and_normalize(batch, crop)
+
+
 def _video_tensor(path: Path, num_frames: int, *, crop: Crop | None = None):
     """Decode a whole clip and crop/resize it in GPU batches instead of one CPU bicubic per frame.
 
-    Returns ``[1, 3, frames, height, width]`` float32 in [-1, 1] on the CPU.
+    Returns ``[1, 3, frames, height, width]`` float32 in [-1, 1] on the CPU; each GPU batch is copied out as it is
+    made, so the device holds one batch at a time.
     """
 
     import torch
 
-    frames = [torch.from_numpy(frame) for frame in iter_rgb_video(path)]
-    if len(frames) != num_frames:
-        raise FourDAnyoneError(f"Video {path} has {len(frames)} decoded frames, expected {num_frames}.")
-    device = _media_prep_device()
-    output = []
-    for start in range(0, num_frames, MEDIA_PREP_CHUNK_FRAMES):
-        batch = torch.stack(frames[start : start + MEDIA_PREP_CHUNK_FRAMES]).to(device).permute(0, 3, 1, 2)
-        output.append(_crop_and_normalize(batch, crop).cpu())
+    frames = _decode_video_frames(path, num_frames)
+    output = [chunk.cpu() for chunk in _prepared_chunks(frames, crop)]
     return torch.cat(output).permute(1, 0, 2, 3).unsqueeze(0).contiguous()
 
 
@@ -373,6 +404,58 @@ def _resized_camera(camera: Camera, image_height: int, image_width: int) -> Came
     )
 
 
+@dataclass(frozen=True)
+class _SkeletonVideoJob:
+    """One view's projected keypoints, drawn and encoded into its skeleton video by ``_write_skeleton_video``."""
+
+    keypoints_2d: Float32[np.ndarray, "frames 70 2"]
+    """Pixel positions on the source canvas."""
+    keypoint_depths: Float32[np.ndarray, "frames 70"]
+    """Camera depths."""
+    body_scales: Float32[np.ndarray, " frames"]
+    """Projected body size in pixels."""
+    canvas_height: int
+    canvas_width: int
+    output_height: int
+    output_width: int
+    fps: Fraction
+    path: Path
+
+
+def _write_skeleton_video(job: _SkeletonVideoJob) -> Path:
+    """Draw every frame of one view and encode it (a module-level function: it runs in a pool process)."""
+
+    scores = np.ones(len(KEYPOINT_NAMES), dtype=np.float32)
+    frames = (
+        render_goliath40(
+            job.keypoints_2d[frame_index],
+            job.keypoint_depths[frame_index],
+            scores,
+            canvas_height=job.canvas_height,
+            canvas_width=job.canvas_width,
+            output_height=job.output_height,
+            output_width=job.output_width,
+            body_scale_px=float(job.body_scales[frame_index]),
+        )
+        for frame_index in range(job.keypoints_2d.shape[0])
+    )
+    return write_video(
+        frames,
+        job.path,
+        job.fps,
+        crf=INFERENCE.skeleton_h264_crf,
+        # Intermediate conditioning videos: CRF fixes the quality, a fast preset only trades file size. Medium
+        # spent ~1,000 CPU-s on the six views of a run.
+        preset=INFERENCE.skeleton_h264_preset,
+    )
+
+
+def _skeleton_video_pool(num_views: int) -> ProcessPoolExecutor:
+    """Spawned (not forked) processes: the caller has CUDA initialized; the drawing needs only numpy, cv2 and PyAV."""
+
+    return ProcessPoolExecutor(max_workers=max(1, min(num_views, 8, os.cpu_count() or 1)), mp_context=get_context("spawn"))
+
+
 def build_skeleton_conditioning(
     *,
     motion: MotionResult,
@@ -476,14 +559,13 @@ def build_skeleton_conditioning(
         allow_upscale=CROP.allow_upscale,
     )
     target_crop = center_crop(clip.height, clip.width, INFERENCE.height, INFERENCE.width)
-    source_video = write_lossless_video(clip, root / "source.mkv")
     skeleton_root = root / "goliath40"
     skeleton_root.mkdir()
     skeleton_height, skeleton_width = _output_skeleton_shape(clip.height, clip.width)
     body_height = estimate_body_height(geometry.keypoints_world, KEYPOINT_NAMES)
     np.save(root / "keypoints_3d.npy", geometry.keypoints_world)
 
-    def render_skeleton(camera: Camera, path: Path) -> Path:
+    def skeleton_job(camera: Camera, path: Path) -> _SkeletonVideoJob:
         projected, depths = [], []
         for frame_points in geometry.keypoints_world:
             xy, depth, _ = project_points(frame_points, camera)
@@ -497,38 +579,26 @@ def build_skeleton_conditioning(
             body_height,
             float(np.sqrt(raw_intrinsic[0, 0] * raw_intrinsic[1, 1])),
         )
-
-        def rendered_frames(
-            points=keypoints_2d,
-            point_depths=keypoint_depths,
-            scales=body_scales,
-        ):
-            scores = np.ones(len(KEYPOINT_NAMES), dtype=np.float32)
-            for frame_index in range(motion.num_frames):
-                yield render_goliath40(
-                    points[frame_index],
-                    point_depths[frame_index],
-                    scores,
-                    canvas_height=clip.height,
-                    canvas_width=clip.width,
-                    output_height=skeleton_height,
-                    output_width=skeleton_width,
-                    body_scale_px=float(scales[frame_index]),
-                )
-
-        return write_video(
-            rendered_frames(),
-            path,
-            clip.fps,
-            crf=INFERENCE.skeleton_h264_crf,
-            # Intermediate conditioning videos: CRF fixes the quality, a fast preset only trades file size. Medium
-            # spent ~1,000 CPU-s on the six views of a run.
-            preset=INFERENCE.skeleton_h264_preset,
+        return _SkeletonVideoJob(
+            keypoints_2d=keypoints_2d,
+            keypoint_depths=keypoint_depths,
+            body_scales=body_scales,
+            canvas_height=clip.height,
+            canvas_width=clip.width,
+            output_height=skeleton_height,
+            output_width=skeleton_width,
+            fps=clip.fps,
+            path=path,
         )
 
-    target_paths = tuple(
-        render_skeleton(camera, skeleton_root / f"{camera.camera_id:02d}.mp4") for camera in raw_target_cameras
-    )
+    # One process per view: drawing is pure-Python-bound (threads gain ~1.6x on six views), x264 is per video.
+    with _skeleton_video_pool(len(raw_target_cameras)) as pool:
+        target_futures = [
+            pool.submit(_write_skeleton_video, skeleton_job(camera, skeleton_root / f"{camera.camera_id:02d}.mp4"))
+            for camera in raw_target_cameras
+        ]
+        source_video = write_lossless_video(clip, root / "source.mkv")
+        target_paths = tuple(future.result() for future in target_futures)
     cropped_target_cameras = tuple(_cropped_camera(camera, target_crop) for camera in raw_target_cameras)
 
     if not view_plan.enable_rcp:
@@ -553,9 +623,13 @@ def build_skeleton_conditioning(
         raw_rcp_cameras = tuple(canonical_cameras[camera_id] for camera_id in view_plan.rcp_camera_ids)
         rcp_root = root / "rcp_goliath40"
         rcp_root.mkdir()
-        rcp_paths = tuple(
-            render_skeleton(camera, rcp_root / f"{camera.camera_id:02d}.mp4") for camera in raw_rcp_cameras
-        )
+        with _skeleton_video_pool(len(raw_rcp_cameras)) as pool:
+            rcp_paths = tuple(
+                pool.map(
+                    _write_skeleton_video,
+                    [skeleton_job(camera, rcp_root / f"{camera.camera_id:02d}.mp4") for camera in raw_rcp_cameras],
+                )
+            )
         cropped_rcp_cameras = tuple(_cropped_camera(camera, target_crop) for camera in raw_rcp_cameras)
 
     def camera_records(

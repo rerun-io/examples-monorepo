@@ -10,6 +10,7 @@ from __future__ import annotations
 import gc
 import logging
 import math
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
@@ -373,22 +374,31 @@ def generate_views(
     root.mkdir(parents=True, exist_ok=False)
     metrics = GenerationMetrics(plan.primary_device_index)
 
-    with metrics.stage("prompt"):
-        context = load_prompt_context(assets.prompt_context)
-
-    with metrics.stage("pose_conditioning"):
-        pose_cache = build_pose_feature_cache(
-            conditioning=conditioning,
-            checkpoint_path=checkpoint_path,
-            devices=plan.candidate_devices,
-        )
-        rcp_pose_features = pose_cache.rcp
-        target_pose_features = pose_cache.target
-        del pose_cache
-
+    # The source decode and crop run beside pose conditioning, and source_encode only waits for them. CUDA's current
+    # device is per thread, so the thread selects the run's device (a new thread starts on cuda:0).
+    source_decode_pool = ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="source-decode",
+        initializer=torch.cuda.set_device,
+        initargs=(plan.primary_device,),
+    )
+    source_decode = source_decode_pool.submit(conditioning.load_source_tensor)
     denoiser = None
     vae = None
     try:
+        with metrics.stage("prompt"):
+            context = load_prompt_context(assets.prompt_context)
+
+        with metrics.stage("pose_conditioning"):
+            pose_cache = build_pose_feature_cache(
+                conditioning=conditioning,
+                checkpoint_path=checkpoint_path,
+                devices=plan.candidate_devices,
+            )
+            rcp_pose_features = pose_cache.rcp
+            target_pose_features = pose_cache.target
+            del pose_cache
+
         with metrics.stage("model_load"):
             if prefetch is not None:
                 denoiser = prefetch.take_denoiser() if plan.needs_primary_denoiser else None
@@ -407,7 +417,8 @@ def generate_views(
                 vae = VaeExecutor.load(assets.vae, plan.candidate_devices)
 
         with metrics.stage("source_encode"):
-            source_video = _channels_last_source_layout(conditioning.load_source_tensor())
+            source_video = _channels_last_source_layout(source_decode.result())
+            del source_decode  # the future holds the float32 clip until the run ends otherwise
             source_latents = vae.encode(source_video)
             del source_video
         _merge_view_stage_peak(metrics, "source_encode", vae)
@@ -517,6 +528,8 @@ def generate_views(
             parallelism=parallelism,
         )
     finally:
+        # On an early error the decode must end before the caller removes the scratch video it reads.
+        source_decode_pool.shutdown(wait=True, cancel_futures=True)
         denoiser = None
         if vae is not None:
             vae.close()
