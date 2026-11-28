@@ -29,9 +29,11 @@ translation; none of our runs has one.
 
 import dataclasses
 import math
+import os
 import tempfile
 import time
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -54,6 +56,8 @@ AXIS_ANCHOR_TARGET: float = 16.0
 """Omega steps the axis anchor gives such a row (more: finer axis, but a larger swing when the axis turns)."""
 AXIS_ANCHOR_MAX_M: float = 50.0
 """Farthest axis anchor from the splat, file units."""
+ENCODE_THREADS: int = 16
+"""Threads that compress the encoder's streams (14 streams, most tried with and without delta coding)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,7 +194,8 @@ def encode_asog(params: Mapping[str, Tensor], fps: float, num_frames: int, setti
     options: AsogOptions = settings.options()
     runtime: TrigsRuntime = trigs_runtime(params, fps, num_frames)
     runtime.anchors = axis_anchors(runtime, options.qp)
-    with tempfile.TemporaryDirectory(prefix="open4dgs-asog-") as scratch:
+    # zlib and most NumPy kernels release the GIL: the streams compress while the encoder builds the next ones
+    with tempfile.TemporaryDirectory(prefix="open4dgs-asog-") as scratch, ThreadPoolExecutor(min(ENCODE_THREADS, os.cpu_count() or 1)) as pool:
         dst: Path = Path(scratch) / "clip.asog"
         stats: EncodeStats = encode_runtime(
             runtime,
@@ -201,6 +206,7 @@ def encode_asog(params: Mapping[str, Tensor], fps: float, num_frames: int, setti
             mbits=options.mbits,
             tbits=options.tbits,
             lsbits=options.lsbits,
+            executor=pool,
         )
         return dst.read_bytes(), stats
 
