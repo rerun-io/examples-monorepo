@@ -188,8 +188,6 @@ def test_steady_train_step_waits_on_the_host_at_most_three_times(monkeypatch: py
         pytest.skip("needs a CUDA GPU (gsplat rasterization, Mojo SSIM)")
     import warnings
 
-    caught: list[warnings.WarningMessage] = []
-
     class Bar:
         steps = 0
 
